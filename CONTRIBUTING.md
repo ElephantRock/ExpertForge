@@ -79,8 +79,27 @@ architectural decisions require explicit review before merge (collaboration §10
 ## 7. Validation
 
 Validation must be performed in the same session in which completion is claimed,
-and the actual command output must be reported — not asserted. The minimum
-validation set:
+and the actual command output must be reported — not asserted.
+
+### Environment bootstrap (first checkout / CI)
+
+```bash
+uv python install 3.11
+uv sync --locked
+```
+
+### Canonical checks (run all from a clean `uv sync --locked` environment)
+
+```bash
+uv sync --locked
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src tests
+uv run pytest
+uv run python -c "import expertforge"
+```
+
+### Minimum per-PR review set
 
 | Check | Command |
 |-------|---------|
@@ -89,13 +108,12 @@ validation set:
 | No secrets staged | `git diff --cached` (scan for tokens/keys/passwords) |
 | No ExpertOS content copied | path audit on `git diff --cached` (boundary is the schema/contract) |
 | Local HEAD pushed to origin | `git rev-parse HEAD` equals `origin/<branch>` |
-| Issue/PR template YAML parses | `python -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/ISSUE_TEMPLATE/*.yml')]"` (validates all templates in one runnable command) |
+| Issue/PR template YAML parses | `uv run --locked python -c "import yaml,glob; [yaml.safe_load(open(f, encoding='utf-8')) for f in sorted(glob.glob('.github/ISSUE_TEMPLATE/*.yml'))]"` (validates all templates; PyYAML is in the dev group) |
 
-Implementation/training PRs additionally restate their lint/format/test commands
-verbatim and respect the scientific baseline rules
-([doctrine/model-lineage.md](doctrine/model-lineage.md) §7). When executable
-schema/training tooling is added, the exact command and tool version will be
-recorded here and referenced from [AGENTS.md](AGENTS.md) §10.
+Implementation/training PRs restate their lint/format/test commands verbatim
+(the canonical set above) and respect the scientific baseline rules
+([doctrine/model-lineage.md](doctrine/model-lineage.md) §7). Dependency changes
+update both `pyproject.toml` and `uv.lock`; upgrades are explicit PRs.
 
 ## 8. Review policy
 
