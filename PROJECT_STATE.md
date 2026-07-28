@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #4 scaffold completed.
+Last updated: Milestone 0 in progress; #5 configuration system completed.
 
 ## Current milestone
 
@@ -41,18 +41,22 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#5 — M0.2 validated configuration resolution** — next dependency-ordered
-  implementation action (see #3 graph).
+- **#6 — M0.3 run identity and configuration fingerprints** — next
+  dependency-ordered implementation action. The configuration system (#5)
+  already emits stable canonical bytes suitable as fingerprint input.
 - **#13 — M0.10 test/CI harness** — may begin early in parallel to establish
   the harness that subsystem tests plug into.
-- #3 umbrella and #6–#14 (other than #4) are open and dependency-ordered.
-- **#4 — M0.1 repository and Python package scaffold — completed.** The scaffold
-  (package, uv-managed environment + committed lockfile, ruff+mypy+pytest
-  toolchain, directory layout, ignore rules, canonical commands) is on `main`.
+- #3 umbrella and #7–#14 (other than #5) are open and dependency-ordered.
+- **#4 — M0.1 repository and Python package scaffold — completed.**
+- **#5 — M0.2 validated configuration resolution — completed.** The typed,
+  frozen, validated configuration system (restricted YAML authoring format,
+  Pydantic v2 sections, dotted-path `--set` overrides, resolution envelope +
+  behavioral canonical bytes, `expertforge-config` CLI, committed fixture) is
+  on `main`.
 
 ## Open pull requests
 
-- None. The #4 scaffold PR merged.
+- None. The #5 configuration-system PR merged.
 
 ## Known blockers
 
@@ -68,12 +72,13 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#5 (validated configuration resolution)** — first dependency-ordered
-   implementation action after the scaffold.
+1. Begin **#6 (run identity and configuration fingerprints)** — the
+   configuration system already provides stable canonical bytes that can serve
+   as fingerprint input (Issue #5 decision).
 2. In parallel, **#13 (test/CI harness)** may start early to establish the
    harness that subsystem tests plug into.
-3. Proceed along the #3 dependency order: #5 → #6 → (#7, #9); #8 after #4 and
-   #5; #11 after #8; #12 after #5/#6/#7/#9/#10/#11; #14 last.
+3. Proceed along the #3 dependency order: #6 → (#7, #9); #8 after #4/#5; #11
+   after #8; #12 after #5/#6/#7/#9/#10/#11; #14 last.
 4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 

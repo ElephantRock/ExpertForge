@@ -1,0 +1,50 @@
+# Minimal smoke configuration (Issue #5 fixture).
+#
+# Exercises every required section with the smallest sensible values so that the
+# configuration system can be resolved, validated, and serialized from a clean
+# checkout without any model or dataset. This is NOT a training config — it
+# exists to validate the configuration substrate itself.
+
+format_version: 1
+
+run:
+  name: smoke-fixture
+  description: Minimal fixture validating the configuration system (#5).
+
+data:
+  dataset_id: fixture-tiny
+  split: train
+  seq_len: 64
+
+tokenizer:
+  tokenizer_id: fixture-byte
+  vocab_size: 256
+
+model:
+  dim: 64
+  n_layers: 2
+  n_heads: 2
+  ffn_dim: 128
+
+training:
+  seed: 7
+  tokens: 1024
+  batch_size: 4
+  lr: 0.0001
+
+evaluation:
+  eval_interval_tokens: 512
+
+checkpointing:
+  interval_tokens: 512
+
+logging:
+  log_interval_steps: 10
+  level: INFO
+
+artifacts:
+  dir: runs
+
+hardware:
+  device: auto
+  dtype: fp32

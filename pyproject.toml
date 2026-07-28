@@ -11,10 +11,18 @@ requires-python = ">=3.11,<3.14"
 license = { text = "Proprietary" }
 authors = [{ name = "ExpertForge contributors" }]
 keywords = ["llm", "moe", "training", "research"]
-# Milestone 0 has no runtime dependencies beyond the language model stack yet to
-# be selected. The dev toolchain is declared under [dependency-groups] so the
-# project itself stays dependency-light until later milestones require real deps.
-dependencies = []
+# Runtime dependencies. Pydantic and PyYAML are required by the validated
+# configuration system (Issue #5): pydantic for typed/frozen validation, PyYAML
+# for the restricted authoring-format loader. These are runtime infrastructure
+# every run needs, not dev-only tools.
+dependencies = [
+    "pydantic>=2.13,<3",
+    "pyyaml>=6.0.3,<7",
+]
+
+[project.scripts]
+# Configuration resolver CLI (Issue #5).
+expertforge-config = "expertforge.config.cli:main"
 
 [project.urls]
 Repository = "https://github.com/ElephantRock/ExpertForge"
@@ -34,10 +42,9 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pytest>=8.0",
-    # PyYAML is required by the mandatory per-PR template validator in
-    # CONTRIBUTING.md §7; it must be a synchronized dev dependency so the check
-    # runs in a clean `uv sync --locked` environment.
-    "pyyaml>=6.0",
+    # Type stubs for PyYAML (the runtime dep ships without stubs). Required so
+    # `mypy --strict` can type the restricted YAML loader (Issue #5 §2).
+    "types-pyyaml>=6.0",
 ]
 
 # ---------------------------------------------------------------------------
@@ -73,10 +80,15 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_return_any = true
 no_implicit_reexport = true
-# Third-party packages without stubs are scoped explicitly when they appear;
-# at scaffold time there are no such dependencies. Note: `ignore_missing_stubs`
-# is not a mypy option — leave stub handling to the strict defaults and scope
-# any future untyped-import relaxations with explicit per-module overrides.
+# Pydantic mypy plugin: lets mypy represent frozen models and extra="forbid"
+# semantics during static analysis (Issue #5 decision §2).
+plugins = ["pydantic.mypy"]
+
+# Pydantic plugin settings: treat dataclasses/models as written.
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
 
 # ---------------------------------------------------------------------------
 # pytest
