@@ -1,0 +1,60 @@
+name: Experiment
+description: Run a controlled experiment. Must state hypothesis, control, fixed constraints, and the decision the result will inform.
+labels: ["experiment"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Experiments must record configuration, manifest, and lightweight evidence
+        in GitHub. Large artifacts (datasets, checkpoints, traces) may live
+        outside GitHub but require provenance (doctrine §14).
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Execution environment
+      options:
+        - web-assistant
+        - local-assistant
+        - human
+        - joint
+    validations:
+      required: true
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: The claim this experiment will test.
+    validations:
+      required: true
+  - type: textarea
+    id: control
+    attributes:
+      label: Control
+      description: The baseline or comparison condition.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Fixed constraints
+      description: Model version, schema version, hardware, quantization, seeds, and any held fixed.
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision this informs
+      description: Which architectural, schema, or baseline decision will the result inform?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What evidence must be produced and recorded for this experiment to close?
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Current status

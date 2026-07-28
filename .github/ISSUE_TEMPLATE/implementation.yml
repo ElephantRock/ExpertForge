@@ -1,0 +1,51 @@
+name: Implementation
+description: Implement or change code/schema/configuration. Use for any substantive executable or structural change.
+labels: ["implementation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every substantive unit of work has a GitHub issue (doctrine §4).
+        Identify the execution environment and acceptance criteria clearly.
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Execution environment
+      options:
+        - web-assistant
+        - local-assistant
+        - human
+        - joint
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What this issue is meant to accomplish.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Affected files, systems, or schemas. Reference ExpertOS only via versioned schemas — do not copy internals.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How we know this is done. Include the exact validation commands that must pass.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Blocking issues, schemas, or external artifacts.
+  - type: textarea
+    id: status
+    attributes:
+      label: Current status
+      description: Not started / in progress / blocked. Update as work proceeds.

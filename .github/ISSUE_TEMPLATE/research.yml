@@ -1,0 +1,59 @@
+name: Research
+description: Investigate a question without committing to an implementation. Output is a report or decision record.
+labels: ["research"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Research issues produce evidence and interpretation, not necessarily code.
+        The result should be reproducible and should state hypothesis, control,
+        fixed constraints, observed result, and decision (doctrine §9).
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Execution environment
+      options:
+        - web-assistant
+        - local-assistant
+        - human
+        - joint
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: The specific question this research will answer.
+    validations:
+      required: true
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: Method
+      description: How the question will be investigated; what counts as evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Fixed constraints
+      description: Versions, schemas, hardware, and assumptions held fixed.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected output
+      description: A report, a decision record under doctrine/decisions/, and/or a schema proposal.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Current status

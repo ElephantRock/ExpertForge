@@ -1,0 +1,61 @@
+name: Decision
+description: Propose a durable architectural or process decision to be recorded under doctrine/decisions/.
+labels: ["decision"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Durable decisions require a record under doctrine/decisions/NNNN-<slug>.md
+        with: status, context, alternatives, decision, evidence, consequences,
+        reversal conditions (doctrine §11). Chat agreement alone is not a decision.
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Execution environment
+      options:
+        - web-assistant
+        - local-assistant
+        - human
+        - joint
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: The situation forcing a decision.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Each alternative and why it was rejected.
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Proposed decision
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Repository evidence, experiments, or prior decisions supporting this.
+    validations:
+      required: true
+  - type: textarea
+    id: consequences
+    attributes:
+      label: Consequences
+    validations:
+      required: true
+  - type: textarea
+    id: reversal
+    attributes:
+      label: Reversal conditions
+      description: Under what conditions would this decision be reconsidered?
+    validations:
+      required: true
