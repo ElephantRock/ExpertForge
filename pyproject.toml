@@ -34,6 +34,10 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pytest>=8.0",
+    # PyYAML is required by the mandatory per-PR template validator in
+    # CONTRIBUTING.md §7; it must be a synchronized dev dependency so the check
+    # runs in a clean `uv sync --locked` environment.
+    "pyyaml>=6.0",
 ]
 
 # ---------------------------------------------------------------------------

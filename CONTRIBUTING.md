@@ -108,7 +108,7 @@ uv run python -c "import expertforge"
 | No secrets staged | `git diff --cached` (scan for tokens/keys/passwords) |
 | No ExpertOS content copied | path audit on `git diff --cached` (boundary is the schema/contract) |
 | Local HEAD pushed to origin | `git rev-parse HEAD` equals `origin/<branch>` |
-| Issue/PR template YAML parses | `uv run python -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/ISSUE_TEMPLATE/*.yml')]"` (validates all templates in one runnable command) |
+| Issue/PR template YAML parses | `uv run --locked python -c "import yaml,glob; [yaml.safe_load(open(f, encoding='utf-8')) for f in sorted(glob.glob('.github/ISSUE_TEMPLATE/*.yml'))]"` (validates all templates; PyYAML is in the dev group) |
 
 Implementation/training PRs restate their lint/format/test commands verbatim
 (the canonical set above) and respect the scientific baseline rules

@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 hierarchy created (#3–#14); #4 scaffold in progress.
+Last updated: Milestone 0 in progress; #4 scaffold completed.
 
 ## Current milestone
 
@@ -41,18 +41,23 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#4 — M0.1 repository and Python package scaffold** — current implementation
-  action.
-- #3 umbrella and #5–#14 child issues are open and dependency-ordered (see #3).
+- **#5 — M0.2 validated configuration resolution** — next dependency-ordered
+  implementation action (see #3 graph).
+- **#13 — M0.10 test/CI harness** — may begin early in parallel to establish
+  the harness that subsystem tests plug into.
+- #3 umbrella and #6–#14 (other than #4) are open and dependency-ordered.
+- **#4 — M0.1 repository and Python package scaffold — completed.** The scaffold
+  (package, uv-managed environment + committed lockfile, ruff+mypy+pytest
+  toolchain, directory layout, ignore rules, canonical commands) is on `main`.
 
 ## Open pull requests
 
-- PR for #4 on `local/4-repository-scaffold` (the scaffold: package, toolchain,
-  lockfile, directory layout, ignore rules, doc updates).
+- None. The #4 scaffold PR merged.
 
 ## Known blockers
 
-- None.
+- None. After #5 (configuration) and #6 (run identity), the foundation layer is
+  complete and #7/#9 can proceed; #8 may proceed after #4 and #5.
 
 ## Latest accepted experiment
 
@@ -63,10 +68,13 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Review and merge the #4 scaffold PR.
-2. Proceed along the dependency order: #5 configuration → #6 run identity →
-   (#7, #9); #8 seed/RNG; #13 test harness may proceed early.
-3. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
+1. Begin **#5 (validated configuration resolution)** — first dependency-ordered
+   implementation action after the scaffold.
+2. In parallel, **#13 (test/CI harness)** may start early to establish the
+   harness that subsystem tests plug into.
+3. Proceed along the #3 dependency order: #5 → #6 → (#7, #9); #8 after #4 and
+   #5; #11 after #8; #12 after #5/#6/#7/#9/#10/#11; #14 last.
+4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
 ## Relationship to ExpertOS
