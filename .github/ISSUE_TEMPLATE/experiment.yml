@@ -19,6 +19,45 @@ body:
         - joint
     validations:
       required: true
+  - type: dropdown
+    id: maturity_stage
+    attributes:
+      label: Maturity stage
+      description: Top-level platform capability/integration stage this experiment targets (model-lineage.md §2).
+      options:
+        - Milestone 0 (experimental substrate)
+        - D0 (minimal dense baseline)
+        - D1 (optimized dense baseline)
+        - D2 (efficient dense variants)
+        - M0 (minimal MoE)
+        - M1 (balanced-routing MoE)
+        - M2 (instrumented MoE)
+        - M3 (locality-trained MoE)
+        - M4 (structured-expert MoE)
+        - M5 (native ExpertOS-aware MoE)
+        - none/not-applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: research_family
+    attributes:
+      label: Research family
+      description: Orthogonal research family isolating one architectural mechanism (model-lineage.md §3). Use none/not-applicable for substrate/systems work outside a mechanism family.
+      options:
+        - F0 (exact-attention dense baseline)
+        - F1 (additive linear-attention memory)
+        - F2 (delta-rule memory)
+        - F3 (gated recurrent memory)
+        - F4 (fine-grained/KDA-style recurrent memory)
+        - F5 (hybrid sequence memory)
+        - F6 (depth-selective residual memory / AttnRes)
+        - F7 (conventional sparse MoE)
+        - F8 (latent and structured experts)
+        - F9 (deployment-aware expert routing)
+        - F10 (integrated memory-system interactions)
+        - none/not-applicable
+    validations:
+      required: true
   - type: textarea
     id: hypothesis
     attributes:

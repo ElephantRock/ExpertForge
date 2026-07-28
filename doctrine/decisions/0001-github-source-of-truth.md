@@ -5,8 +5,8 @@
 
 ## Context
 
-ExpertForge is established as a distinct project from ExpertOS, with its own
-specification, doctrine, schema, and decision authority. The project will be
+ExpertForge is a complete language-model research and engineering project,
+distinct from ExpertOS (the external runtime/control-plane counterpart). It is
 worked on by multiple contributors — a web assistant, a local assistant, and a
 human operator — operating from different contexts (chat, local working trees,
 assistant memory). Without a single source of truth, these contexts will
