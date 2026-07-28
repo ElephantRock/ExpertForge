@@ -92,7 +92,7 @@ Minimum validation for a doctrine/documentation change:
 
 Implementation/training changes must additionally state the exact commands used
 for linting, formatting, and testing, and must respect the scientific baseline
-rules ([doctrine/model-lineage.md](doctrine/model-lineage.md) §3). Research
+rules ([doctrine/model-lineage.md](doctrine/model-lineage.md) §7). Research
 changes must state hypothesis, control, fixed constraints, observed result, and
 decision ([doctrine/evaluation-and-experiments.md](doctrine/evaluation-and-experiments.md)).
 

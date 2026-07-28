@@ -89,11 +89,11 @@ validation set:
 | No secrets staged | `git diff --cached` (scan for tokens/keys/passwords) |
 | No ExpertOS content copied | path audit on `git diff --cached` (boundary is the schema/contract) |
 | Local HEAD pushed to origin | `git rev-parse HEAD` equals `origin/<branch>` |
-| Issue/PR template YAML parses | `python -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))"` per template |
+| Issue/PR template YAML parses | `python -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/ISSUE_TEMPLATE/*.yml')]"` (validates all templates in one runnable command) |
 
 Implementation/training PRs additionally restate their lint/format/test commands
 verbatim and respect the scientific baseline rules
-([doctrine/model-lineage.md](doctrine/model-lineage.md) §3). When executable
+([doctrine/model-lineage.md](doctrine/model-lineage.md) §7). When executable
 schema/training tooling is added, the exact command and tool version will be
 recorded here and referenced from [AGENTS.md](AGENTS.md) §10.
 

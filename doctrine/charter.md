@@ -2,7 +2,10 @@
 
 **Status:** Normative
 **Applies to:** ExpertForge repository and all contributors
-**Source:** Issue #1 founding technical specification (authoritative)
+**Source:** Founding technical specification, originally recorded in Issue #1
+and its comments (provenance and implementation source for the founding PR). On
+merge, this committed charter on `main` is authoritative; the issue is retained
+as provenance and no longer has precedence over `main`.
 
 ## 1. Project identity
 
@@ -128,7 +131,7 @@ satisfied.
   is complete.
 - No deployment-aware objective is treated as a core result before a stable
   ordinary MoE exists (see deployment-aware training policy,
-  [deployment-and-runtime-codesign.md](deployment-and-runtime-codesign.md) §16).
+  [deployment-and-runtime-codesign.md](deployment-and-runtime-codesign.md) §1).
 
 ## 7. Canonical state
 
@@ -170,8 +173,8 @@ The final architecture is not predetermined.
 ```
 
 No technique is entitled to inclusion. Every technique must earn promotion
-through controlled evidence (see
-[evaluation-and-experiments.md](evaluation-and-experiments.md) §14).
+through controlled evidence (see promotion criteria,
+[evaluation-and-experiments.md](evaluation-and-experiments.md) §3).
 
 ## 10. Founding rule
 
@@ -185,14 +188,34 @@ Main decides.
 GitHub remembers.
 ```
 
+## 11. Controlling principle: maturity stages vs. research families
+
+ExpertForge separates two orthogonal lineage axes (see
+[model-lineage.md](model-lineage.md)):
+
+- **maturity stages (D0–M5)** describe platform capability and integration
+  level;
+- **research families (F0–F10)** isolate individual architectural mechanisms —
+  exact attention, linear/delta/gated/fine-grained recurrent memory, hybrid
+  sequence memory, depth-selective residual memory, conventional MoE, latent
+  and structured experts, deployment-aware routing, and integrated
+  memory-system interactions.
+
+**No monolithic "K3-like" architecture is implemented as a single lineage
+step.** Each mechanism must first exist as a separately controlled research
+family. No compound model combining novel families may be promoted before each
+constituent mechanism passes independently and the combined experiment has
+attribution-preserving interaction ablations (model-lineage §4).
+
 ## Doctrine map
 
 | Founding-spec section(s) | File |
 |---|---|
 | §1–7, §21, §22 | `doctrine/charter.md` (this file) |
-| §6 (dense architecture policy), §7 (D0–M5 lineage), §8 (scientific baseline rules) | `doctrine/model-lineage.md` |
+| §6 dense architecture policy, §7 D0–M5 maturity stages, §8 scientific baseline rules, F0–F10 research families | `doctrine/model-lineage.md` |
 | §9 data, §10 tokenizer, §11 training/checkpoint | `doctrine/data-and-training.md` |
 | §12 evaluation, §13 experiment, §14 promotion, §15 kill | `doctrine/evaluation-and-experiments.md` |
 | §16 deployment-aware training, §17 ExpertOS contract, §18 evidence loop | `doctrine/deployment-and-runtime-codesign.md` |
 | §19 repository layout, §20 Milestone 0 | `AGENTS.md`, `PROJECT_STATE.md` |
 | Source-of-truth + workflow | `doctrine/collaboration.md`, `CONTRIBUTING.md` |
+| D0 architecture decisions | `doctrine/decisions/0002-initial-d0-architecture.md` |

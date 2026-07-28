@@ -1,11 +1,39 @@
 # Model Lineage Policy
 
 **Status:** Normative
-**Source:** Issue #1 founding technical specification §6, §7, §8.
+**Source:** Founding technical specification §6, §7, §8 (maturity stages and
+dense policy) and the canonical research-family decision §F0–F10 (Issue #1
+comment `5109231939`). On merge, this committed policy on `main` is
+authoritative.
 
 The platform is continuous; models are controlled variants. The mature
-architecture is not predetermined. Each model below is a milestone with entry
-and exit criteria, not a fixed product.
+architecture is not predetermined. ExpertForge distinguishes **maturity stages**
+(platform capability and integration level) from **research families**
+(orthogonal experimental branches that isolate individual architectural
+mechanisms).
+
+## 0. Lineage structure
+
+The lineage has two orthogonal axes:
+
+- **Maturity stages (D0–M5)** describe platform capability and integration
+  level. They are top-level milestones with entry and exit criteria.
+- **Research families (F0–F10)** isolate individual architectural mechanisms.
+  Each family has its own baseline, hypothesis, metrics, entry/exit criteria,
+  kill criteria, and combination eligibility.
+
+Definitions used throughout this document:
+
+- **maturity stages** describe platform capability and integration level;
+- **research families** isolate individual architectural mechanisms;
+- **model variants** are concrete configurations produced within a family;
+- **experiments** compare variants under a frozen protocol;
+- **promotion** occurs only through evidence, not because a mechanism appears in
+  a target architecture.
+
+**No monolithic "K3-like" architecture will be implemented as a single lineage
+step.** Each mechanism must first exist as a separately controlled research
+family.
 
 ## 1. Dense architecture policy (D0)
 
@@ -28,7 +56,12 @@ objective: next-token prediction
 The intended initial scale is approximately 20–100M parameters, with 50–100M as
 the first major training target.
 
-## 2. Model lineage
+These D0 component choices are durable architecture decisions recorded in
+`doctrine/decisions/0002-initial-d0-architecture.md`. Each component remains
+replaceable only through a controlled family experiment (e.g., a D2-family or
+relevant F-family experiment), never by unrecorded substitution.
+
+## 2. Maturity stages (D0–M5)
 
 ### D0 — Minimal dense baseline
 
@@ -83,13 +116,17 @@ changes without evidence.
 
 ### D2 — Efficient dense variants
 
-**Purpose:** Test architecture-level dense efficiency techniques.
+**Purpose:** Test architecture-level dense efficiency and memory-mechanism
+techniques. D2 is the maturity stage within which the dense research families
+(F1–F6) are exercised; the order within D2 is evidence-driven, not an obligation
+to promote every family.
 
 **Entry criteria:** Stable D1 and frozen evaluation protocol.
 
 **Candidate work:** grouped-query attention, sliding-window attention,
 depth/width allocation, parameter sharing, alternative positional encodings,
-feed-forward sizing, and normalization variants.
+feed-forward sizing, normalization variants, and the recurrent/exact/hybrid
+memory mechanisms studied under F1–F6.
 
 **Exit criteria:**
 
@@ -232,7 +269,258 @@ interoperability schemas.
 - schemas and compatibility rules are versioned;
 - the result survives controlled ablation and review.
 
-## 3. Scientific baseline rules
+## 3. Research families (F0–F10)
+
+Research families are orthogonal experimental branches that isolate individual
+architectural mechanisms. Each family has its own baseline, hypothesis,
+metrics, entry/exit criteria, kill criteria, and combination eligibility. No
+two novel families may be combined into a promoted baseline without satisfying
+the combination gate (§4).
+
+### F0 — Exact-attention dense baseline
+
+**Purpose:** Establish the semantic and systems control against which later
+memory mechanisms are compared.
+
+Includes:
+
+- standard causal softmax attention;
+- conventional KV caching for autoregressive inference;
+- D0 correctness and reproducibility baseline;
+- D1 systems-only optimizations such as FlashAttention, fused kernels,
+  compilation, activation checkpointing, and improved data loading.
+
+**Rule:** systems optimizations that preserve model semantics belong here and
+must not be confused with architectural memory changes.
+
+### F1 — Additive linear-attention memory
+
+**Purpose:** Isolate the effect of replacing explicit token-addressable KV
+memory with a fixed-size recurrent state.
+
+Includes:
+
+- feature-map linear attention;
+- additive state updates;
+- recurrent and chunkwise implementations;
+- state-capacity and interference measurements.
+
+**Control:** matched dense softmax model and, where possible, matched parameter
+count, active computation, sequence length, and training-token budget.
+
+### F2 — Delta-rule memory
+
+**Purpose:** Measure whether targeted corrective writes improve finite-state
+associative memory over purely additive updates.
+
+Includes:
+
+- DeltaNet-style read-before-write correction;
+- write-strength ablations;
+- associative recall and interference tests;
+- recurrent versus chunkwise-equivalent implementations.
+
+**Dependency:** F1 must be correct and characterized before F2 begins.
+
+### F3 — Gated recurrent memory
+
+**Purpose:** Isolate the value and cost of explicit forgetting.
+
+Includes:
+
+- scalar decay or retention gates;
+- DeltaNet plus gating;
+- context-switch and stale-memory tests;
+- write/forget interaction ablations.
+
+**Dependency:** compare directly against F2 under the same state size and budget.
+
+### F4 — Fine-grained recurrent memory
+
+**Purpose:** Test whether channel-wise or otherwise fine-grained decay improves
+use of finite recurrent state.
+
+Includes:
+
+- KDA-style vector or channel-wise gating;
+- gate-granularity ablations;
+- state-component survival analysis;
+- stability, saturation, and effective-capacity measurement.
+
+**Dependency:** F3 must establish the scalar-gated control.
+
+### F5 — Hybrid sequence memory
+
+**Purpose:** Test combinations of compressed recurrent memory and periodic exact
+retrieval.
+
+Includes:
+
+- alternating or interleaved recurrent-memory and exact-attention layers;
+- ratio and placement ablations;
+- KDA/MLA-like hybrid structures without assuming any specific external
+  implementation;
+- quality, KV-cache, state-memory, prefill, and decode trade-offs.
+
+**Dependency:** F0 and the relevant recurrent-memory family must each pass
+independently before combination.
+
+### F6 — Depth-selective residual memory
+
+**Purpose:** Isolate learned retrieval across network depth from changes to
+sequence memory or expert routing.
+
+Includes:
+
+- AttnRes-style learned weighting over prior layer or block representations;
+- blockwise versus full-depth variants;
+- representation-age and selection-entropy measurements;
+- gradient-flow and memory-overhead analysis.
+
+**Rule:** first evaluate F6 on a dense exact-attention baseline. Do not
+initially combine it with recurrent attention or MoE.
+
+### F7 — Conventional sparse MoE
+
+**Purpose:** Establish the sparse-capacity control.
+
+Includes:
+
+- M0 minimal top-1 or top-2 routing;
+- M1 balance and capacity-policy experiments;
+- M2 instrumentation and expert intervention;
+- ordinary full-width experts before latent or shared-structure variants.
+
+**Control:** matched dense baseline with clearly normalized total parameters,
+active parameters, computation, memory, and token budget.
+
+### F8 — Latent and structured experts
+
+**Purpose:** Isolate expert-representation changes from sparse routing itself.
+
+Includes:
+
+- lower-dimensional latent expert computation;
+- projection-cost accounting;
+- shared-base-plus-delta experts;
+- expert families, clustering, and low-rank expert structure;
+- resident bytes, transferred bytes, kernel cost, and specialization quality.
+
+**Dependency:** F7 must provide a stable and instrumented conventional-MoE
+control.
+
+### F9 — Deployment-aware expert routing
+
+**Purpose:** Shape routing behavior for constrained hardware without conflating
+the effect with expert representation changes.
+
+Includes:
+
+- locality regularization;
+- expert-switching penalties;
+- working-set and residency-budget objectives;
+- route-predictability objectives;
+- bandwidth, placement, and transfer-cost penalties.
+
+**Dependency:** begin with conventional experts from F7. Structured experts from
+F8 may be combined only in a later factorial experiment.
+
+### F10 — Integrated memory-system interactions
+
+**Purpose:** Study interactions among sequence memory, parametric memory, and
+depth memory only after each mechanism is independently characterized.
+
+Candidate interactions:
+
+- recurrent-memory gate × MoE route;
+- exact-retrieval contribution × MoE route;
+- depth-selection weight × expert route;
+- recurrent-memory gate × depth-selection weight;
+- hybrid attention × structured expert locality.
+
+This family is not an early implementation target. It corresponds to late M4/M5
+research and requires explicit factorial or staged ablations.
+
+## 4. Combination gate
+
+No two novel families may be combined into a promoted baseline until:
+
+1. each has a validated implementation;
+2. each has been compared independently against the same declared control;
+3. each has a documented positive, negative, or null result;
+4. the interaction has a separate hypothesis;
+5. the combined experiment includes ablations that can attribute the result;
+6. the added complexity is justified by a measured effect.
+
+A failed or null family remains in the lineage as evidence and is not silently
+folded into another architecture. No compound K3-like model may be promoted
+before each constituent mechanism passes independently and the combined
+experiment has attribution-preserving interaction ablations.
+
+## 5. Experimental contract for every family
+
+Every research family must define:
+
+```text
+family identifier
+research question
+falsifiable hypothesis
+semantic control
+systems control
+independent variable
+dependent variables
+fixed constraints
+implementation-equivalence tests
+quality metrics
+systems metrics
+minimum useful effect
+failure threshold
+kill criterion
+replication policy
+combination eligibility
+```
+
+At minimum, report:
+
+```text
+validation loss and task quality
+training stability and convergence
+training tokens and effective batch
+parameter count and active parameter count
+training FLOPs or a declared proxy
+wall-clock throughput
+prefill latency
+decode latency
+peak accelerator memory
+host memory
+persistent inference state
+memory-transfer volume where measurable
+kernel/runtime limitations
+```
+
+Mechanism-specific instrumentation is additionally required.
+
+## 6. Mapping: maturity stages ↔ research families
+
+The D0–M5 labels remain top-level maturity stages; research families are
+orthogonal experimental branches:
+
+```text
+D0  exact-attention dense correctness baseline (F0)
+D1  systems-optimized dense baseline (F0)
+D2  controlled dense architecture families (F1–F6)
+M0  minimal conventional MoE (F7)
+M1  balanced and stable routing (F7)
+M2  instrumented and intervention-capable MoE (F7)
+M3  deployment-aware routing (F9)
+M4  latent and structured experts (F8), plus approved interactions
+M5  ExpertOS-aware integrated model/runtime co-design (F10)
+```
+
+The order within D2 is evidence-driven, not an obligation to promote every
+family.
+
+## 7. Scientific baseline rules
 
 Every canonical baseline must freeze:
 
@@ -250,7 +538,7 @@ Every canonical baseline must freeze:
 Baselines may be superseded but never retroactively modified. Prior baselines
 must remain reproducible.
 
-## 4. Baseline-change review
+## 8. Baseline-change review
 
 Any change to a referenced baseline or lineage is a baseline change and requires
 explicit review before merge (collaboration §10), plus a decision record under
