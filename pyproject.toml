@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "expertforge"
+version = "0.0.1"
+description = "ExpertForge — reproducible language-model research and engineering project."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "ExpertForge contributors" }]
+keywords = ["llm", "moe", "training", "research"]
+# Milestone 0 has no runtime dependencies beyond the language model stack yet to
+# be selected. The dev toolchain is declared under [dependency-groups] so the
+# project itself stays dependency-light until later milestones require real deps.
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/ElephantRock/ExpertForge"
+
+# Tell hatchling where the import package lives (src/ layout).
+[tool.hatch.build.targets.wheel]
+packages = ["src/expertforge"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "pyproject.toml"]
+
+# ---------------------------------------------------------------------------
+# Dependency groups (managed by uv; recorded in uv.lock)
+# ---------------------------------------------------------------------------
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.0",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff: formatter + linter + import organizer (single style engine)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["doctrine", "reports", "experiments"]
+
+[tool.ruff.lint]
+# Start with a conservative, broadly-accepted rule set.
+# pyflakes (F), pycodestyle (E,W), isort (I), pyupgrade (UP), bugbear (B).
+select = ["E", "W", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # line length handled by the formatter
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["expertforge"]
+
+[tool.ruff.format]
+# Defaults are the canonical style; no overrides.
+
+# ---------------------------------------------------------------------------
+# mypy: static type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+packages = ["src.expertforge"]
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_reexport = true
+# Third-party packages without stubs are scoped explicitly when they appear;
+# at scaffold time there are no such dependencies. Note: `ignore_missing_stubs`
+# is not a mypy option — leave stub handling to the strict defaults and scope
+# any future untyped-import relaxations with explicit per-module overrides.
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["src"]

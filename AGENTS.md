@@ -149,7 +149,36 @@ provenance is not a canonical project result (collaboration §14).
 
 ## 10. Commands
 
-The authoritative validation commands are listed in CONTRIBUTING.md §Validation
-and must be re-stated verbatim in each implementation PR. When executable
-tooling is added (schema validator, training entrypoint, test runner), the exact
-command and version will be recorded there and referenced here.
+Environment and toolchain are managed by **uv** (Python ≥3.11,<3.14, baseline
+3.11). The repository owns its own `.venv` and a committed `uv.lock`; never
+reuse another project's environment (e.g. `C:\ExpertOS\.venv`).
+
+Bootstrap (first checkout / CI):
+
+```bash
+uv python install 3.11
+uv sync --locked
+```
+
+Canonical checks (re-state verbatim in every implementation PR, run from a clean
+`uv sync --locked` environment):
+
+```bash
+uv sync --locked
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src tests
+uv run pytest
+uv run python -c "import expertforge"
+```
+
+Developer fix commands:
+
+```bash
+uv run ruff check --fix .
+uv run ruff format .
+```
+
+Dependency changes must update **both** `pyproject.toml` and `uv.lock`, and
+upgrades are explicit PRs (no incidental resolution drift). The full canonical
+set is also listed in CONTRIBUTING.md §Validation; keep the two in sync.
