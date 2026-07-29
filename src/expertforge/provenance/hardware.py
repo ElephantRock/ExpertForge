@@ -1,15 +1,8 @@
-"""Optional hardware/topology providers (Issue #7 decision: explicit degradation).
+"""Optional hardware/topology providers with typed models (Issue #7 review item 4).
 
-Optional fields use typed statuses: ``available``, ``unavailable``,
-``not_applicable``, ``error``, ``redacted``. A missing accelerator detector
-must not break CPU execution. Detector errors use stable sanitized reason codes;
-raw exception messages and command output are not recorded. V1 adds no mandatory
-runtime dependency; ``nvidia-smi`` is an optional external detector. Precision
-support is recorded only when a trusted detector reports it — never inferred
-from a GPU model name.
-
-No hardware serials, MAC addresses, device UUIDs, or coordinator addresses/IPs
-are ever recorded.
+Returns frozen typed models (``AcceleratorInfo``, ``TopologyInfo``,
+``DeviceInfo``). Device ordinals are stable; memory is typed numeric.
+Accelerator-framework package versions are identified. No serials/MAC/UUIDs/IPs.
 """
 
 from __future__ import annotations
@@ -17,6 +10,12 @@ from __future__ import annotations
 import subprocess
 from enum import StrEnum
 from typing import Any
+
+from expertforge.provenance.record import (
+    AcceleratorInfo,
+    DeviceInfo,
+    TopologyInfo,
+)
 
 __all__ = [
     "FieldStatus",
@@ -27,8 +26,6 @@ __all__ = [
 
 
 class FieldStatus(StrEnum):
-    """Typed status for optional provenance fields."""
-
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
     NOT_APPLICABLE = "not_applicable"
@@ -37,7 +34,6 @@ class FieldStatus(StrEnum):
 
 
 def _stable_reason(exc: BaseException) -> str:
-    """Reduce an exception to a stable, non-leaking reason code."""
     if isinstance(exc, FileNotFoundError):
         return "not_found"
     if isinstance(exc, subprocess.TimeoutExpired):
@@ -47,19 +43,27 @@ def _stable_reason(exc: BaseException) -> str:
     return type(exc).__name__.lower()
 
 
-def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0) -> dict[str, Any]:
+def _detect_framework_version(framework: str) -> str | None:
+    """Best-effort accelerator-framework package version via importlib.metadata."""
+    try:
+        from importlib import metadata as md
+
+        return md.version(framework)
+    except Exception:
+        return None
+
+
+def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0) -> AcceleratorInfo:
     """Best-effort accelerator discovery via ``nvidia-smi``.
 
-    Returns ``{"status": "unavailable"}`` when the detector is absent or the
-    host is CPU-only. Detector failures return ``{"status": "error", "reason":
-    <stable code>}``. Records only: device count, model name, memory total, and
-    driver/CUDA versions — never serials, MACs, UUIDs, or raw output.
+    Queries per-device index/name/memory/driver and derives count from validated
+    rows. Devices are normalized by ordinal. No serials/MAC/UUIDs.
     """
     try:
         result = subprocess.run(
             [
                 nvidia_smi,
-                "--query-gpu=count,name,memory.total,driver_version",
+                "--query-gpu=index,name,memory.total,driver_version",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -67,99 +71,139 @@ def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0)
             check=False,
         )
     except FileNotFoundError:
-        return {"status": FieldStatus.UNAVAILABLE.value}
+        return AcceleratorInfo(status=FieldStatus.UNAVAILABLE.value)
     except (subprocess.SubprocessError, OSError) as e:
-        return {"status": FieldStatus.ERROR.value, "reason": _stable_reason(e)}
+        return AcceleratorInfo(status=FieldStatus.ERROR.value, reason=_stable_reason(e))
 
     if result.returncode != 0:
-        return {"status": FieldStatus.UNAVAILABLE.value}
+        return AcceleratorInfo(status=FieldStatus.UNAVAILABLE.value)
 
-    # Parse CSV lines: each GPU is "count,name,memory,driver". Take the first as
-    # representative; record the device count separately.
     try:
         lines = result.stdout.decode("utf-8", errors="replace").strip().splitlines()
     except (UnicodeDecodeError, OSError):
-        return {"status": FieldStatus.ERROR.value, "reason": "decode_error"}
+        return AcceleratorInfo(status=FieldStatus.ERROR.value, reason="decode_error")
     if not lines:
-        return {"status": FieldStatus.UNAVAILABLE.value}
+        return AcceleratorInfo(status=FieldStatus.UNAVAILABLE.value)
 
-    devices: list[dict[str, Any]] = []
+    devices: list[DeviceInfo] = []
     for line in lines:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 4:
             continue
+        try:
+            ordinal = int(parts[0])
+        except ValueError:
+            continue
+        try:
+            mem = int(parts[2])
+        except ValueError:
+            mem = None
         devices.append(
-            {
-                # Model name only — no serial/UUID/MAC. Precision is NOT inferred
-                # from the name; it requires a trusted detector (deferred).
-                "model": parts[1],
-                "memory_total_mib": parts[2],
-                "driver_version": parts[3],
-            }
+            DeviceInfo(
+                ordinal=ordinal,
+                model=parts[1],
+                memory_total_mib=mem,
+                driver_version=parts[3],
+            )
         )
     if not devices:
-        return {"status": FieldStatus.UNAVAILABLE.value}
-    # CUDA/runtime version: query separately; degrade if unavailable.
-    cuda = _query_cuda_version(nvidia_smi, timeout)
-    return {
-        "status": FieldStatus.AVAILABLE.value,
-        "framework": "cuda",
-        "device_count": len(devices),
-        "devices": devices,
-        "cuda_version": cuda,
-    }
+        return AcceleratorInfo(status=FieldStatus.UNAVAILABLE.value)
+
+    # Sort by ordinal for deterministic ordering.
+    devices.sort(key=lambda d: d.ordinal)
+    fw_version = _detect_framework_version("nvidia-cuda-runtime-cu12")
+    return AcceleratorInfo(
+        status=FieldStatus.AVAILABLE.value,
+        framework="cuda",
+        framework_version=fw_version,
+        device_count=len(devices),
+        devices=tuple(devices),
+    )
 
 
-def _query_cuda_version(nvidia_smi: str, timeout: float) -> dict[str, Any]:
-    """Best-effort CUDA version query; degrades to unavailable."""
-    try:
-        result = subprocess.run(
-            [nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"],
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return {"status": FieldStatus.UNAVAILABLE.value}
-    if result.returncode != 0:
-        return {"status": FieldStatus.UNAVAILABLE.value}
-    # nvidia-smi does not directly report CUDA version in query-gpu; rely on
-    # the driver version already captured. Mark CUDA as not directly reported.
-    return {"status": FieldStatus.NOT_APPLICABLE.value, "reason": "not_directly_reported"}
+# Topology environment allowlist — a narrow set of env vars that are safe to
+# read for rank/world_size detection.
+_TOPO_ENV_ALLOWLIST = {
+    "RANK": int,
+    "WORLD_SIZE": int,
+    "LOCAL_RANK": int,
+    "LOCAL_WORLD_SIZE": int,
+    "NODE_RANK": int,
+    "NNODES": int,
+}
+
+
+def _detect_topology_from_env() -> dict[str, int]:
+    """Read a narrow allowlist of topology env vars (no coordinator addresses)."""
+    detected: dict[str, int] = {}
+    import os
+
+    for key, caster in _TOPO_ENV_ALLOWLIST.items():
+        val = os.environ.get(key)
+        if val is not None:
+            try:
+                detected[key] = caster(val)
+            except ValueError:
+                pass
+    return detected
 
 
 def capture_topology(
     *,
     rank: int | None = None,
     world_size: int | None = None,
-) -> dict[str, Any]:
+    local_rank: int | None = None,
+    node_count: int | None = None,
+    backend: str | None = None,
+) -> TopologyInfo:
     """Capture distributed topology.
 
-    With no explicit input, returns ``not_applicable`` (single-process). Explicit
-    ``rank``/``world_size`` are recorded; coordinator addresses/IPs never are.
+    Explicit input takes precedence; then the narrow environment allowlist is
+    consulted. No coordinator addresses or IPs are recorded.
     """
-    if rank is None and world_size is None:
-        return {"status": FieldStatus.NOT_APPLICABLE.value}
-    if rank is None or world_size is None:
-        return {
-            "status": FieldStatus.ERROR.value,
-            "reason": "rank_and_world_size_required_together",
-        }
-    return {
-        "status": FieldStatus.AVAILABLE.value,
-        "rank": rank,
-        "world_size": world_size,
-    }
+    env = _detect_topology_from_env()
+
+    resolved_rank = rank if rank is not None else env.get("RANK")
+    resolved_world = world_size if world_size is not None else env.get("WORLD_SIZE")
+    resolved_local_rank = local_rank if local_rank is not None else env.get("LOCAL_RANK")
+    resolved_nodes = node_count if node_count is not None else env.get("NNODES")
+
+    if resolved_rank is None and resolved_world is None and not env:
+        return TopologyInfo(status=FieldStatus.NOT_APPLICABLE.value)
+
+    if (resolved_rank is not None) != (resolved_world is not None):
+        return TopologyInfo(
+            status=FieldStatus.ERROR.value,
+            reason="rank_and_world_size_required_together",
+        )
+
+    return TopologyInfo(
+        status=FieldStatus.AVAILABLE.value,
+        rank=resolved_rank,
+        local_rank=resolved_local_rank,
+        world_size=resolved_world,
+        node_count=resolved_nodes or 1,
+        backend=backend,
+    )
 
 
 def capture_hardware(
     *,
     rank: int | None = None,
     world_size: int | None = None,
+    local_rank: int | None = None,
+    node_count: int | None = None,
+    backend: str | None = None,
     nvidia_smi: str = "nvidia-smi",
 ) -> dict[str, Any]:
     """Aggregate hardware + topology capture."""
     return {
         "accelerator": capture_accelerator(nvidia_smi=nvidia_smi),
-        "topology": capture_topology(rank=rank, world_size=world_size),
+        "topology": capture_topology(
+            rank=rank,
+            world_size=world_size,
+            local_rank=local_rank,
+            node_count=node_count,
+            backend=backend,
+        ),
     }

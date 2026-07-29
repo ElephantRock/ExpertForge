@@ -12,7 +12,6 @@ from pathlib import Path
 
 from expertforge.config.resolve import resolve_config
 from expertforge.identity.emit import emit_attempt_identity
-from expertforge.provenance.hardware import capture_hardware
 from expertforge.provenance.record import ProvenanceRecord
 from expertforge.provenance.software import capture_software_environment
 from expertforge.provenance.summary import format_provenance_summary
@@ -50,15 +49,16 @@ class TestProvenanceSummary:
         assert "2026" in text
 
     def test_summary_with_software_and_hardware(self, tmp_path: Path) -> None:
+        from expertforge.provenance.hardware import capture_accelerator, capture_topology
+
         rec = _record(
             tmp_path,
             software=capture_software_environment(),
-            hardware=capture_hardware(),
+            hardware=capture_accelerator(nvidia_smi="/nonexistent/nvidia-smi"),
+            topology=capture_topology(),
         )
         text = format_provenance_summary(rec)
-        # Software section present.
         assert "python" in text.lower()
-        # Hardware status surfaced (available/unavailable/etc).
         assert "accelerator" in text.lower()
 
     def test_summary_degrades_when_optional_sections_absent(self, tmp_path: Path) -> None:
