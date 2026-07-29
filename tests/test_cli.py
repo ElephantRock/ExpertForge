@@ -180,21 +180,43 @@ class TestCLIInputErrorsAreCleanDiagnostics:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Force the FINAL envelope record to fail rendering — not
-        # canonicalization. The resolved_config is made to carry a value
-        # (a set) that json.dump inside _emit cannot serialize, so the failure
-        # happens DURING final-record rendering, after canonical_bytes succeeds.
+        # Force the FINAL envelope record to fail rendering — specifically at
+        # json.dumps(record), NOT at canonical_bytes or model_dump_json. We do
+        # this by resolving a valid fixture normally, then replacing the
+        # envelope's overrides tuple with an OverrideRecord whose normalized
+        # value is a set. canonical_bytes serializes only `config` (succeeds),
+        # model_dump_json serializes only `config` (succeeds); the set reaches
+        # the final record only when the CLI builds the output dict, so the
+        # failure happens during final-record rendering.
         # The CLI must: non-zero return, no traceback, stdout == "".
-        from expertforge.config.models import ConfigRoot
+        import expertforge.config.cli as cli_mod
+        from expertforge.config.overrides import OverrideRecord
+        from expertforge.config.resolve import (
+            ResolutionEnvelope,
+            canonical_bytes,
+            resolve_config,
+        )
 
-        def patched_dump_json(self: object, **kw: object) -> str:  # noqa: ARG001
-            # Return JSON whose decoded form contains a non-serializable value,
-            # so json.dump on the final record fails after canonical_bytes.
-            import json as _json
+        real_env = resolve_config(FIXTURE)
+        poisoned_env = ResolutionEnvelope(
+            source_path=real_env.source_path,
+            content_hash=real_env.content_hash,
+            overrides=(
+                OverrideRecord(
+                    raw_token="training.seed=set",
+                    path="training.seed",
+                    value={1, 2, 3},  # non-JSON-serializable; reaches final record only
+                ),
+            ),
+            config=real_env.config,
+        )
+        monkeypatch.setattr(cli_mod, "resolve_config", lambda *a, **k: poisoned_env)
 
-            return _json.dumps({"run": {"name": "x"}, "_poison": set([1, 2, 3])})
+        # Sanity: confirm the poison reaches the final record but not earlier
+        # stages — canonical_bytes and model_dump_json must both succeed.
+        assert canonical_bytes(poisoned_env)  # does not raise
+        assert poisoned_env.config.model_dump_json()  # does not raise
 
-        monkeypatch.setattr(ConfigRoot, "model_dump_json", patched_dump_json)
         rc = run_cli([str(FIXTURE)])
         assert rc != 0
         captured = capsys.readouterr()
