@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 
+from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.record import ProvenanceRecord
 
 __all__ = [
@@ -43,9 +44,18 @@ def _validate_id_component(value: str, kind: str) -> None:
 
 
 def provenance_sidecar_path(artifact_root: Path, run_id: str, attempt_id: str) -> Path:
-    """Return the canonical provenance sidecar path for a run/attempt pair."""
-    _validate_id_component(run_id, "run_id")
-    _validate_id_component(attempt_id, "attempt_id")
+    """Return the canonical provenance sidecar path for a run/attempt pair.
+
+    Reuses the exact Issue #6 run/attempt ID validators (not just generic
+    traversal checks).
+    """
+    from expertforge.identity.ids import validate_attempt_id, validate_run_id
+
+    try:
+        validate_run_id(run_id)
+        validate_attempt_id(attempt_id)
+    except ValueError as e:
+        raise ProvenanceSidecarError(str(e)) from e
     return artifact_root / run_id / "attempts" / attempt_id / _SIDECAR_FILENAME
 
 
@@ -88,8 +98,10 @@ def write_provenance_sidecar(artifact_root: Path, record: ProvenanceRecord) -> P
     except (UnicodeError, ValueError) as e:
         raise ProvenanceSidecarError(f"Could not serialize provenance record: {e}") from e
 
-    target.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # mkdir inside the typed write-error boundary so a directory-creation
+        # failure surfaces as ProvenanceSidecarError, not a raw OSError.
+        target.parent.mkdir(parents=True, exist_ok=True)
         _write_all_exclusive(target, rendered)
     except FileExistsError as e:
         raise ProvenanceSidecarError(
@@ -100,8 +112,20 @@ def write_provenance_sidecar(artifact_root: Path, record: ProvenanceRecord) -> P
     return target
 
 
-def load_provenance_sidecar(path: Path) -> ProvenanceRecord:
+def load_provenance_sidecar(
+    path: Path,
+    *,
+    expected_identity: AttemptIdentityRecord | None = None,
+    expected_source_digest: str | None = None,
+) -> ProvenanceRecord:
     """Load and validate a provenance sidecar.
+
+    When ``expected_identity`` is supplied, verifies the loaded record's
+    run_id, attempt_id, specification fingerprint, immutable inputs, and
+    timestamp match the identity. When ``expected_source_digest`` is supplied,
+    verifies the ``source.snapshot`` input digest matches it.
+
+    Raises :class:`ProvenanceSidecarError` on any mismatch.
 
     Raises :class:`ProvenanceSidecarError` for missing files, invalid UTF-8,
     malformed or non-object JSON, unknown schema versions, or validation
@@ -130,6 +154,39 @@ def load_provenance_sidecar(path: Path) -> ProvenanceRecord:
         )
 
     try:
-        return ProvenanceRecord.from_mapping(data)
+        record = ProvenanceRecord.from_mapping(data)
     except ValueError as e:
         raise ProvenanceSidecarError(f"Provenance sidecar {path} failed validation: {e}") from e
+
+    # Verify against the expected identity when supplied.
+    if expected_identity is not None:
+        ident = expected_identity
+        if record.run_id != ident.run_id:
+            raise ProvenanceSidecarError(
+                f"run_id mismatch: record {record.run_id!r} vs identity {ident.run_id!r}."
+            )
+        if record.attempt_id != ident.attempt_id:
+            raise ProvenanceSidecarError(
+                f"attempt_id mismatch: record {record.attempt_id!r} vs identity {ident.attempt_id!r}."
+            )
+        if record.start_time_utc != ident.created_at_utc:
+            raise ProvenanceSidecarError(
+                f"timestamp mismatch: record {record.start_time_utc!r} vs identity {ident.created_at_utc!r}."
+            )
+        if record.specification_fingerprint != ident.specification_fingerprint:
+            raise ProvenanceSidecarError("specification_fingerprint mismatch.")
+        if record.immutable_inputs != ident.specification_fingerprint.immutable_inputs:
+            raise ProvenanceSidecarError("immutable_inputs mismatch.")
+
+    # Verify the source.snapshot digest when supplied.
+    if expected_source_digest is not None:
+        snap_input = next(
+            (ii for ii in record.immutable_inputs if ii.name == "source.snapshot"),
+            None,
+        )
+        if snap_input is None or snap_input.digest != expected_source_digest:
+            raise ProvenanceSidecarError(
+                f"source.snapshot digest mismatch: expected {expected_source_digest!r}."
+            )
+
+    return record

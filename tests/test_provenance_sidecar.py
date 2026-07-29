@@ -105,7 +105,22 @@ class TestProvenanceSidecarWrite:
         monkeypatch.setattr("os.close", original_close)
         p = write_provenance_sidecar(tmp_path, rec)
         assert p.exists()
-        assert p.exists()
+
+    def test_positive_short_write_completes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rec = _record(tmp_path)
+        original_write = os.write
+
+        def short_first_write(fd: int, data: bytes) -> int:
+            if len(data) > 4:
+                return original_write(fd, data[:4])  # positive short write
+            return original_write(fd, data)
+
+        monkeypatch.setattr("os.write", short_first_write)
+        p = write_provenance_sidecar(tmp_path, rec)
+        # Full payload persisted despite the short first write.
+        assert p.read_bytes() == rec.to_deterministic_json()
 
 
 # --- load: typed, version rejection, error boundary -----------------------
@@ -150,6 +165,53 @@ class TestProvenanceSidecarLoad:
     def test_load_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(ProvenanceSidecarError):
             load_provenance_sidecar(tmp_path / "nope.json")
+
+    def test_load_rejects_identity_mismatch(self, tmp_path: Path) -> None:
+        from expertforge.config.resolve import resolve_config
+        from expertforge.identity.emit import emit_attempt_identity
+
+        # Write a record for identity A, then try to load with identity B.
+        rec_a = _record(tmp_path)
+        write_provenance_sidecar(tmp_path, rec_a)
+        # A different identity (different entropy).
+        ident_b, _ = emit_attempt_identity(
+            artifact_root=tmp_path,
+            config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+            clock=lambda: _FIXED,
+            entropy=lambda n: b"\xff" * n,
+        )
+        with pytest.raises(ProvenanceSidecarError):
+            load_provenance_sidecar(
+                provenance_sidecar_path(tmp_path, rec_a.run_id, rec_a.attempt_id),
+                expected_identity=ident_b,
+            )
+
+    def test_load_accepts_matching_identity(self, tmp_path: Path) -> None:
+        from expertforge.config.resolve import resolve_config
+        from expertforge.identity.emit import emit_attempt_identity
+
+        ident, _ = emit_attempt_identity(
+            artifact_root=tmp_path,
+            config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+            clock=lambda: _FIXED,
+            entropy=lambda n: bytes(n),
+        )
+        rec = ProvenanceRecord.from_identity(ident)
+        write_provenance_sidecar(tmp_path, rec)
+        loaded = load_provenance_sidecar(
+            provenance_sidecar_path(tmp_path, ident.run_id, ident.attempt_id),
+            expected_identity=ident,
+        )
+        assert loaded == rec
+
+    def test_load_rejects_source_digest_mismatch(self, tmp_path: Path) -> None:
+        rec = _record(tmp_path)
+        write_provenance_sidecar(tmp_path, rec)
+        with pytest.raises(ProvenanceSidecarError):
+            load_provenance_sidecar(
+                provenance_sidecar_path(tmp_path, rec.run_id, rec.attempt_id),
+                expected_source_digest="0" * 64,
+            )
 
 
 # --- two version fields ---------------------------------------------------
