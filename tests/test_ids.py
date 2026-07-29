@@ -11,7 +11,7 @@ collision-exhaustion error.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 
 import pytest
 
@@ -153,3 +153,66 @@ class TestEntropyFloor:
         aid = attempt_id()
         suffix = aid.split("-")[-1]
         assert len(suffix) == 20
+
+
+# --- spec-prefix hex + UTC invariants (review item 5) ---------------------
+
+
+class TestSpecPrefixAndUtcInvariants:
+    @pytest.mark.parametrize("bad_prefix", ["A" * 12, "g" * 12, "a" * 11, "a" * 13, "", "z" * 12])
+    def test_invalid_spec_prefix_rejected(self, bad_prefix: str) -> None:
+        with pytest.raises(ValueError):
+            run_id(spec_prefix=bad_prefix)
+
+    def test_uppercase_spec_prefix_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            run_id(spec_prefix="ABCDEF012345")
+
+    def test_naive_clock_rejected(self) -> None:
+        from datetime import datetime
+
+        naive = datetime(2026, 1, 1, 0, 0, 0)  # no tzinfo
+        with pytest.raises(ValueError):
+            run_id(spec_prefix="0123456789ab", clock=lambda: naive)
+
+    def test_naive_clock_rejected_for_attempt(self) -> None:
+        from datetime import datetime
+
+        with pytest.raises(ValueError):
+            attempt_id(clock=lambda: datetime(2026, 1, 1, 0, 0, 0))
+
+    def test_non_utc_timezone_normalized_to_utc_zulu(self) -> None:
+        from datetime import datetime, timedelta
+
+        # +02:00 wall time -> 00:00:00Z; the zulu timestamp must reflect UTC.
+        tz_plus2 = timezone(timedelta(hours=2))
+        local_midnight = datetime(2026, 1, 1, 2, 0, 0, tzinfo=tz_plus2)
+        rid = run_id(spec_prefix="0123456789ab", clock=lambda: local_midnight)
+        assert rid.startswith("run-20260101t000000z-")
+
+
+# --- validate_run_id / validate_attempt_id --------------------------------
+
+
+class TestIdValidators:
+    def test_validate_run_id_accepts_valid(self) -> None:
+        from expertforge.identity.ids import validate_run_id
+
+        validate_run_id("run-20260101t000000z-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb")  # no raise
+
+    def test_validate_run_id_rejects_invalid(self) -> None:
+        from expertforge.identity.ids import validate_run_id
+
+        with pytest.raises(ValueError):
+            validate_run_id("not-a-run-id")
+
+    def test_validate_attempt_id_accepts_valid(self) -> None:
+        from expertforge.identity.ids import validate_attempt_id
+
+        validate_attempt_id("attempt-20260101t000000z-cccccccccccccccccccc")  # no raise
+
+    def test_validate_attempt_id_rejects_invalid(self) -> None:
+        from expertforge.identity.ids import validate_attempt_id
+
+        with pytest.raises(ValueError):
+            validate_attempt_id("run-20260101t000000z-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb")

@@ -1,9 +1,11 @@
-"""Tests for the specification fingerprint (Issue #6 decision §1).
+"""Tests for the specification fingerprint (Issue #6 decision §1, review §2–§4).
 
 A versioned deterministic envelope is canonicalized as compact sorted-key UTF-8
-JSON, then SHA-256'd, yielding ``spec-v1-sha256-<64 hex>``. Immutable inputs are
-frozen, uniquely named, sorted by name, limited to stable names/algorithms/
-digests. v1 uses an empty immutable-input tuple.
+JSON, then SHA-256'd, yielding ``spec-v1-sha256-<64 hex>``. The fingerprint is a
+deeply immutable nested Pydantic record (envelope + canonical-config digest +
+immutable inputs + public digest) that round-trips through the sidecar.
+Immutable inputs are validated: stable lowercase names, ``sha256`` only for v1,
+64 lowercase-hex digests.
 """
 
 from __future__ import annotations
@@ -17,10 +19,15 @@ from expertforge.config.resolve import canonical_bytes, resolve_config
 from expertforge.identity.fingerprint import (
     FINGERPRINT_VERSION,
     ImmutableInput,
+    SpecificationFingerprintRecord,
     specification_fingerprint,
 )
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
+
+
+def _valid_input(name: str = "dataset", digest: str = "a" * 64) -> ImmutableInput:
+    return ImmutableInput(name=name, algorithm="sha256", digest=digest)
 
 
 # --- envelope construction -------------------------------------------------
@@ -31,24 +38,23 @@ class TestFingerprintEnvelope:
         env = resolve_config(CONFIGS / "smoke.yaml")
         fp = specification_fingerprint(canonical_bytes(env))
         assert fp.digest_str.startswith("spec-v1-sha256-")
-        # 64 lowercase hex after the prefix.
         hexpart = fp.digest_str.removeprefix("spec-v1-sha256-")
         assert len(hexpart) == 64
-        int(hexpart, 16)  # valid hex
+        int(hexpart, 16)
         assert hexpart == hexpart.lower()
 
     def test_envelope_carries_schema_version_canonical_digest(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
         fp = specification_fingerprint(canonical_bytes(env))
-        assert fp.envelope["schema"] == "expertforge.specification-fingerprint"
-        assert fp.envelope["version"] == FINGERPRINT_VERSION
-        assert fp.envelope["canonical_config"]["algorithm"] == "sha256"
-        assert fp.envelope["canonical_config"]["digest"] == fp.canonical_config_digest
+        assert fp.schema_name == "expertforge.specification-fingerprint"
+        assert fp.version == FINGERPRINT_VERSION
+        assert fp.canonical_config.algorithm == "sha256"
+        assert fp.canonical_config.digest
 
-    def test_immutable_inputs_default_empty(self) -> None:
+    def test_immutable_inputs_default_empty_tuple(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
         fp = specification_fingerprint(canonical_bytes(env))
-        assert fp.envelope["immutable_inputs"] == []
+        assert fp.immutable_inputs == ()
 
 
 # --- stability & sensitivity ----------------------------------------------
@@ -58,12 +64,9 @@ class TestFingerprintStability:
     def test_identical_canonical_bytes_same_fingerprint(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
         cb = canonical_bytes(env)
-        a = specification_fingerprint(cb)
-        b = specification_fingerprint(cb)
-        assert a.digest_str == b.digest_str
+        assert specification_fingerprint(cb).digest_str == specification_fingerprint(cb).digest_str
 
     def test_repeated_resolution_same_fingerprint(self) -> None:
-        # Resolving the same fixture repeatedly must yield the same fingerprint.
         fps = {
             specification_fingerprint(
                 canonical_bytes(resolve_config(CONFIGS / "smoke.yaml"))
@@ -72,22 +75,20 @@ class TestFingerprintStability:
         }
         assert len(fps) == 1
 
-    def test_meaningful_config_change_yields_different_fingerprint(self, tmp_path: Path) -> None:
+    def test_meaningful_config_change_yields_different_fingerprint(self) -> None:
         base = resolve_config(CONFIGS / "smoke.yaml")
-        # A different effective config (override changes training.seed) -> different
-        # canonical bytes -> different fingerprint.
         overridden = resolve_config(CONFIGS / "smoke.yaml", ["training.seed=999"])
-        a = specification_fingerprint(canonical_bytes(base))
-        b = specification_fingerprint(canonical_bytes(overridden))
-        assert a.digest_str != b.digest_str
+        assert (
+            specification_fingerprint(canonical_bytes(base)).digest_str
+            != specification_fingerprint(canonical_bytes(overridden)).digest_str
+        )
 
-    def test_override_to_same_value_same_fingerprint(self, tmp_path: Path) -> None:
-        # Overriding to the value the config already has -> same effective config.
+    def test_override_to_same_value_same_fingerprint(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
-        base_fp = specification_fingerprint(canonical_bytes(env))
+        base_fp = specification_fingerprint(canonical_bytes(env)).digest_str
         same = resolve_config(CONFIGS / "smoke.yaml", ["training.seed=7"])
-        same_fp = specification_fingerprint(canonical_bytes(same))
-        assert base_fp.digest_str == same_fp.digest_str
+        same_fp = specification_fingerprint(canonical_bytes(same)).digest_str
+        assert base_fp == same_fp
 
 
 # --- immutable inputs ------------------------------------------------------
@@ -96,48 +97,106 @@ class TestFingerprintStability:
 class TestImmutableInputs:
     def test_immutable_inputs_sorted_by_name(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
-        inputs = [
-            ImmutableInput(name="dataset", algorithm="sha256", digest="b" * 64),
-            ImmutableInput(name="tokenizer", algorithm="sha256", digest="a" * 64),
-        ]
-        fp = specification_fingerprint(canonical_bytes(env), immutable_inputs=inputs)
-        # Sorted by name: dataset, tokenizer (already sorted), but enforce the
-        # envelope serialization is name-sorted regardless of input order.
-        names = [ii["name"] for ii in fp.envelope["immutable_inputs"]]
-        assert names == sorted(names)
-
-    def test_immutable_inputs_unsorted_input_still_sorted_in_envelope(self) -> None:
-        env = resolve_config(CONFIGS / "smoke.yaml")
-        inputs = [
-            ImmutableInput(name="zzz", algorithm="sha256", digest="1" * 64),
-            ImmutableInput(name="aaa", algorithm="sha256", digest="2" * 64),
-        ]
-        fp = specification_fingerprint(canonical_bytes(env), immutable_inputs=inputs)
-        names = [ii["name"] for ii in fp.envelope["immutable_inputs"]]
+        fp = specification_fingerprint(
+            canonical_bytes(env),
+            immutable_inputs=[_valid_input("zzz", "1" * 64), _valid_input("aaa", "2" * 64)],
+        )
+        names = [ii.name for ii in fp.immutable_inputs]
         assert names == ["aaa", "zzz"]
 
     def test_duplicate_immutable_input_names_rejected(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
-        inputs = [
-            ImmutableInput(name="dataset", algorithm="sha256", digest="a" * 64),
-            ImmutableInput(name="dataset", algorithm="sha256", digest="b" * 64),
-        ]
         with pytest.raises(ValueError):
-            specification_fingerprint(canonical_bytes(env), immutable_inputs=inputs)
+            specification_fingerprint(
+                canonical_bytes(env),
+                immutable_inputs=[
+                    _valid_input("dataset", "a" * 64),
+                    _valid_input("dataset", "b" * 64),
+                ],
+            )
 
     def test_immutable_input_changes_fingerprint(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
         without = specification_fingerprint(canonical_bytes(env))
         with_input = specification_fingerprint(
-            canonical_bytes(env),
-            immutable_inputs=[ImmutableInput(name="dataset", algorithm="sha256", digest="c" * 64)],
+            canonical_bytes(env), immutable_inputs=[_valid_input("dataset", "c" * 64)]
         )
         assert without.digest_str != with_input.digest_str
 
     def test_immutable_input_is_frozen(self) -> None:
-        ii = ImmutableInput(name="x", algorithm="sha256", digest="d" * 64)
+        ii = _valid_input()
         with pytest.raises(ValidationError):
             ii.name = "y"  # type: ignore[misc]
+
+
+# --- immutable-input validation (review item 3) ---------------------------
+
+
+class TestImmutableInputValidation:
+    @pytest.mark.parametrize(
+        "bad_name", ["Dataset", "data/set", "data\\set", ".hidden", "-leading", "", "has space"]
+    )
+    def test_invalid_name_rejected(self, bad_name: str) -> None:
+        with pytest.raises(ValidationError):
+            ImmutableInput(name=bad_name, algorithm="sha256", digest="a" * 64)
+
+    def test_unsupported_algorithm_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ImmutableInput(name="dataset", algorithm="md5", digest="a" * 64)
+
+    @pytest.mark.parametrize("bad_digest", ["A" * 64, "g" * 64, "a" * 63, "a" * 65, "", "xyz"])
+    def test_invalid_digest_rejected(self, bad_digest: str) -> None:
+        with pytest.raises(ValidationError):
+            ImmutableInput(name="dataset", algorithm="sha256", digest=bad_digest)
+
+    def test_supported_name_shapes_accepted(self) -> None:
+        for ok in ["dataset", "tokenizer.bpe", "source.git", "a1-2.3"]:
+            ImmutableInput(name=ok, algorithm="sha256", digest="d" * 64)
+
+
+# --- deep immutability + round-trip (review item 2) -----------------------
+
+
+class TestFingerprintRecordImmutability:
+    def test_record_is_frozen(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        with pytest.raises(ValidationError):
+            fp.digest_str = "x"  # type: ignore[misc]
+
+    def test_immutable_inputs_is_a_tuple_not_list(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(
+            canonical_bytes(env), immutable_inputs=[_valid_input("dataset", "a" * 64)]
+        )
+        assert isinstance(fp.immutable_inputs, tuple)
+        assert not hasattr(fp.immutable_inputs, "append")
+
+    def test_record_round_trips_through_json(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(
+            canonical_bytes(env), immutable_inputs=[_valid_input("dataset", "a" * 64)]
+        )
+        dumped = fp.model_dump_json()
+        restored = SpecificationFingerprintRecord.model_validate_json(dumped)
+        assert restored == fp
+        # The restored record's digest must still verify against its envelope.
+        restored.verify_digest()
+
+    def test_unknown_fingerprint_version_rejected_on_construction(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        bad = fp.model_dump()
+        bad["version"] = 999
+        with pytest.raises(ValidationError):
+            SpecificationFingerprintRecord.model_validate(bad)
+
+    def test_digest_mismatch_detected_on_verify(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        bad = fp.model_copy(update={"digest_str": f"spec-v1-sha256-{'0' * 64}"})
+        with pytest.raises(ValueError):
+            bad.verify_digest()
 
 
 # --- determinism of envelope canonicalization -----------------------------
@@ -147,8 +206,74 @@ class TestEnvelopeDeterminism:
     def test_envelope_canonical_form_is_compact_sorted(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
         fp = specification_fingerprint(canonical_bytes(env))
-        b = fp.envelope_canonical_bytes
-        text = b.decode("utf-8")
-        # Compact: no insignificant whitespace.
+        text = fp.envelope_canonical_bytes().decode("utf-8")
         assert ", " not in text
         assert ": " not in text
+
+
+# --- recomputation verifier (review item 4) -------------------------------
+
+
+class TestRecomputationVerifier:
+    def test_verify_accepts_matching_config_and_inputs(self) -> None:
+        from expertforge.identity.fingerprint import verify_fingerprint
+
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        cb = canonical_bytes(env)
+        fp = specification_fingerprint(cb, immutable_inputs=[_valid_input("dataset", "a" * 64)])
+        # Recomputing from the same canonical bytes + same inputs verifies.
+        verify_fingerprint(
+            fp, cb, [ImmutableInput(name="dataset", algorithm="sha256", digest="a" * 64)]
+        )
+
+    def test_verify_detects_config_mismatch(self) -> None:
+        from expertforge.identity.fingerprint import FingerprintMismatch, verify_fingerprint
+
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        cb = canonical_bytes(env)
+        fp = specification_fingerprint(cb)
+        # Different canonical bytes (different effective config) -> mismatch.
+        other = canonical_bytes(resolve_config(CONFIGS / "smoke.yaml", ["training.seed=999"]))
+        with pytest.raises(FingerprintMismatch):
+            verify_fingerprint(fp, other, [])
+
+    def test_verify_detects_immutable_input_mismatch(self) -> None:
+        from expertforge.identity.fingerprint import FingerprintMismatch, verify_fingerprint
+
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        cb = canonical_bytes(env)
+        fp = specification_fingerprint(cb, immutable_inputs=[_valid_input("dataset", "a" * 64)])
+        # Same config, different immutable input -> mismatch.
+        with pytest.raises(FingerprintMismatch):
+            verify_fingerprint(fp, cb, [_valid_input("dataset", "b" * 64)])
+
+    def test_verify_detects_missing_immutable_input(self) -> None:
+        from expertforge.identity.fingerprint import FingerprintMismatch, verify_fingerprint
+
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        cb = canonical_bytes(env)
+        fp = specification_fingerprint(cb, immutable_inputs=[_valid_input("dataset", "a" * 64)])
+        # Declared input omitted at verify time -> mismatch.
+        with pytest.raises(FingerprintMismatch):
+            verify_fingerprint(fp, cb, [])
+
+    def test_verify_detects_additional_immutable_input(self) -> None:
+        from expertforge.identity.fingerprint import FingerprintMismatch, verify_fingerprint
+
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        cb = canonical_bytes(env)
+        fp = specification_fingerprint(cb)
+        # No declared inputs, but verifier supplies one -> mismatch.
+        with pytest.raises(FingerprintMismatch):
+            verify_fingerprint(fp, cb, [_valid_input("dataset", "a" * 64)])
+
+    def test_verify_detects_version_mismatch(self) -> None:
+        from expertforge.identity.fingerprint import FingerprintMismatch, verify_fingerprint
+
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        cb = canonical_bytes(env)
+        fp = specification_fingerprint(cb)
+        # Tamper with the stored envelope version.
+        bad = fp.model_copy(update={"version": 999})
+        with pytest.raises(FingerprintMismatch):
+            verify_fingerprint(bad, cb, [])
