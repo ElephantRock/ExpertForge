@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #6 run identity completed.
+Last updated: Milestone 0 in progress; #7 provenance completed.
 
 ## Current milestone
 
@@ -41,28 +41,33 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#7 — M0.4 source provenance and execution environment** — next
-  dependency-ordered implementation action (see #3 graph). After #7, #9 (logging)
-  and #10 (artifacts) can proceed; #8 (seed/RNG) may proceed now in parallel.
+- **#8 — M0.5 deterministic seed and RNG-state management** — next
+  dependency-ordered implementation action (depends only on #4/#5).
+- **#9 — M0.6 structured logging and metric collection** — may proceed now
+  that #7 (provenance) is complete.
+- **#10 — M0.7 artifact management** — may proceed now; registers the
+  provenance sidecar (produced by #7) and the identity sidecar (#6).
 - **#13 — M0.10 test/CI harness** — may begin early in parallel to establish
   the harness that subsystem tests plug into.
-- #3 umbrella and #8–#14 (other than #6) are open and dependency-ordered.
+- #3 umbrella and #11/#12/#14 are open and dependency-ordered.
 - **#4 — M0.1 repository and Python package scaffold — completed.**
 - **#5 — M0.2 validated configuration resolution — completed.**
-- **#6 — M0.3 run identity and configuration fingerprints — completed.** The
-  identity subsystem (versioned specification-fingerprint envelope, run/attempt
-  IDs with 80-bit entropy + collision detection, resume lineage, frozen
-  identity records, exclusive deterministic sidecar write/read, emit
-  orchestrator) is on `main`.
+- **#6 — M0.3 run identity and configuration fingerprints — completed.**
+- **#7 — M0.4 source provenance and execution environment — completed.** The
+  provenance subsystem (source-content snapshot as behavioral identity;
+  identity-bound record; allowlist-first software capture; optional
+  hardware/topology providers with typed degradation; durable provenance sidecar;
+  human-readable summary) is on `main`.
 
 ## Open pull requests
 
-- None. The #6 run-identity PR merged.
+- None. The #7 provenance PR merged.
 
 ## Known blockers
 
-- None. After #5 (configuration) and #6 (run identity), the foundation layer is
-  complete and #7/#9 can proceed; #8 may proceed after #4 and #5.
+- None. After #7, the foundation + reproducibility/observability layers are
+  advancing; #8/#9/#10 may proceed, with #11 (checkpoints) after #8, #12
+  (manifests) after #5/#6/#7/#9/#10/#11, and #14 (smoke gate) last.
 
 ## Latest accepted experiment
 
@@ -73,14 +78,12 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#7 (source provenance and execution environment)** — next in the #3
-   dependency order. Provenance/environment capture can supply the immutable
-   inputs (dataset/tokenizer/source digests) that the v1 fingerprint envelope
-   leaves empty.
-2. In parallel, **#8 (seed/RNG)** may proceed (depends only on #4/#5), and
-   **#13 (test/CI harness)** may start early.
-3. After #7: #9 (logging), #10 (artifacts); #11 after #8; #12 after
-   #5/#6/#7/#9/#10/#11; #14 last.
+1. Begin **#8 (seed/RNG)** — next in the #3 dependency order (depends only on
+   #4/#5).
+2. In parallel, **#9 (logging)**, **#10 (artifacts)**, and **#13 (test/CI
+   harness)** may proceed.
+3. #11 (checkpoints) after #8; #12 (manifests) after #5/#6/#7/#9/#10/#11; #14
+   (smoke gate) last.
 4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
