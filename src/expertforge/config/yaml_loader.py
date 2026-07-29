@@ -46,22 +46,23 @@ class _RestrictedLoader(yaml.SafeLoader):  # noqa: S101 - internal helper class
 
     # --- reject anchors / aliases ------------------------------------------
     def compose_node(self, parent: Any, index: Any) -> yaml.Node:
-        # Aliases ('*name') surface as AliasEvent and are handled by the base
-        # composer by returning the previously-stored node. Block them first.
+        # Aliases ('*name') surface as AliasEvent; block them first.
         if self.check_event(yaml.AliasEvent):  # type: ignore[no-untyped-call]
             raise RestrictedYAMLError(
                 "YAML aliases (references via '*') are not permitted in ExpertForge configuration."
             )
-        node = super().compose_node(parent, index)
-        # The base composer returns None only on end-of-stream; we are mid-tree,
-        # so a node is expected. Guard for type safety.
-        if node is None:  # pragma: no cover - defensive, not reachable mid-tree
-            raise RestrictedYAMLError("Unexpected end of YAML node stream.")
-        # Anchors ('&name') are recorded on the produced node.
-        if getattr(node, "anchor", None) is not None:
+        # Anchors ('&name') are recorded on the node's *start event*, which the
+        # base composer consumes inside compose_node. Inspect it via peek_event
+        # before delegation so anchor-only definitions (no alias use) are caught;
+        # PyYAML does not otherwise preserve the anchor on the returned node.
+        event = self.peek_event()  # type: ignore[no-untyped-call]
+        if getattr(event, "anchor", None) is not None:
             raise RestrictedYAMLError(
                 "YAML anchors (definitions via '&') are not permitted in ExpertForge configuration."
             )
+        node = super().compose_node(parent, index)
+        if node is None:  # pragma: no cover - defensive, not reachable mid-tree
+            raise RestrictedYAMLError("Unexpected end of YAML node stream.")
         return node
 
     # --- reject custom tags ------------------------------------------------
@@ -73,12 +74,19 @@ class _RestrictedLoader(yaml.SafeLoader):  # noqa: S101 - internal helper class
             )
         return super().construct_object(node, deep=deep)
 
-    # --- reject duplicate keys + merge keys --------------------------------
+    # --- reject duplicate keys, merge keys, and complex keys ---------------
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
         seen: set[Any] = set()
         for key_node, _value_node in node.value:
+            # Only scalar mapping keys are accepted; sequence/mapping keys leak
+            # unhashable types or surprising structure into configuration.
+            if not isinstance(key_node, yaml.ScalarNode):
+                raise RestrictedYAMLError(
+                    "Complex YAML mapping keys (sequences/mappings) are not "
+                    "permitted in ExpertForge configuration; keys must be scalars."
+                )
             # Reject the merge key '<<' outright.
-            if isinstance(key_node, yaml.ScalarNode) and key_node.value == "<<":
+            if key_node.value == "<<":
                 raise RestrictedYAMLError(
                     "YAML merge keys ('<<') are not permitted in ExpertForge configuration."
                 )

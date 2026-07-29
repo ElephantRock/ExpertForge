@@ -62,10 +62,6 @@ class TestParseOverridesErrors:
         with pytest.raises(OverrideError):
             parse_overrides(["=7"])
 
-    def test_empty_value_rejected(self) -> None:
-        with pytest.raises(OverrideError):
-            parse_overrides(["training.seed="])
-
     def test_duplicate_path_rejected(self) -> None:
         with pytest.raises(OverrideError):
             parse_overrides(["training.seed=7", "training.seed=8"])
@@ -81,3 +77,37 @@ class TestOverrideRecord:
     def test_json_null_parsed_as_none(self) -> None:
         rec = parse_overrides(["training.seq_len=null"])[0]
         assert rec.value is None
+
+
+class TestEmptyStringValueAccepted:
+    """Regression: an empty override value is not valid JSON, so per the
+    JSON-or-literal rule it must become the literal empty string. Only an
+    empty PATH remains rejected."""
+
+    def test_empty_value_becomes_empty_string(self) -> None:
+        rec = parse_overrides(["run.description="])[0]
+        assert rec.path == "run.description"
+        assert rec.value == ""
+        assert rec.value is not None  # not absent / not rejected
+
+    def test_empty_path_still_rejected(self) -> None:
+        with pytest.raises(OverrideError):
+            parse_overrides(["=7"])
+
+
+class TestNonFiniteValuesRejected:
+    """Regression: JSON parses NaN/Infinity, and Pydantic may accept +inf for a
+    float field. Such values must be rejected at parse time, before they can
+    reach the configuration and fail canonicalization."""
+
+    def test_infinity_token_rejected(self) -> None:
+        with pytest.raises(OverrideError):
+            parse_overrides(["training.lr=Infinity"])
+
+    def test_nan_token_rejected(self) -> None:
+        with pytest.raises(OverrideError):
+            parse_overrides(["training.lr=NaN"])
+
+    def test_negative_infinity_rejected(self) -> None:
+        with pytest.raises(OverrideError):
+            parse_overrides(["training.lr=-Infinity"])

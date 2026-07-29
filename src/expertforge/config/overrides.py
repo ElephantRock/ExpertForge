@@ -52,18 +52,30 @@ def _parse_value(raw: str) -> object:
 
     A bare unquoted word like ``smoke-a`` is not valid JSON, so it stays a
     literal string. ``7``, ``0.0003``, ``true``, ``null``, ``"DEBUG"`` are valid
-    JSON and become typed Python values.
+    JSON and become typed Python values. The empty string ``""`` is not valid
+    JSON, so an empty override value becomes the literal empty string.
+
+    Non-finite float values (``Infinity``, ``-Infinity``, ``NaN``) are accepted
+    by Python's JSON parser but are rejected here — they must never reach the
+    configuration, where they would break canonicalization.
     """
     try:
-        return json.loads(raw)
+        value = json.loads(raw)
     except json.JSONDecodeError:
         return raw
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        raise OverrideError(
+            f"Override value {raw!r} is a non-finite float (NaN/Infinity); "
+            "non-finite numbers are not permitted in configuration overrides."
+        )
+    return value
 
 
 def parse_overrides(tokens: list[str]) -> list[OverrideRecord]:
     """Parse a list of ``path=value`` override tokens into records.
 
-    Raises :class:`OverrideError` for malformed tokens or duplicate paths.
+    Raises :class:`OverrideError` for malformed tokens, duplicate paths, or
+    non-finite numeric values.
     """
     records: list[OverrideRecord] = []
     seen_paths: set[str] = set()
@@ -73,8 +85,8 @@ def parse_overrides(tokens: list[str]) -> list[OverrideRecord]:
         path, raw = token.split("=", 1)
         if not path:
             raise OverrideError(f"Override {token!r} has an empty path.")
-        if not raw:
-            raise OverrideError(f"Override {token!r} has an empty value.")
+        # An empty VALUE is permitted: it is not valid JSON, so it becomes the
+        # literal empty string (the field still has to validate it).
         if path in seen_paths:
             raise OverrideError(
                 f"Duplicate override for path {path!r}; "

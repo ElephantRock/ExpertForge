@@ -74,3 +74,63 @@ class TestParser:
         p = build_parser()
         ns = p.parse_args(["cfg.yaml", "--set", "a.b=1", "--set", "c.d=2"])
         assert ns.set == ["a.b=1", "c.d=2"]
+
+
+class TestCLIInputErrorsAreCleanDiagnostics:
+    """Regression: input errors must produce concise diagnostics + non-zero
+    exit, NOT uncaught tracebacks. Covers: missing file, invalid UTF-8,
+    malformed YAML, malformed override, duplicate override."""
+
+    def test_missing_file_is_clean_diagnostic(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = run_cli(["definitely_missing.yaml"])
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "error" in err.lower()
+
+    def test_malformed_yaml_is_clean_diagnostic(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("a: [unclosed\n", encoding="utf-8")
+        rc = run_cli([str(bad)])
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "error" in err.lower()
+
+    def test_invalid_utf8_is_clean_diagnostic(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        bad = tmp_path / "bad.yaml"
+        # Invalid UTF-8 byte sequence.
+        bad.write_bytes(b"run:\n  name: \xff\xfe broken\n")
+        rc = run_cli([str(bad)])
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "error" in err.lower()
+
+    def test_malformed_override_is_clean_diagnostic(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = run_cli([str(FIXTURE), "--set", "no_equals_here"])
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+
+    def test_duplicate_override_is_clean_diagnostic(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = run_cli([str(FIXTURE), "--set", "training.seed=1", "--set", "training.seed=2"])
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+
+    def test_non_finite_override_is_clean_diagnostic(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = run_cli([str(FIXTURE), "--set", "training.lr=Infinity"])
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err

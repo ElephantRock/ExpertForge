@@ -14,6 +14,7 @@ configuration must produce identical canonical bytes.
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,7 @@ class TestResolutionEnvelope:
         assert isinstance(env, ResolutionEnvelope)
         assert env.source_path == src.resolve()
         assert env.content_hash  # sha256 hex
-        assert env.overrides == []
+        assert env.overrides == ()
         assert env.config.run.name == "smoke-a"
 
     def test_content_hash_is_sha256_hex_64(self, tmp_path: Path) -> None:
@@ -191,3 +192,88 @@ class TestActionableValidationErrors:
             resolve_config(src)
         # The error must mention the offending field.
         assert "dim" in str(exc.value)
+
+
+class TestOverrideOnDefaultedField:
+    """Regression: an override must reach a field whose SECTION is omitted from
+    YAML but supplied by schema defaults. The override surface is defined by the
+    schema, not by which defaults the author wrote into YAML."""
+
+    OMITTED_SECTION_YAML = """\
+run:
+  name: smoke-a
+model:
+  dim: 64
+  n_layers: 2
+  n_heads: 2
+  ffn_dim: 128
+training:
+  seed: 7
+  tokens: 1024
+  batch_size: 4
+  lr: 0.0001
+"""
+
+    def test_override_into_omitted_section(self, tmp_path: Path) -> None:
+        # hardware section is entirely omitted; override must still apply.
+        src = _write(tmp_path, "c.yaml", self.OMITTED_SECTION_YAML)
+        env = resolve_config(src, ["hardware.device=cpu"])
+        assert env.config.hardware.device == "cpu"
+
+    def test_override_into_omitted_nested_section(self, tmp_path: Path) -> None:
+        src = _write(tmp_path, "c.yaml", self.OMITTED_SECTION_YAML)
+        env = resolve_config(src, ["logging.level=DEBUG", "logging.log_interval_steps=5"])
+        assert env.config.logging.level == "DEBUG"
+        assert env.config.logging.log_interval_steps == 5
+
+    def test_unknown_section_still_rejected(self, tmp_path: Path) -> None:
+        src = _write(tmp_path, "c.yaml", self.OMITTED_SECTION_YAML)
+        with pytest.raises(ConfigResolutionError):
+            resolve_config(src, ["bogus.field=1"])
+
+
+class TestRawByteSourceHash:
+    """Regression: the source hash must cover the original file BYTES, so that
+    LF-vs-CRLF variants of the same logical content hash distinctly. read_text()
+    normalized CRLF before hashing in the prior implementation."""
+
+    def test_lf_and_cRLF_variants_have_different_source_hashes(self, tmp_path: Path) -> None:
+        # Write both variants as explicit bytes so the test does not depend on
+        # the platform's text-mode newline translation.
+        lf_path = tmp_path / "lf.yaml"
+        lf_path.write_bytes(MINIMAL_YAML.encode("utf-8"))
+        crlf_path = tmp_path / "crlf.yaml"
+        crlf_path.write_bytes(MINIMAL_YAML.replace("\n", "\r\n").encode("utf-8"))
+        env_lf = resolve_config(lf_path)
+        env_crlf = resolve_config(crlf_path)
+        assert env_lf.content_hash != env_crlf.content_hash
+
+    def test_lf_and_crlf_produce_identical_canonical_bytes(self, tmp_path: Path) -> None:
+        # Same logical config -> same behavioral canonical bytes even though the
+        # raw source bytes differ (provenance vs behavior split).
+        lf_path = tmp_path / "lf.yaml"
+        lf_path.write_bytes(MINIMAL_YAML.encode("utf-8"))
+        crlf_path = tmp_path / "crlf.yaml"
+        crlf_path.write_bytes(MINIMAL_YAML.replace("\n", "\r\n").encode("utf-8"))
+        assert canonical_bytes(resolve_config(lf_path)) == canonical_bytes(
+            resolve_config(crlf_path)
+        )
+
+
+class TestEnvelopeDeepImmutability:
+    """Regression: a frozen dataclass holding a mutable list is not deeply
+    immutable. The envelope's overrides must not be appendable/clearable."""
+
+    def test_overrides_attribute_is_not_a_mutable_list(self, tmp_path: Path) -> None:
+        src = _write(tmp_path, "c.yaml", MINIMAL_YAML)
+        env = resolve_config(src, ["training.seed=99"])
+        # Tuples raise on append/clear; lists do not.
+        assert not hasattr(env.overrides, "append"), "overrides must be a tuple, not a list"
+
+    def test_overrides_record_itself_is_immutable(self, tmp_path: Path) -> None:
+        src = _write(tmp_path, "c.yaml", MINIMAL_YAML)
+        env = resolve_config(src, ["training.seed=99"])
+        rec = env.overrides[0]
+        # Frozen dataclass attribute assignment raises FrozenInstanceError.
+        with pytest.raises(FrozenInstanceError):
+            rec.path = "other"  # type: ignore[misc]

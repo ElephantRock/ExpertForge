@@ -83,3 +83,32 @@ class TestMultipleDocumentsRejected:
     def test_two_documents_rejected(self) -> None:
         with pytest.raises(RestrictedYAMLError):
             load_restricted_yaml("a: 1\n---\nb: 2\n")
+
+
+class TestAnchorWithoutAliasRejected:
+    """Regression: an anchor definition with NO alias use must still be rejected.
+
+    PyYAML does not preserve the anchor on the returned node, so an earlier
+    implementation that inspected node.anchor missed anchor-only documents.
+    """
+
+    def test_anchor_with_no_alias_rejected(self) -> None:
+        with pytest.raises(RestrictedYAMLError):
+            load_restricted_yaml("a: &unused 1\nb: 2\n")
+
+    def test_anchor_in_nested_mapping_rejected(self) -> None:
+        with pytest.raises(RestrictedYAMLError):
+            load_restricted_yaml("outer:\n  k: &anchored 5\n")
+
+
+class TestComplexMappingKeysRejected:
+    """Complex (non-scalar) YAML mapping keys must fail through the error
+    boundary, not leak a TypeError or PyYAML traceback."""
+
+    def test_sequence_key_rejected(self) -> None:
+        with pytest.raises(RestrictedYAMLError):
+            load_restricted_yaml("[a, b]: 1\n")
+
+    def test_mapping_key_rejected(self) -> None:
+        with pytest.raises(RestrictedYAMLError):
+            load_restricted_yaml("? {x: 1}\n: 2\n")

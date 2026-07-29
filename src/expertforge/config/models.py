@@ -45,7 +45,8 @@ CONFIG_FORMAT_VERSION: int = 1
 
 class _Section(BaseModel):
     """Base for every configuration section: frozen, forbid extras, validate
-    defaults."""
+    defaults, and reject non-finite floats so NaN/Infinity can never reach the
+    configuration (Issue #5 review item 6)."""
 
     model_config = ConfigDict(
         frozen=True,
@@ -121,7 +122,7 @@ class TrainingConfig(_Section):
     tokens: int = Field(..., gt=0, description="Training-token budget for this run.")
     batch_size: int = Field(..., gt=0, description="Effective batch size in sequences.")
     seq_len: int | None = Field(default=None, gt=0, description="Override for data.seq_len if set.")
-    lr: float = Field(..., gt=0.0, description="Peak learning rate.")
+    lr: float = Field(..., gt=0.0, allow_inf_nan=False, description="Peak learning rate (finite).")
 
 
 # --- evaluation ------------------------------------------------------------
