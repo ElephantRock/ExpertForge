@@ -174,3 +174,30 @@ class TestCLIInputErrorsAreCleanDiagnostics:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "forced serialization failure" in captured.err
+
+    def test_no_partial_output_on_final_record_rendering_failure(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Force the FINAL envelope record to fail rendering — not
+        # canonicalization. The resolved_config is made to carry a value
+        # (a set) that json.dump inside _emit cannot serialize, so the failure
+        # happens DURING final-record rendering, after canonical_bytes succeeds.
+        # The CLI must: non-zero return, no traceback, stdout == "".
+        from expertforge.config.models import ConfigRoot
+
+        def patched_dump_json(self: object, **kw: object) -> str:  # noqa: ARG001
+            # Return JSON whose decoded form contains a non-serializable value,
+            # so json.dump on the final record fails after canonical_bytes.
+            import json as _json
+
+            return _json.dumps({"run": {"name": "x"}, "_poison": set([1, 2, 3])})
+
+        monkeypatch.setattr(ConfigRoot, "model_dump_json", patched_dump_json)
+        rc = run_cli([str(FIXTURE)])
+        assert rc != 0
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.err
+        assert captured.out == ""
+        assert "error" in captured.err.lower()

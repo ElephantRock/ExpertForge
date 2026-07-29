@@ -42,9 +42,14 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _emit(envelope_obj: dict[str, object]) -> int:
-    json.dump(envelope_obj, sys.stdout, indent=2, ensure_ascii=False)
-    sys.stdout.write("\n")
+def _emit(rendered: str) -> int:
+    """Write a fully-rendered, validated output string to stdout in one go.
+
+    ``rendered`` must already be the complete output (final record serialized
+    and UTF-8 validated inside the error boundary); this function performs a
+    single write so no partial output can ever reach stdout.
+    """
+    sys.stdout.write(rendered)
     return 0
 
 
@@ -52,15 +57,13 @@ def run_cli(argv: list[str]) -> int:
     """Resolve ``argv`` and print the envelope + canonical bytes. Return exit code.
 
     All resolution AND serialization happen inside the error boundary; the full
-    output record is built before anything is written to stdout, so a failure
-    never produces partial output.
+    output record is rendered and UTF-8 validated before anything is written to
+    stdout, so a failure never produces partial output.
     """
     args = build_parser().parse_args(argv)
     try:
         envelope = resolve_config(args.config, args.set)
-        # Serialize inside the boundary. canonical_bytes converts encoding/JSON
-        # failures to ConfigResolutionError; model_dump_json may raise
-        # PydanticSerializationError, caught below.
+        # canonical_bytes converts encoding/JSON failures to ConfigResolutionError.
         canonical = canonical_bytes(envelope).decode("utf-8")
         resolved_json = envelope.config.model_dump_json()
         record = {
@@ -77,14 +80,23 @@ def run_cli(argv: list[str]) -> int:
             "resolved_config": json.loads(resolved_json),
             "canonical_bytes": canonical,
         }
+        # Render the FINAL record to a complete UTF-8 string inside the boundary.
+        # json.dumps raises TypeError on non-serializable values (e.g. a set that
+        # slipped through) and ValueError on encoding issues; both are caught.
+        rendered = (
+            (json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+            .encode("utf-8")
+            .decode("utf-8")
+        )
     except ConfigResolutionError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
-    except ValueError as e:
-        # Covers JSON/serialization errors not already wrapped by canonical_bytes.
+    except (ValueError, TypeError) as e:
+        # Covers JSON/serialization errors not already wrapped by canonical_bytes,
+        # including final-record rendering failures (non-serializable values).
         sys.stderr.write(f"error: Configuration could not be serialized: {e}\n")
         return 2
-    return _emit(record)
+    return _emit(rendered)
 
 
 def main() -> None:  # pragma: no cover - thin shim
