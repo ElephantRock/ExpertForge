@@ -1,0 +1,155 @@
+"""Tests for run and attempt IDs (Issue #6 decision §2, §3).
+
+Run IDs: ``run-YYYYMMDDtHHMMSSz-<spec-prefix-12>-<20-random-hex>``.
+Attempt IDs: ``attempt-YYYYMMDDtHHMMSSz-<20-random-hex>``.
+The timestamp is for inspection only; uniqueness comes from 80
+cryptographically secure random bits (20 hex). Generation supports injected
+clock and entropy providers, collision detection, bounded retries, and a typed
+collision-exhaustion error.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime
+
+import pytest
+
+from expertforge.identity.ids import (
+    IdentityCollisionError,
+    attempt_id,
+    run_id,
+)
+
+RUN_ID_RE = re.compile(r"^run-\d{8}t\d{6}z-[0-9a-f]{12}-[0-9a-f]{20}$")
+ATTEMPT_ID_RE = re.compile(r"^attempt-\d{8}t\d{6}z-[0-9a-f]{20}$")
+
+
+# --- format ----------------------------------------------------------------
+
+
+class TestRunIdFormat:
+    def test_run_id_matches_required_shape(self) -> None:
+        rid = run_id(spec_prefix="a" * 12)
+        assert RUN_ID_RE.match(rid), rid
+
+    def test_run_id_includes_spec_prefix(self) -> None:
+        rid = run_id(spec_prefix="0123456789ab")
+        assert "0123456789ab" in rid
+
+    def test_run_id_timestamp_is_utc_zulu(self) -> None:
+        fixed = datetime(2026, 7, 29, 14, 30, 12, tzinfo=UTC)
+        rid = run_id(spec_prefix="abcdef012345", clock=lambda: fixed)
+        assert rid.startswith("run-20260729t143012z-")
+
+    def test_attempt_id_matches_required_shape(self) -> None:
+        aid = attempt_id()
+        assert ATTEMPT_ID_RE.match(aid), aid
+
+
+# --- injectable providers --------------------------------------------------
+
+
+class TestInjectableProviders:
+    def test_clock_injection_determines_timestamp(self) -> None:
+        fixed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        rid = run_id(spec_prefix="0123456789ab", clock=lambda: fixed)
+        assert rid.startswith("run-20260102t030405z-")
+
+    def test_entropy_injection_determines_suffix(self) -> None:
+        # Fixed entropy -> fixed suffix.
+        rid_a = run_id(spec_prefix="0123456789ab", entropy=lambda n: bytes(n))
+        rid_b = run_id(spec_prefix="0123456789ab", entropy=lambda n: bytes(n))
+        assert rid_a == rid_b
+
+    def test_default_entropy_is_random(self) -> None:
+        # Default entropy (secrets) -> distinct suffixes across calls.
+        fixed = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        ids = {run_id(spec_prefix="0123456789ab", clock=lambda: fixed) for _ in range(50)}
+        assert len(ids) == 50  # all distinct
+
+    def test_entropy_provides_requested_byte_count(self) -> None:
+        captured: list[int] = []
+
+        def cap_entropy(nbytes: int) -> bytes:
+            captured.append(nbytes)
+            return bytes(nbytes)
+
+        run_id(spec_prefix="0123456789ab", entropy=cap_entropy)
+        # 20 hex chars = 80 bits = 10 bytes.
+        assert captured == [10]
+
+
+# --- collision detection ---------------------------------------------------
+
+
+class TestCollisionDetection:
+    def test_collision_triggers_retry_and_eventually_raises(self) -> None:
+        # Force the entropy provider to always return zeros -> every generated
+        # suffix collides under a fixed clock.
+        fixed = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        with pytest.raises(IdentityCollisionError):
+            run_id(
+                spec_prefix="0123456789ab",
+                clock=lambda: fixed,
+                entropy=lambda n: bytes(n),
+                max_retries=5,
+                exists=lambda _id: True,  # every candidate already exists
+            )
+
+    def test_collision_resolves_when_exists_becomes_false(self) -> None:
+        fixed = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        attempts = {"n": 0}
+
+        def exists(_id: str) -> bool:
+            attempts["n"] += 1
+            return attempts["n"] < 3  # first two "exist", third is free
+
+        rid = run_id(
+            spec_prefix="0123456789ab",
+            clock=lambda: fixed,
+            entropy=lambda n: bytes(n),  # constant -> same candidate each retry
+            exists=exists,
+            max_retries=10,
+        )
+        assert rid.startswith("run-20260101t000000z-")
+
+    def test_bounded_retries_respected(self) -> None:
+        fixed = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        n = {"calls": 0}
+
+        def counting_exists(_id: str) -> bool:
+            n["calls"] += 1
+            return True
+
+        with pytest.raises(IdentityCollisionError):
+            run_id(
+                spec_prefix="0123456789ab",
+                clock=lambda: fixed,
+                entropy=lambda n: bytes(n),
+                exists=counting_exists,
+                max_retries=4,
+            )
+        # max_retries candidate generations attempted.
+        assert n["calls"] == 4
+
+    def test_no_exists_check_by_default(self) -> None:
+        # Default exists=None means no collision check; generation never raises.
+        fixed = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        rid = run_id(spec_prefix="0123456789ab", clock=lambda: fixed, entropy=lambda n: bytes(n))
+        assert RUN_ID_RE.match(rid)
+
+
+# --- 80-bit entropy floor --------------------------------------------------
+
+
+class TestEntropyFloor:
+    def test_run_suffix_is_80_bits(self) -> None:
+        rid = run_id(spec_prefix="0123456789ab")
+        suffix = rid.split("-")[-1]
+        assert len(suffix) == 20  # 20 hex = 80 bits
+
+    def test_attempt_suffix_is_80_bits(self) -> None:
+        aid = attempt_id()
+        suffix = aid.split("-")[-1]
+        assert len(suffix) == 20
