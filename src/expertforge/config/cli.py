@@ -49,28 +49,41 @@ def _emit(envelope_obj: dict[str, object]) -> int:
 
 
 def run_cli(argv: list[str]) -> int:
-    """Resolve ``argv`` and print the envelope + canonical bytes. Return exit code."""
+    """Resolve ``argv`` and print the envelope + canonical bytes. Return exit code.
+
+    All resolution AND serialization happen inside the error boundary; the full
+    output record is built before anything is written to stdout, so a failure
+    never produces partial output.
+    """
     args = build_parser().parse_args(argv)
     try:
         envelope = resolve_config(args.config, args.set)
+        # Serialize inside the boundary. canonical_bytes converts encoding/JSON
+        # failures to ConfigResolutionError; model_dump_json may raise
+        # PydanticSerializationError, caught below.
+        canonical = canonical_bytes(envelope).decode("utf-8")
+        resolved_json = envelope.config.model_dump_json()
+        record = {
+            "source_path": str(envelope.source_path),
+            "content_hash": envelope.content_hash,
+            "overrides": [
+                {
+                    "raw_token": o.raw_token,
+                    "path": o.path,
+                    "value": o.value,
+                }
+                for o in envelope.overrides
+            ],
+            "resolved_config": json.loads(resolved_json),
+            "canonical_bytes": canonical,
+        }
     except ConfigResolutionError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
-
-    record = {
-        "source_path": str(envelope.source_path),
-        "content_hash": envelope.content_hash,
-        "overrides": [
-            {
-                "raw_token": o.raw_token,
-                "path": o.path,
-                "value": o.value,
-            }
-            for o in envelope.overrides
-        ],
-        "resolved_config": json.loads(envelope.config.model_dump_json()),
-        "canonical_bytes": canonical_bytes(envelope).decode("utf-8"),
-    }
+    except ValueError as e:
+        # Covers JSON/serialization errors not already wrapped by canonical_bytes.
+        sys.stderr.write(f"error: Configuration could not be serialized: {e}\n")
+        return 2
     return _emit(record)
 
 

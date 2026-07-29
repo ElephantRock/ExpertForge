@@ -134,3 +134,43 @@ class TestCLIInputErrorsAreCleanDiagnostics:
         assert rc != 0
         err = capsys.readouterr().err
         assert "Traceback" not in err
+
+    def test_surrogate_yaml_is_clean_diagnostic(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Valid UTF-8 file whose YAML uses a \uD800 escape. Currently rejected
+        # at Pydantic validation; if a future field accepted the surrogate, the
+        # serialization boundary must still produce a clean diagnostic.
+        bad = tmp_path / "surrogate.yaml"
+        bad.write_bytes(
+            b'run:\n  name: "\\uD800"\n'
+            b"model:\n  dim: 64\n  n_layers: 2\n  n_heads: 2\n  ffn_dim: 128\n"
+            b"training:\n  seed: 1\n  tokens: 1024\n  batch_size: 4\n  lr: 0.001\n"
+        )
+        rc = run_cli([str(bad)])
+        assert rc != 0
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.err
+        # No partial JSON output should be written on failure.
+        assert captured.out == ""
+
+    def test_no_partial_output_on_serialization_failure(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Force canonical_bytes to fail AFTER resolution succeeds, and confirm
+        # the CLI writes nothing to stdout (no partial envelope) and exits non-zero.
+        import expertforge.config.cli as cli_mod
+        from expertforge.config.resolve import ConfigResolutionError
+
+        def boom(envelope: object) -> bytes:
+            raise ConfigResolutionError("forced serialization failure")
+
+        monkeypatch.setattr(cli_mod, "canonical_bytes", boom)
+        rc = run_cli([str(FIXTURE)])
+        assert rc != 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "forced serialization failure" in captured.err

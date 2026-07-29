@@ -277,3 +277,32 @@ class TestEnvelopeDeepImmutability:
         # Frozen dataclass attribute assignment raises FrozenInstanceError.
         with pytest.raises(FrozenInstanceError):
             rec.path = "other"  # type: ignore[misc]
+
+
+class TestCanonicalBytesSerializationBoundary:
+    """Regression (PR #16 re-review): canonical_bytes must convert any
+    serialization failure (e.g. a Unicode surrogate that slips past validation,
+    or any value UTF-8/JSON cannot encode) into a ConfigResolutionError, never a
+    raw UnicodeEncodeError/PydanticSerializationError traceback.
+
+    Pydantic strict string validation currently rejects YAML ``\\uD800`` escapes
+    at the model layer, so a surrogate cannot reach canonical_bytes through the
+    normal path today. This test exercises the boundary directly to guarantee it
+    holds regardless of future field/config changes."""
+
+    def test_canonical_bytes_wraps_encoding_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = _write(tmp_path, "c.yaml", MINIMAL_YAML)
+        env = resolve_config(src)
+        # Force the config to dump a value UTF-8 cannot encode (an unpaired
+        # Unicode surrogate). This simulates a non-serializable value reaching
+        # canonicalization if a future field accepted one.
+        monkeypatch.setattr(
+            type(env.config),
+            "model_dump",
+            lambda self, **kw: {"run": {"name": "\ud800"}},  # noqa: ARG005
+            raising=False,
+        )
+        with pytest.raises(ConfigResolutionError):
+            canonical_bytes(env)

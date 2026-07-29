@@ -215,12 +215,22 @@ def canonical_bytes(envelope: ResolutionEnvelope) -> bytes:
     Sorted keys, compact separators, non-finite numbers prohibited. The
     envelope's provenance (source path, hash, overrides) is deliberately
     excluded — only behavioral config contributes to the fingerprint.
+
+    Any serialization failure (a value JSON/UTF-8 cannot encode — e.g. an
+    unpaired Unicode surrogate that slipped past validation, or a non-finite
+    number) is converted to :class:`ConfigResolutionError` so callers stay
+    within the error boundary instead of receiving a raw traceback.
     """
-    effective = envelope.config.model_dump(mode="json")
-    return json.dumps(
-        effective,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
+    try:
+        effective = envelope.config.model_dump(mode="json")
+        return json.dumps(
+            effective,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (UnicodeEncodeError, ValueError, TypeError) as e:
+        raise ConfigResolutionError(
+            f"Configuration could not be serialized to canonical bytes: {e}"
+        ) from e
