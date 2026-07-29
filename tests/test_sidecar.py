@@ -79,11 +79,34 @@ class TestSidecarWrite:
         with pytest.raises(IdentitySidecarError):
             sidecar_path(tmp_path, "run-..-evil", _VALID_ATTEMPT)
 
-    def test_short_write_cleanup_allows_retry(
+    def test_write_loop_handles_short_writes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Force os.write to fail; the partial file must be removed so a retry is
-        # not permanently blocked by O_EXCL.
+        # A real short write: os.write returns a POSITIVE count smaller than
+        # requested. The write loop must keep writing until the full payload is
+        # persisted; the resulting file must equal the canonical record bytes.
+        original_write = os.write
+        calls = {"n": 0}
+
+        def short_first_write(fd: int, data: bytes) -> int:
+            calls["n"] += 1
+            if calls["n"] == 1 and len(data) > 4:
+                # Return only 4 bytes — a genuine short write, not an exception.
+                return original_write(fd, data[:4])
+            return original_write(fd, data)
+
+        monkeypatch.setattr("os.write", short_first_write)
+        rec = _record()
+        p = write_identity_sidecar(tmp_path, rec)
+        # The whole payload persisted despite the short first write.
+        assert p.read_bytes() == rec.to_deterministic_json()
+        assert calls["n"] >= 2  # loop iterated
+
+    def test_write_failure_cleans_up_partial_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An os.write failure must remove the partial file so a retry is not
+        # permanently blocked by O_EXCL.
         original_write = os.write
         calls = {"n": 0}
 

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -155,6 +155,19 @@ class TestAttemptIdentityRecord:
     def test_naive_created_at_rejected(self) -> None:
         with pytest.raises(ValidationError):
             _make_record(created_at=datetime(2026, 1, 1, 0, 0, 0))  # naive
+
+    def test_non_utc_aware_created_at_rejected(self) -> None:
+        # A timezone-aware but non-UTC offset must be rejected, not silently
+        # normalized to UTC.
+        from datetime import timedelta
+
+        non_utc = timezone(timedelta(hours=2))
+        with pytest.raises(ValidationError):
+            _make_record(created_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=non_utc))
+
+    def test_utc_created_at_accepted(self) -> None:
+        rec = _make_record(created_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC))
+        assert rec.created_at_utc == datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
     def test_unknown_schema_version_rejected_on_construction(self) -> None:
         rec = _make_record()

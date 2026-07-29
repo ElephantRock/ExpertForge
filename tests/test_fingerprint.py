@@ -198,6 +198,56 @@ class TestFingerprintRecordImmutability:
         with pytest.raises(ValueError):
             bad.verify_digest()
 
+    def test_wrong_schema_name_rejected_on_construction(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        bad = fp.model_dump(by_alias=True)
+        bad["schema"] = "wrong-schema-name"
+        with pytest.raises(ValidationError):
+            SpecificationFingerprintRecord.model_validate(bad)
+
+    def test_unsorted_immutable_inputs_rejected_on_construction(self) -> None:
+        # Build a canonical fp then tamper the order on load.
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(
+            canonical_bytes(env),
+            immutable_inputs=[_valid_input("aaa", "1" * 64), _valid_input("zzz", "2" * 64)],
+        )
+        bad = fp.model_dump(by_alias=True)
+        # Reverse the order — the digest becomes inconsistent too, but the
+        # sortedness check fires first.
+        bad["immutable_inputs"] = list(reversed(bad["immutable_inputs"]))
+        with pytest.raises(ValidationError):
+            SpecificationFingerprintRecord.model_validate(bad)
+
+    def test_duplicate_immutable_inputs_rejected_on_construction(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        bad = fp.model_dump(by_alias=True)
+        bad["immutable_inputs"] = [
+            {"name": "dup", "algorithm": "sha256", "digest": "a" * 64},
+            {"name": "dup", "algorithm": "sha256", "digest": "b" * 64},
+        ]
+        with pytest.raises(ValidationError):
+            SpecificationFingerprintRecord.model_validate(bad)
+
+    def test_inconsistent_digest_rejected_on_construction(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        bad = fp.model_dump(by_alias=True)
+        # Tamper the digest_str so it no longer matches the recomputed envelope.
+        bad["digest_str"] = f"spec-v1-sha256-{'0' * 64}"
+        with pytest.raises(ValidationError):
+            SpecificationFingerprintRecord.model_validate(bad)
+
+    def test_serialization_uses_schema_key_not_schema_name(self) -> None:
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        d = fp.model_dump(mode="json")
+        assert "schema" in d
+        assert "schema_name" not in d
+        assert d["schema"] == "expertforge.specification-fingerprint"
+
 
 # --- determinism of envelope canonicalization -----------------------------
 

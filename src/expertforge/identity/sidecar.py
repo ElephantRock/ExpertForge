@@ -78,6 +78,9 @@ def _write_all_exclusive(target: Path, payload: bytes) -> None:
                 raise OSError("os.write returned non-positive byte count")
             total += written
         os.fsync(fd)
+        # Close inside the try so a close failure also triggers cleanup below
+        # (a close error after fsync could otherwise leave a blocking file).
+        os.close(fd)
     except Exception:
         # Remove the partial file so O_EXCL does not permanently block retries.
         try:
@@ -89,8 +92,6 @@ def _write_all_exclusive(target: Path, payload: bytes) -> None:
         except FileNotFoundError:
             pass
         raise
-    else:
-        os.close(fd)
 
 
 def write_identity_sidecar(artifact_root: Path, record: AttemptIdentityRecord) -> Path:

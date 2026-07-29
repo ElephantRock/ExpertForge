@@ -19,7 +19,7 @@ Two independent versions exist (Issue #6 §versioning):
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -78,9 +78,16 @@ class AttemptIdentityRecord(BaseModel):
     @field_validator("created_at_utc")
     @classmethod
     def _validate_created_at(cls, v: datetime) -> datetime:
+        # Reject naive datetimes AND non-UTC-aware datetimes. The contract is
+        # UTC-only; a non-UTC offset is a caller error to surface, not silently
+        # normalize (silent normalization hides misuse at the boundary).
         if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
             raise ValueError(f"created_at_utc must be timezone-aware; got naive {v!r}.")
-        return v.astimezone(UTC)
+        if v.tzinfo.utcoffset(v) != timedelta(0):
+            raise ValueError(
+                f"created_at_utc must be UTC (offset 0); got offset {v.tzinfo.utcoffset(v)!r}."
+            )
+        return v
 
     def fingerprint_digest_str(self) -> str:
         """The public ``spec-v1-sha256-<hex>`` digest of this record's fingerprint."""

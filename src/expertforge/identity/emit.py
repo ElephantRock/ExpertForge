@@ -33,6 +33,7 @@ from expertforge.identity.fingerprint import (
     ImmutableInput,
     SpecificationFingerprintRecord,
     specification_fingerprint,
+    validate_fingerprint_id,
 )
 from expertforge.identity.ids import (
     DEFAULT_MAX_RETRIES,
@@ -108,7 +109,15 @@ def emit_attempt_identity(
             Required for those modes; must be None for INDEPENDENT/FORK.
     """
     resolved_clock: ClockProvider = clock or (lambda: datetime.now(UTC))
+    # Capture exactly ONE clock instant and reuse it everywhere (created_at_utc
+    # and both ID timestamps). The ID generators receive a constant callable
+    # returning this same instant, so an advancing clock cannot produce
+    # inconsistent timestamps within one emit.
     now = _require_aware(resolved_clock()).astimezone(UTC)
+
+    def frozen_clock() -> datetime:
+        return now
+
     cb = canonical_bytes(config_envelope)
     fp: SpecificationFingerprintRecord = specification_fingerprint(
         cb, immutable_inputs=immutable_inputs
@@ -125,7 +134,7 @@ def emit_attempt_identity(
             raise IdentityEmitError(
                 "INDEPENDENT mode takes no lineage, retained_run_id, or parent fingerprint."
             )
-        rid = _generate_run_id(prefix, resolved_clock, entropy, exists, max_retries)
+        rid = _generate_run_id(prefix, frozen_clock, entropy, exists, max_retries)
         record_lineage: ResumeLineage | None = None
 
     elif mode is AllocationMode.RESUME:
@@ -158,8 +167,14 @@ def emit_attempt_identity(
             )
         if parent_specification_fingerprint is None:
             raise IdentityEmitError("FORK mode requires parent_specification_fingerprint.")
-        # FORK does NOT verify spec match — the specification is materially changed.
-        rid = _generate_run_id(prefix, resolved_clock, entropy, exists, max_retries)
+        # FORK does NOT verify spec match — the specification is materially
+        # changed — but the parent fingerprint ID format must still be valid
+        # (it is recorded as parentage provenance).
+        try:
+            validate_fingerprint_id(parent_specification_fingerprint)
+        except ValueError as e:
+            raise IdentityEmitError(str(e)) from e
+        rid = _generate_run_id(prefix, frozen_clock, entropy, exists, max_retries)
         record_lineage = lineage
 
     elif mode is AllocationMode.LEGACY:
@@ -178,7 +193,7 @@ def emit_attempt_identity(
     else:  # pragma: no cover - exhaustive enum
         raise IdentityEmitError(f"Unsupported allocation mode {mode!r}.")
 
-    aid = _generate_attempt_id(resolved_clock, entropy, exists, max_retries)
+    aid = _generate_attempt_id(frozen_clock, entropy, exists, max_retries)
 
     record = AttemptIdentityRecord(
         specification_fingerprint=fp,
@@ -202,6 +217,8 @@ def _verify_parent_spec(
     """Verify the computed spec fingerprint matches the parent run's, for modes
     that retain the same logical run (RESUME, LEGACY)."""
     try:
+        # Enforce the exact fingerprint-ID format at this boundary.
+        validate_fingerprint_id(parent_specification_fingerprint)
         if fp.digest_str != parent_specification_fingerprint:
             raise IdentityEmitError(
                 f"{mode.value.capitalize()} requires the computed specification fingerprint "
@@ -209,7 +226,7 @@ def _verify_parent_spec(
                 f"{parent_specification_fingerprint!r}. A materially changed specification "
                 "must use FORK mode."
             )
-    except FingerprintMismatch as e:  # pragma: no cover - defensive
+    except (FingerprintMismatch, ValueError) as e:
         raise IdentityEmitError(str(e)) from e
 
 

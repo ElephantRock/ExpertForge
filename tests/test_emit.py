@@ -234,6 +234,42 @@ class TestForkMode:
                 entropy=lambda n: bytes(n),
             )
 
+    def test_fork_rejects_invalid_parent_fingerprint_format(self, tmp_path: Path) -> None:
+        from expertforge.identity.lineage import ResumeLineage
+
+        lin = ResumeLineage(
+            parent_run_id=_VALID_RUN, parent_attempt_id=_VALID_ATTEMPT, parent_checkpoint_id="c"
+        )
+        for bad_fp in ["not-a-fingerprint", "spec-v1-sha256-short", "spec-v1-md5-" + "a" * 64]:
+            with pytest.raises(IdentityEmitError):
+                emit_attempt_identity(
+                    artifact_root=tmp_path,
+                    config_envelope=_env(),
+                    mode=AllocationMode.FORK,
+                    lineage=lin,
+                    parent_specification_fingerprint=bad_fp,
+                    clock=lambda: _FIXED,
+                    entropy=lambda n: bytes(n),
+                )
+
+    def test_resume_rejects_invalid_parent_fingerprint_format(self, tmp_path: Path) -> None:
+        from expertforge.identity.lineage import ResumeLineage
+
+        lin = ResumeLineage(
+            parent_run_id=_VALID_RUN, parent_attempt_id=_VALID_ATTEMPT, parent_checkpoint_id="c"
+        )
+        with pytest.raises(IdentityEmitError):
+            emit_attempt_identity(
+                artifact_root=tmp_path,
+                config_envelope=_env(),
+                mode=AllocationMode.RESUME,
+                lineage=lin,
+                parent_specification_fingerprint="garbage",
+                retained_run_id=_VALID_RUN,
+                clock=lambda: _FIXED,
+                entropy=lambda n: bytes(n),
+            )
+
 
 class TestLegacyMode:
     def test_legacy_allows_missing_parent_attempt_id(self, tmp_path: Path) -> None:
@@ -295,6 +331,31 @@ class TestReconstructionAndErrors:
                 clock=lambda: datetime(2026, 1, 1, 0, 0, 0),  # naive
                 entropy=lambda n: bytes(n),
             )
+
+    def test_single_clock_instant_reused_across_record_and_ids(self, tmp_path: Path) -> None:
+        # An advancing clock must NOT produce three different timestamps: the
+        # captured instant is reused for created_at_utc, the run timestamp, and
+        # the attempt timestamp.
+        from datetime import timedelta
+
+        counter = {"n": 0}
+
+        def advancing() -> datetime:
+            counter["n"] += 1
+            # Each call advances by a day — if the emitter reused the callable,
+            # the three timestamps would differ by days.
+            return _FIXED + timedelta(days=counter["n"])
+
+        record, _ = emit_attempt_identity(
+            artifact_root=tmp_path,
+            config_envelope=_env(),
+            clock=advancing,
+            entropy=lambda n: bytes(n),
+        )
+        # All three timestamps must reflect the single captured instant (day 1).
+        assert record.run_id.startswith("run-20260102t000000z-")  # _FIXED + 1 day
+        assert record.attempt_id.startswith("attempt-20260102t000000z-")
+        assert record.created_at_utc == _FIXED + timedelta(days=1)
 
 
 class TestVersioningIndependence:

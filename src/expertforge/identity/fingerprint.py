@@ -25,10 +25,11 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
     "DIGEST_HEX_PATTERN",
+    "FINGERPRINT_ID_PATTERN",
     "FINGERPRINT_VERSION",
     "FINGERPRINT_VERSION_STR",
     "FingerprintMismatch",
@@ -38,6 +39,7 @@ __all__ = [
     "ImmutableInput",
     "SpecificationFingerprintRecord",
     "specification_fingerprint",
+    "validate_fingerprint_id",
     "verify_fingerprint",
 ]
 
@@ -61,6 +63,17 @@ IMMUTABLE_INPUT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 DIGEST_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # v1 supports SHA-256 only.
 SUPPORTED_ALGORITHMS: frozenset[str] = frozenset({"sha256"})
+# Public specification fingerprint ID format: spec-v1-sha256-<64 hex>.
+FINGERPRINT_ID_PATTERN = re.compile(rf"^spec-{FINGERPRINT_VERSION_STR}-sha256-[0-9a-f]{{64}}$")
+
+
+def validate_fingerprint_id(value: str) -> None:
+    """Raise ValueError if ``value`` is not a valid specification fingerprint ID."""
+    if not FINGERPRINT_ID_PATTERN.match(value):
+        raise ValueError(
+            f"Invalid specification fingerprint ID {value!r}; "
+            f"must match {FINGERPRINT_ID_PATTERN.pattern}."
+        )
 
 
 def _canonical_json_bytes(obj: Any) -> bytes:
@@ -189,6 +202,41 @@ class SpecificationFingerprintRecord(BaseModel):
                 f"digest_str hex suffix must be 64 lowercase hex chars; got {hexpart!r}."
             )
         return v
+
+    @model_validator(mode="after")
+    def _enforce_canonical_invariants(self) -> SpecificationFingerprintRecord:
+        # Schema name must be the canonical contract value.
+        if self.schema_name != "expertforge.specification-fingerprint":
+            raise ValueError(
+                f"schema name must be 'expertforge.specification-fingerprint'; got {self.schema_name!r}."
+            )
+        # Immutable inputs must be uniquely named and name-sorted.
+        names = [ii.name for ii in self.immutable_inputs]
+        if len(set(names)) != len(names):
+            dups = sorted({n for n in names if names.count(n) > 1})
+            raise ValueError(f"Duplicate immutable-input names: {dups}")
+        if names != sorted(names):
+            raise ValueError(f"immutable_inputs must be sorted by name; got {names!r}.")
+        # The stored public digest must match a digest recomputed from the
+        # stored envelope bytes (detects in-place tampering of any field).
+        recomputed = hashlib.sha256(self.envelope_canonical_bytes()).hexdigest()
+        expected = self.digest_str.rsplit("-", 1)[-1]
+        if recomputed != expected:
+            raise ValueError(
+                f"digest_str {expected!r} does not match recomputed envelope digest {recomputed!r}."
+            )
+        return self
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        # Always serialize `schema_name` as the contractual `schema` key so the
+        # sidecar and envelope round-trip emit the canonical name regardless of
+        # whether the caller passed by_alias=True.
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs: Any) -> str:
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump_json(**kwargs)
 
     def envelope_dict(self) -> dict[str, Any]:
         """The canonicalizable envelope as a plain (sorted on serialization) dict."""
