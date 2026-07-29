@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #7 provenance completed.
+Last updated: Milestone 0 in progress; #7 provenance in review (not yet merged).
 
 ## Current milestone
 
