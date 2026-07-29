@@ -10,6 +10,7 @@ Immutable inputs are validated: stable lowercase names, ``sha256`` only for v1,
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -157,6 +158,27 @@ class TestImmutableInputValidation:
 # --- deep immutability + round-trip (review item 2) -----------------------
 
 
+class TestTrailingNewlineRejection:
+    """Regression: validators must use .fullmatch() so trailing newlines are
+    rejected (Python's `$` matches before a final newline under .match())."""
+
+    def test_fingerprint_id_newline_rejected(self) -> None:
+        from expertforge.identity.fingerprint import validate_fingerprint_id
+
+        good = "spec-v1-sha256-" + "a" * 64
+        validate_fingerprint_id(good)  # base accepts
+        with pytest.raises(ValueError):
+            validate_fingerprint_id(good + "\n")
+
+    def test_immutable_input_name_newline_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ImmutableInput(name="dataset\n", algorithm="sha256", digest="a" * 64)
+
+    def test_immutable_input_digest_newline_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ImmutableInput(name="dataset", algorithm="sha256", digest="a" * 64 + "\n")
+
+
 class TestFingerprintRecordImmutability:
     def test_record_is_frozen(self) -> None:
         env = resolve_config(CONFIGS / "smoke.yaml")
@@ -246,7 +268,28 @@ class TestFingerprintRecordImmutability:
         d = fp.model_dump(mode="json")
         assert "schema" in d
         assert "schema_name" not in d
-        assert d["schema"] == "expertforge.specification-fingerprint"
+
+    def test_sidecar_parent_path_serializes_schema_key(self) -> None:
+        # Regression: the nested serializer must emit `schema` even when the
+        # fingerprint is serialized via the parent AttemptIdentityRecord's
+        # model_dump_json (which does not call the child's overridden dump).
+        from expertforge.identity.record import AttemptIdentityRecord
+
+        env = resolve_config(CONFIGS / "smoke.yaml")
+        fp = specification_fingerprint(canonical_bytes(env))
+        rec = AttemptIdentityRecord(
+            specification_fingerprint=fp,
+            run_id="run-20260101t000000z-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb",
+            attempt_id="attempt-20260101t000000z-cccccccccccccccccccc",
+            created_at_utc=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        )
+        import json as _json
+
+        d = _json.loads(rec.to_deterministic_json())
+        fp_obj = d["specification_fingerprint"]
+        assert "schema" in fp_obj
+        assert fp_obj["schema"] == "expertforge.specification-fingerprint"
+        assert "schema_name" not in fp_obj
 
 
 # --- determinism of envelope canonicalization -----------------------------

@@ -158,6 +158,34 @@ class TestEntropyFloor:
 # --- spec-prefix hex + UTC invariants (review item 5) ---------------------
 
 
+class TestTrailingNewlineRejection:
+    """Regression: `.fullmatch()` (not `.match()` with `$`) must reject values
+    ending in a newline, since Python's `$` matches before a final newline."""
+
+    @pytest.mark.parametrize(
+        "valid,pattern_call",
+        [
+            ("run-20260101t000000z-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb", "validate_run_id"),
+            ("attempt-20260101t000000z-cccccccccccccccccccc", "validate_attempt_id"),
+        ],
+    )
+    def test_newline_suffix_rejected(self, valid: str, pattern_call: str) -> None:
+        from expertforge.identity import ids as ids_mod
+
+        fn = getattr(ids_mod, pattern_call)
+        fn(valid)  # base accepts
+        with pytest.raises(ValueError):
+            fn(valid + "\n")
+
+    def test_spec_prefix_newline_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            run_id(spec_prefix="0123456789ab\n")
+
+    def test_spec_prefix_carriage_return_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            run_id(spec_prefix="0123456789ab\r")
+
+
 class TestSpecPrefixAndUtcInvariants:
     @pytest.mark.parametrize("bad_prefix", ["A" * 12, "g" * 12, "a" * 11, "a" * 13, "", "z" * 12])
     def test_invalid_spec_prefix_rejected(self, bad_prefix: str) -> None:

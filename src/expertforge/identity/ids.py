@@ -66,18 +66,28 @@ class IdentityCollisionError(Exception):
 
 def validate_run_id(value: str) -> None:
     """Raise ValueError if ``value`` is not a valid run ID."""
-    if not RUN_ID_PATTERN.match(value):
+    if not RUN_ID_PATTERN.fullmatch(value):
         raise ValueError(f"Invalid run_id {value!r}; must match {RUN_ID_PATTERN.pattern}.")
+
+
+def run_id_spec_prefix(run_id_value: str) -> str:
+    """Extract the 12-hex specification-fingerprint prefix embedded in a run ID.
+
+    Raises ValueError if the run ID is not valid.
+    """
+    validate_run_id(run_id_value)
+    # run-<ts>-<12hex>-<20hex> ; the spec prefix is the third dash segment.
+    return run_id_value.split("-")[2]
 
 
 def validate_attempt_id(value: str) -> None:
     """Raise ValueError if ``value`` is not a valid attempt ID."""
-    if not ATTEMPT_ID_PATTERN.match(value):
+    if not ATTEMPT_ID_PATTERN.fullmatch(value):
         raise ValueError(f"Invalid attempt_id {value!r}; must match {ATTEMPT_ID_PATTERN.pattern}.")
 
 
 def _validate_spec_prefix(spec_prefix: str) -> None:
-    if not SPEC_PREFIX_PATTERN.match(spec_prefix):
+    if not SPEC_PREFIX_PATTERN.fullmatch(spec_prefix):
         raise ValueError(
             f"spec_prefix must be {_SPEC_PREFIX_LEN} lowercase hex chars; got {spec_prefix!r}."
         )

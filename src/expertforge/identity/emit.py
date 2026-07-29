@@ -32,6 +32,7 @@ from expertforge.identity.fingerprint import (
     FingerprintMismatch,
     ImmutableInput,
     SpecificationFingerprintRecord,
+    fingerprint_id_prefix,
     specification_fingerprint,
     validate_fingerprint_id,
 )
@@ -43,6 +44,7 @@ from expertforge.identity.ids import (
     IdentityCollisionError,
     attempt_id,
     run_id,
+    run_id_spec_prefix,
 )
 from expertforge.identity.lineage import ResumeLineage
 from expertforge.identity.record import AttemptIdentityRecord
@@ -151,6 +153,8 @@ def emit_attempt_identity(
         _verify_parent_spec(fp, parent_specification_fingerprint, mode)
         if lineage.parent_run_id != retained_run_id:
             raise IdentityEmitError("RESUME lineage.parent_run_id must equal retained_run_id.")
+        _require_retained_run_prefix(retained_run_id, prefix, mode)
+        _require_parent_run_prefix(lineage.parent_run_id, parent_specification_fingerprint, mode)
         rid = retained_run_id
         record_lineage = lineage
 
@@ -167,13 +171,15 @@ def emit_attempt_identity(
             )
         if parent_specification_fingerprint is None:
             raise IdentityEmitError("FORK mode requires parent_specification_fingerprint.")
-        # FORK does NOT verify spec match — the specification is materially
-        # changed — but the parent fingerprint ID format must still be valid
-        # (it is recorded as parentage provenance).
+        # FORK does NOT verify the current spec matches the parent's (the
+        # specification is materially changed), but the parent fingerprint ID
+        # format must be valid and the parent run's embedded prefix must match
+        # the parent fingerprint's prefix.
         try:
             validate_fingerprint_id(parent_specification_fingerprint)
         except ValueError as e:
             raise IdentityEmitError(str(e)) from e
+        _require_parent_run_prefix(lineage.parent_run_id, parent_specification_fingerprint, mode)
         rid = _generate_run_id(prefix, frozen_clock, entropy, exists, max_retries)
         record_lineage = lineage
 
@@ -187,6 +193,8 @@ def emit_attempt_identity(
         _verify_parent_spec(fp, parent_specification_fingerprint, mode)
         if lineage.parent_run_id != retained_run_id:
             raise IdentityEmitError("LEGACY lineage.parent_run_id must equal retained_run_id.")
+        _require_retained_run_prefix(retained_run_id, prefix, mode)
+        _require_parent_run_prefix(lineage.parent_run_id, parent_specification_fingerprint, mode)
         rid = retained_run_id
         record_lineage = lineage
 
@@ -228,6 +236,42 @@ def _verify_parent_spec(
             )
     except (FingerprintMismatch, ValueError) as e:
         raise IdentityEmitError(str(e)) from e
+
+
+def _require_retained_run_prefix(
+    retained_run_id: str, current_prefix: str, mode: AllocationMode
+) -> None:
+    """For RESUME/LEGACY: the retained run ID's embedded spec prefix must match
+    the current (== parent, since the spec is unchanged) fingerprint prefix."""
+    try:
+        run_prefix = run_id_spec_prefix(retained_run_id)
+    except ValueError as e:  # invalid run ID format
+        raise IdentityEmitError(str(e)) from e
+    if run_prefix != current_prefix:
+        raise IdentityEmitError(
+            f"{mode.value.capitalize()} retained_run_id's embedded spec prefix "
+            f"{run_prefix!r} does not match the current specification fingerprint "
+            f"prefix {current_prefix!r}."
+        )
+
+
+def _require_parent_run_prefix(
+    parent_run_id: str, parent_specification_fingerprint: str, mode: AllocationMode
+) -> None:
+    """For RESUME/LEGACY/FORK: the parent run ID's embedded spec prefix must
+    match the parent specification fingerprint's prefix (the parent run must
+    belong to the parent specification)."""
+    try:
+        run_prefix = run_id_spec_prefix(parent_run_id)
+        fp_prefix = fingerprint_id_prefix(parent_specification_fingerprint)
+    except ValueError as e:  # invalid run-ID or fingerprint-ID format
+        raise IdentityEmitError(str(e)) from e
+    if run_prefix != fp_prefix:
+        raise IdentityEmitError(
+            f"{mode.value.capitalize()} lineage.parent_run_id's embedded spec prefix "
+            f"{run_prefix!r} does not match the parent specification fingerprint "
+            f"prefix {fp_prefix!r}."
+        )
 
 
 def _generate_run_id(

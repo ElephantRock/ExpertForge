@@ -69,11 +69,20 @@ FINGERPRINT_ID_PATTERN = re.compile(rf"^spec-{FINGERPRINT_VERSION_STR}-sha256-[0
 
 def validate_fingerprint_id(value: str) -> None:
     """Raise ValueError if ``value`` is not a valid specification fingerprint ID."""
-    if not FINGERPRINT_ID_PATTERN.match(value):
+    if not FINGERPRINT_ID_PATTERN.fullmatch(value):
         raise ValueError(
             f"Invalid specification fingerprint ID {value!r}; "
             f"must match {FINGERPRINT_ID_PATTERN.pattern}."
         )
+
+
+def fingerprint_id_prefix(value: str) -> str:
+    """Extract the first 12 hex chars of a specification fingerprint ID.
+
+    Raises ValueError if the ID is not valid.
+    """
+    validate_fingerprint_id(value)
+    return value.rsplit("-", 1)[-1][:12]
 
 
 def _canonical_json_bytes(obj: Any) -> bytes:
@@ -104,7 +113,7 @@ class ImmutableInput(BaseModel):
     @field_validator("name")
     @classmethod
     def _validate_name(cls, v: str) -> str:
-        if not IMMUTABLE_INPUT_NAME_PATTERN.match(v):
+        if not IMMUTABLE_INPUT_NAME_PATTERN.fullmatch(v):
             raise ValueError(
                 f"immutable-input name {v!r} must match {IMMUTABLE_INPUT_NAME_PATTERN.pattern} "
                 "(stable lowercase identifier; no path separators)."
@@ -124,7 +133,7 @@ class ImmutableInput(BaseModel):
     @field_validator("digest")
     @classmethod
     def _validate_digest(cls, v: str) -> str:
-        if not DIGEST_HEX_PATTERN.match(v):
+        if not DIGEST_HEX_PATTERN.fullmatch(v):
             raise ValueError(f"immutable-input digest must be 64 lowercase hex chars; got {v!r}.")
         return v
 
@@ -150,7 +159,7 @@ class CanonicalConfigDigest(BaseModel):
     @field_validator("digest")
     @classmethod
     def _validate_digest(cls, v: str) -> str:
-        if not DIGEST_HEX_PATTERN.match(v):
+        if not DIGEST_HEX_PATTERN.fullmatch(v):
             raise ValueError(f"canonical-config digest must be 64 lowercase hex chars; got {v!r}.")
         return v
 
@@ -169,6 +178,11 @@ class SpecificationFingerprintRecord(BaseModel):
         validate_default=True,
         strict=True,
         populate_by_name=True,
+        # Force alias serialization at the compiled-model level so the
+        # contractual `schema` key is emitted even when the record is nested
+        # inside AttemptIdentityRecord and serialized via the parent's
+        # model_dump_json() (which does not call this model's overridden dump).
+        serialize_by_alias=True,
     )
 
     # Named `schema_name` to avoid shadowing BaseModel.schema; serialized as
@@ -226,17 +240,6 @@ class SpecificationFingerprintRecord(BaseModel):
                 f"digest_str {expected!r} does not match recomputed envelope digest {recomputed!r}."
             )
         return self
-
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        # Always serialize `schema_name` as the contractual `schema` key so the
-        # sidecar and envelope round-trip emit the canonical name regardless of
-        # whether the caller passed by_alias=True.
-        kwargs.setdefault("by_alias", True)
-        return super().model_dump(**kwargs)
-
-    def model_dump_json(self, **kwargs: Any) -> str:
-        kwargs.setdefault("by_alias", True)
-        return super().model_dump_json(**kwargs)
 
     def envelope_dict(self) -> dict[str, Any]:
         """The canonicalizable envelope as a plain (sorted on serialization) dict."""

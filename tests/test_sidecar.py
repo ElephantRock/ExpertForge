@@ -125,6 +125,34 @@ class TestSidecarWrite:
         p = write_identity_sidecar(tmp_path, rec)
         assert p.exists()
 
+    def test_close_failure_cleans_up_and_allows_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Patch os.close to fail on the first call (after a successful write +
+        # fsync). The cleanup handler must unlink the file and surface a typed
+        # IdentitySidecarError; a subsequent exclusive write must succeed.
+
+        original_close = os.close
+        calls = {"n": 0}
+
+        def flaky_close(fd: int) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("simulated close failure")
+            original_close(fd)
+
+        monkeypatch.setattr("os.close", flaky_close)
+        rec = _record()
+        target = sidecar_path(tmp_path, rec.run_id, rec.attempt_id)
+        with pytest.raises(IdentitySidecarError):
+            write_identity_sidecar(tmp_path, rec)
+        # The partial file must have been removed despite the close failure.
+        assert not target.exists()
+        # Restore real close -> an exclusive retry succeeds.
+        monkeypatch.setattr("os.close", original_close)
+        p = write_identity_sidecar(tmp_path, rec)
+        assert p.exists()
+
 
 # --- load: typed, version rejection, fingerprint verify, error boundary ----
 

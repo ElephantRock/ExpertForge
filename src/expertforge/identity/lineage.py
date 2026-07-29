@@ -20,13 +20,13 @@ __all__ = ["ResumeLineage"]
 
 
 def _validate_run_like(v: str) -> str:
-    if not RUN_ID_PATTERN.match(v):
+    if not RUN_ID_PATTERN.fullmatch(v):
         raise ValueError(f"Invalid parent_run_id {v!r}; must match {RUN_ID_PATTERN.pattern}.")
     return v
 
 
 def _validate_attempt_like(v: str) -> str:
-    if not ATTEMPT_ID_PATTERN.match(v):
+    if not ATTEMPT_ID_PATTERN.fullmatch(v):
         raise ValueError(
             f"Invalid parent_attempt_id {v!r}; must match {ATTEMPT_ID_PATTERN.pattern}."
         )

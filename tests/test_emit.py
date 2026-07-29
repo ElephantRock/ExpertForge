@@ -183,6 +183,37 @@ class TestResumeMode:
                 entropy=lambda n: bytes(n),
             )
 
+    def test_resume_rejects_retained_run_with_wrong_prefix(self, tmp_path: Path) -> None:
+        # A retained run whose embedded spec prefix disagrees with the current
+        # fingerprint must be rejected, even if it's syntactically valid.
+        from expertforge.identity.lineage import ResumeLineage
+
+        first, _ = emit_attempt_identity(
+            artifact_root=tmp_path,
+            config_envelope=_env(),
+            clock=lambda: _FIXED,
+            entropy=lambda n: b"\x01" * n,
+        )
+        fp_str = first.fingerprint_digest_str()
+        # Swap the retained run's embedded prefix to a different valid 12-hex.
+        wrong_prefix_run = first.run_id.replace(first.run_id.split("-")[2], "000000000000")
+        lin = ResumeLineage(
+            parent_run_id=wrong_prefix_run,
+            parent_attempt_id=first.attempt_id,
+            parent_checkpoint_id="ckpt-1",
+        )
+        with pytest.raises(IdentityEmitError):
+            emit_attempt_identity(
+                artifact_root=tmp_path,
+                config_envelope=_env(),
+                mode=AllocationMode.RESUME,
+                lineage=lin,
+                parent_specification_fingerprint=fp_str,
+                retained_run_id=wrong_prefix_run,
+                clock=lambda: _FIXED,
+                entropy=lambda n: b"\x02" * n,
+            )
+
 
 class TestForkMode:
     def test_fork_new_run_id_with_parent_lineage(self, tmp_path: Path) -> None:
@@ -251,6 +282,38 @@ class TestForkMode:
                     clock=lambda: _FIXED,
                     entropy=lambda n: bytes(n),
                 )
+
+    def test_fork_rejects_parent_run_with_wrong_prefix(self, tmp_path: Path) -> None:
+        # FORK: the parent run's embedded prefix must match the parent
+        # fingerprint's prefix, even though the current (fork) fingerprint
+        # legitimately differs from the parent fingerprint.
+        from expertforge.identity.lineage import ResumeLineage
+
+        first, _ = emit_attempt_identity(
+            artifact_root=tmp_path,
+            config_envelope=_env(),
+            clock=lambda: _FIXED,
+            entropy=lambda n: b"\x01" * n,
+        )
+        # A syntactically valid parent run whose prefix differs from the parent
+        # fingerprint's prefix.
+        wrong_prefix_parent_run = first.run_id.replace(first.run_id.split("-")[2], "000000000000")
+        lin = ResumeLineage(
+            parent_run_id=wrong_prefix_parent_run,
+            parent_attempt_id=first.attempt_id,
+            parent_checkpoint_id="ckpt-1",
+        )
+        changed = resolve_config(CONFIGS / "smoke.yaml", ["training.seed=999"])
+        with pytest.raises(IdentityEmitError):
+            emit_attempt_identity(
+                artifact_root=tmp_path,
+                config_envelope=changed,
+                mode=AllocationMode.FORK,
+                lineage=lin,
+                parent_specification_fingerprint=first.fingerprint_digest_str(),
+                clock=lambda: _FIXED,
+                entropy=lambda n: b"\x03" * n,
+            )
 
     def test_resume_rejects_invalid_parent_fingerprint_format(self, tmp_path: Path) -> None:
         from expertforge.identity.lineage import ResumeLineage
