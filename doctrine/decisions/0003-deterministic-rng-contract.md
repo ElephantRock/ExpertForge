@@ -53,8 +53,8 @@ checkpoint embedding without pre-empting Issue #11's file-format ownership.
 11. RNG state is a frozen, versioned, non-pickle Pydantic payload. Python and NumPy
     states are structural. Framework byte states use canonical base64 transport
     with SHA-256 verification. Persisted JSON permits structural array-to-tuple
-    decoding but forbids scalar/domain coercion. Issue #11 embeds this payload
-    into checkpoints.
+    decoding but forbids scalar/domain coercion, including boolean values posing
+    as integer state flags. Issue #11 embeds this payload into checkpoints.
 
 ## Alternatives considered
 
@@ -91,6 +91,8 @@ checkpoint embedding without pre-empting Issue #11's file-format ownership.
   streams, seed failure, restore failure, and complete rollback.
 - Optional provider probes and API failures are translated into stable typed codes;
   raw exception text is not persisted in RNG evidence.
+- Strict-load regressions reject string, boolean, non-finite, non-canonical device,
+  and authenticated-payload violations at the persisted model boundary.
 - Permanent CI tests same-seed equality, different-seed sensitivity, state
   round-trip, subprocess repeatability, adapter behavior, and failure paths.
 
