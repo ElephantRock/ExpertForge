@@ -117,7 +117,7 @@ uv run --locked pytest -m "not integration and not smoke and not accelerator"
 Portable CPU integration suite:
 
 ```bash
-uv run --locked pytest -m "integration and not accelerator"
+uv run --locked pytest -m "integration and not smoke and not accelerator"
 ```
 
 The unfiltered `uv run --locked pytest` command is the complete current suite.
