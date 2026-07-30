@@ -22,6 +22,7 @@ from expertforge.provenance.record import (
     PROVENANCE_SCHEMA_VERSION,
     AcceleratorInfo,
     CPUInfo,
+    DependencyObservation,
     LockfileDigest,
     MemoryInfo,
     PlatformInfo,
@@ -163,4 +164,150 @@ class TestProvenanceRecordIdentityBinding:
                 start_time_utc=datetime(2026, 1, 1, 0, 0, 0, tzinfo=non_utc),
                 source=snap,
                 **_unavailable_sections(),
+            )
+
+
+# --- completeness derivation from all sections (review item 4) -------------
+
+
+class TestDeriveCompletenessAllSections:
+    """``_derive_completeness`` propagates dependency conflicts, CPU/memory
+    platform states, and topology warnings to the whole-record completeness."""
+
+    def test_dependency_conflict_propagates_partial(self, tmp_path: Path) -> None:
+        ident, snap = _identity(tmp_path)
+        software = SoftwareEnvironment(
+            python=PythonInfo(version="3.11", implementation="cpython"),
+            platform=PlatformInfo(
+                cpu=CPUInfo(status="unavailable"),
+                memory=MemoryInfo(status="unavailable"),
+            ),
+            dependencies=(DependencyObservation(name="numpy", version="1.0.0"),),
+            dependency_conflicts=("dependency_version_conflict:numpy:1.0.0!=2.0.0",),
+            lockfile=LockfileDigest(status="unavailable"),
+        )
+        rec = ProvenanceRecord.from_identity(ident, source=snap, software=software)
+        assert "dependency_version_conflict" in rec.completeness.warnings
+        assert rec.completeness.status == "partial"
+
+    def test_cpu_error_propagates(self, tmp_path: Path) -> None:
+        ident, snap = _identity(tmp_path)
+        software = SoftwareEnvironment(
+            python=PythonInfo(version="3.11", implementation="cpython"),
+            platform=PlatformInfo(
+                cpu=CPUInfo(status="error"),
+                memory=MemoryInfo(status="unavailable"),
+            ),
+            lockfile=LockfileDigest(status="unavailable"),
+        )
+        rec = ProvenanceRecord.from_identity(ident, source=snap, software=software)
+        assert "cpu_error" in rec.completeness.warnings
+        assert rec.completeness.status == "error"
+
+    def test_memory_redacted_propagates(self, tmp_path: Path) -> None:
+        ident, snap = _identity(tmp_path)
+        software = SoftwareEnvironment(
+            python=PythonInfo(version="3.11", implementation="cpython"),
+            platform=PlatformInfo(
+                cpu=CPUInfo(status="unavailable"),
+                memory=MemoryInfo(status="redacted"),
+            ),
+            lockfile=LockfileDigest(status="unavailable"),
+        )
+        rec = ProvenanceRecord.from_identity(ident, source=snap, software=software)
+        assert "memory_redacted" in rec.completeness.warnings
+        assert rec.completeness.status == "partial"
+
+    def test_platform_error_propagates(self, tmp_path: Path) -> None:
+        ident, snap = _identity(tmp_path)
+        software = SoftwareEnvironment(
+            python=PythonInfo(version="3.11", implementation="cpython"),
+            platform=PlatformInfo(
+                status="error",
+                cpu=CPUInfo(status="unavailable"),
+                memory=MemoryInfo(status="unavailable"),
+            ),
+            lockfile=LockfileDigest(status="unavailable"),
+        )
+        rec = ProvenanceRecord.from_identity(ident, source=snap, software=software)
+        assert "platform_error" in rec.completeness.warnings
+        assert rec.completeness.status == "error"
+
+    def test_topology_warnings_propagate_durable(self, tmp_path: Path) -> None:
+        # TopologyInfo carries topology_warnings durably (round-trips through
+        # JSON) and they appear in the derived whole-record warnings.
+        ident, snap = _identity(tmp_path)
+        topo = TopologyInfo(
+            status="available",
+            rank=0,
+            world_size=2,
+            topology_warnings=("invalid_topology_env_value:RANK",),
+        )
+        rec = ProvenanceRecord.from_identity(ident, source=snap, topology=topo)
+        assert "invalid_topology_env_value:RANK" in rec.completeness.warnings
+        # Round-trips through JSON: topology_warnings survive on the model.
+        restored = ProvenanceRecord.model_validate_json(rec.model_dump_json())
+        assert restored.topology.topology_warnings == ("invalid_topology_env_value:RANK",)
+        assert "invalid_topology_env_value:RANK" in restored.completeness.warnings
+
+
+# --- CPU/Memory cross-field validators (review item 5) ---------------------
+
+
+class TestCpuMemoryCrossFieldValidators:
+    def test_cpu_available_requires_count(self) -> None:
+        with pytest.raises(ValidationError):
+            CPUInfo(status="available", count=None)
+
+    def test_cpu_available_with_count_accepted(self) -> None:
+        cpu = CPUInfo(status="available", count=4)
+        assert cpu.count == 4
+
+    def test_cpu_unavailable_rejects_count(self) -> None:
+        with pytest.raises(ValidationError):
+            CPUInfo(status="unavailable", count=4)
+
+    def test_cpu_error_rejects_count(self) -> None:
+        with pytest.raises(ValidationError):
+            CPUInfo(status="error", count=4)
+
+    def test_memory_available_requires_total_bytes(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryInfo(status="available", total_bytes=None)
+
+    def test_memory_unavailable_rejects_total_bytes(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryInfo(status="unavailable", total_bytes=1024)
+
+
+# --- TopologyInfo model invariants (review item 5) -------------------------
+
+
+class TestTopologyInfoInvariants:
+    def test_error_rejects_local_rank(self) -> None:
+        # status='error' must not carry concrete rank/world_size/local_rank.
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="error", local_rank=0)
+
+    def test_not_applicable_rejects_local_rank(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="not_applicable", local_rank=0)
+
+    def test_error_allows_node_count_and_backend(self) -> None:
+        # node_count and backend are descriptive; allowed even on error.
+        topo = TopologyInfo(status="error", node_count=2, backend="nccl")
+        assert topo.node_count == 2
+        assert topo.backend == "nccl"
+
+    def test_available_rejects_local_rank_ge_world_size(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="available", rank=0, world_size=4, local_rank=4)
+
+    def test_topology_warnings_must_be_sorted(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(
+                status="available",
+                rank=0,
+                world_size=2,
+                topology_warnings=("z_warn", "a_warn"),
             )

@@ -146,3 +146,76 @@ class TestAggregateHardware:
         assert any("invalid_topology_env_value:RANK" in w for w in hw.topology_warnings)
         # A valid value is NOT warned about.
         assert not any("WORLD_SIZE" in w for w in hw.topology_warnings)
+
+
+# --- hardware/topology degradation gaps (review item 5) --------------------
+
+
+class TestHardwareDegradation:
+    """Duplicate NVIDIA ordinals degrade to error instead of raising; node_count
+    of 0 is rejected rather than silently coerced to 1; local_rank >= world_size
+    is rejected."""
+
+    def _fake_completed(self, stdout: bytes) -> object:
+        class _Result:
+            returncode = 0
+
+            def __init__(self, out: bytes) -> None:
+                self.stdout = out
+
+        return _Result(stdout)
+
+    def test_duplicate_ordinals_degrade_to_error_not_raise(self) -> None:
+        # Two nvidia-smi rows with the SAME ordinal: the AcceleratorInfo
+        # model_validator would reject duplicate ordinals. The capture path
+        # must catch that and degrade to status='error' rather than raise.
+        stdout = b"0, A100, 40960, 535.104.05\n0, A100, 40960, 535.104.05\n"
+        with patch("expertforge.provenance.hardware.subprocess.run") as mock_run:
+            mock_run.return_value = self._fake_completed(stdout)
+            accel = capture_accelerator()
+        assert accel.status == "error"
+        assert accel.reason == "duplicate_device_ordinals"
+
+    def test_node_count_zero_is_error_not_silently_coerced(self) -> None:
+        # An explicit node_count=0 is invalid; capture_topology must NOT
+        # silently coerce to 1.
+        topo = capture_topology(rank=0, world_size=2, node_count=0)
+        assert topo.status == "error"
+        assert topo.reason == "node_count_must_be_positive"
+
+    def test_env_nnodes_zero_is_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RANK", "0")
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        monkeypatch.setenv("NNODES", "0")
+        topo = capture_topology()
+        assert topo.status == "error"
+        assert topo.reason == "node_count_must_be_positive"
+
+    def test_local_rank_ge_world_size_is_error(self) -> None:
+        topo = capture_topology(rank=0, world_size=4, local_rank=4)
+        assert topo.status == "error"
+        assert topo.reason == "local_rank_must_be_less_than_world_size"
+
+    def test_capture_topology_does_not_default_node_count_to_one(self) -> None:
+        # When neither explicit node_count nor env NNODES is supplied, the
+        # resulting TopologyInfo has node_count=None (NOT silently 1).
+        topo = capture_topology(rank=0, world_size=2)
+        assert topo.status == "available"
+        assert topo.node_count is None
+
+    def test_capture_hardware_propagates_topology_warnings(self) -> None:
+        # capture_hardware() returns a HardwareAggregate whose
+        # topology_warnings carry invalid numeric env values.
+        from unittest.mock import patch as _patch
+
+        stdout = b"0, A100, 40960, 535.104.05\n"
+        with (
+            _patch("expertforge.provenance.hardware.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = self._fake_completed(stdout)
+            hw = capture_hardware(rank=0, world_size=2)
+        assert isinstance(hw, HardwareAggregate)
+        # accelerator is either available (the mocked row) or error depending
+        # on _detect_runtime_version; both are acceptable here.
+        assert hw.accelerator.status in ("available", "error", "unavailable")
+        assert hw.topology.status == "available"

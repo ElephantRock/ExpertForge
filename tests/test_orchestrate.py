@@ -196,6 +196,32 @@ class TestPrepareRun:
         assert "accelerator_error" in provenance.completeness.warnings
         assert provenance.completeness.status == "error"
 
+    def test_prepare_run_propagates_topology_warnings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # prepare_run() uses capture_hardware() (not capture_accelerator() +
+        # capture_topology() separately) so topology_warnings are NOT lost
+        # between the two calls. An unparseable RANK env value must surface in
+        # the provenance record's completeness warnings.
+        from expertforge.config.resolve import resolve_config
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        monkeypatch.setenv("RANK", "not-an-int")
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        _, provenance, _ = prepare_run(
+            artifact_root=tmp_path / "runs",
+            config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+            repo=repo,
+            clock=lambda: _FIXED,
+            entropy=lambda n: bytes(n),
+        )
+        # The topology warning is stored durably on TopologyInfo AND surfaces
+        # in the whole-record completeness warnings.
+        assert "invalid_topology_env_value:RANK" in provenance.topology.topology_warnings
+        assert "invalid_topology_env_value:RANK" in provenance.completeness.warnings
+
 
 # --- RESUME / FORK / LEGACY via prepare_run --------------------------------
 

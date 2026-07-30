@@ -135,19 +135,28 @@ def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0)
     # Sort by ordinal for deterministic ordering.
     devices.sort(key=lambda d: d.ordinal)
     runtime_version = _detect_runtime_version()
-    return AcceleratorInfo(
-        status=FieldStatus.AVAILABLE.value,
-        framework="cuda",
-        # CUDA is not a deep-learning framework (Torch/JAX/TF are); only the
-        # runtime distribution version is recorded under runtime_version.
-        framework_version=None,
-        runtime_version=runtime_version,
-        # The binding decision says unavailable capabilities must be recorded
-        # as 'unavailable', not 'not_applicable' — we did not probe precision.
-        precision_status=FieldStatus.UNAVAILABLE.value,
-        device_count=len(devices),
-        devices=tuple(devices),
-    )
+    try:
+        return AcceleratorInfo(
+            status=FieldStatus.AVAILABLE.value,
+            framework="cuda",
+            # CUDA is not a deep-learning framework (Torch/JAX/TF are); only the
+            # runtime distribution version is recorded under runtime_version.
+            framework_version=None,
+            runtime_version=runtime_version,
+            # The binding decision says unavailable capabilities must be recorded
+            # as 'unavailable', not 'not_applicable' — we did not probe precision.
+            precision_status=FieldStatus.UNAVAILABLE.value,
+            device_count=len(devices),
+            devices=tuple(devices),
+        )
+    except ValueError:
+        # The AcceleratorInfo model_validator rejects duplicate ordinals. A
+        # malformed nvidia-smi output that yields two rows with the same ordinal
+        # must degrade to error rather than abort the whole capture.
+        return AcceleratorInfo(
+            status=FieldStatus.ERROR.value,
+            reason="duplicate_device_ordinals",
+        )
 
 
 # Topology environment allowlist — a narrow set of env vars that are safe to
@@ -243,12 +252,29 @@ def capture_topology(
                 reason="rank_must_be_less_than_world_size",
             )
 
+    # local_rank < world_size when both are present.
+    if resolved_local_rank is not None and resolved_world is not None:
+        if resolved_local_rank >= resolved_world:
+            return TopologyInfo(
+                status=FieldStatus.ERROR.value,
+                reason="local_rank_must_be_less_than_world_size",
+            )
+
+    # An explicitly-supplied node_count of 0 (or a parsed env NNODES=0) is
+    # invalid — at least one node is required for a real run. Do NOT silently
+    # coerce to 1; surface an error.
+    if resolved_nodes is not None and resolved_nodes < 1:
+        return TopologyInfo(
+            status=FieldStatus.ERROR.value,
+            reason="node_count_must_be_positive",
+        )
+
     return TopologyInfo(
         status=FieldStatus.AVAILABLE.value,
         rank=resolved_rank,
         local_rank=resolved_local_rank,
         world_size=resolved_world,
-        node_count=resolved_nodes or 1,
+        node_count=resolved_nodes,
         backend=backend,
     )
 

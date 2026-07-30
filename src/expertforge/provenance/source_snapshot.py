@@ -32,7 +32,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -145,26 +145,45 @@ _RemoteWarningCode = Literal[
 ]
 
 
-def _remote_url(repo: Path) -> tuple[str | None, tuple[_RemoteWarningCode, ...]]:
-    """Capture the ``origin`` remote URL, **sanitized at capture time**.
+def _raw_remote_url(repo: Path) -> str:
+    """Read the raw ``origin`` remote URL (NOT sanitized) from git config.
 
-    Returns ``(sanitized_url, warnings)``. If the raw URL contained credentials,
-    query parameters, fragments, or was a local path, the sanitized value may
-    be ``None`` and typed warnings are emitted. The raw URL is never exposed.
+    Returns the empty string if no origin is configured. The caller is
+    responsible for sanitizing — the raw value is intentionally exposed to the
+    SourceSnapshot model_validator which can correlate sanitization with
+    ``remote_warnings``.
     """
     try:
-        raw = _git_text(repo, ["config", "--get", "remote.origin.url"])
+        return _git_text(repo, ["config", "--get", "remote.origin.url"])
     except SourceUnavailableError:
-        return None, ()
+        return ""
+
+
+def _classify_remote_url_sanitization(
+    raw: str,
+) -> tuple[str | None, tuple[_RemoteWarningCode, ...]]:
+    """Classify the sanitization of a raw remote URL into (sanitized, warnings).
+
+    A URL with raw credentials, query/fragment, or a local/unsupported shape is
+    sanitized and the appropriate stable warnings are emitted. SCP-style URLs
+    like ``git@github.com:org/repo.git`` are NOT credential-bearing — the
+    ``git`` part is a protocol user, not a credential. Only ``@`` inside a URL
+    that also has a ``://`` scheme (e.g. ``https://user:token@host``) is treated
+    as credentials.
+    """
     if not raw:
         return None, ()
     warnings: list[_RemoteWarningCode] = []
-    # Detect credential-bearing URLs before sanitizing.
-    if "@" in raw.split("://")[-1] if "://" in raw else "@" in raw:
-        warnings.append("remote_credentials_removed")
+    # Detect credential-bearing URLs BEFORE sanitizing. Only an ``@`` that
+    # appears inside a ``://``-scheme URL counts as credentials. The SCP-style
+    # ``git@host:path`` form has no scheme; its ``git`` is a protocol user, not
+    # a credential, and is preserved verbatim by sanitize_repository_url().
+    if "://" in raw:
+        after_scheme = raw.split("://", 1)[1]
+        if "@" in after_scheme and not after_scheme.startswith("git@"):
+            warnings.append("remote_credentials_removed")
     if "?" in raw or "#" in raw:
         warnings.append("remote_query_fragment_removed")
-    # Apply structural sanitization.
     from expertforge.provenance.software import sanitize_repository_url
 
     sanitized = sanitize_repository_url(raw)
@@ -182,6 +201,51 @@ def _is_dirty(repo: Path) -> bool:
     """True if tracked changes or untracked files exist."""
     out = _run_git(repo, ["status", "--porcelain", "-z", "--untracked-files=all"])
     return any(part.strip() for part in out.split(b"\x00"))
+
+
+def _tracked_gitlink_paths(repo: Path) -> set[str]:
+    """Return the set of tracked submodule gitlink paths from ``git ls-files --stage``.
+
+    A submodule is recorded in the index as a "gitlink" tree entry with mode
+    ``160000``. Git porcelain status for a modified submodule does NOT add a
+    trailing slash — the porcelain path is exactly the gitlink path. Intersecting
+    the tracked gitlink set with the non-clean porcelain entries is therefore
+    the correct way to detect "dirty submodule content that this snapshot does
+    not capture" (the porcelain entry may show a clean XY like `` M`` for a
+    worktree-only change, or ``??`` if the submodule is brand new but its
+    gitlink is already tracked under a different state).
+
+    The ``git ls-files --stage`` output format is::
+
+        <mode> <sha1> <stage>\t<path>
+
+    Each line is NUL-delimited when ``-z`` is passed.
+    """
+    try:
+        raw = _run_git(repo, ["ls-files", "--stage", "-z"])
+    except SourceUnavailableError:
+        return set()
+    gitlinks: set[str] = set()
+    for part in raw.split(b"\x00"):
+        if not part.strip():
+            continue
+        # Format: "<mode> <sha> <stage>\t<path>"
+        # The mode is the first whitespace-delimited token.
+        try:
+            decoded = part.decode("utf-8", errors="replace")
+        except UnicodeDecodeError:
+            continue
+        # Split off the path (after the tab).
+        if "\t" not in decoded:
+            continue
+        meta, path = decoded.split("\t", 1)
+        meta_parts = meta.split()
+        if not meta_parts:
+            continue
+        mode = meta_parts[0]
+        if mode == "160000":
+            gitlinks.add(path.strip())
+    return gitlinks
 
 
 def _staged_diff_digest(repo: Path) -> str:
@@ -280,6 +344,12 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     status_raw = _run_git(repo, ["status", "--porcelain", "-z", "--untracked-files=all"])
     entries = _parse_porcelain_z(status_raw)
 
+    # Tracked gitlink (mode 160000) paths from ``git ls-files --stage``. Git
+    # porcelain does NOT add trailing slashes to submodule entries, so trailing-
+    # slash heuristics miss real dirty submodules. The correct detection is the
+    # intersection of non-clean porcelain paths with tracked gitlink paths.
+    gitlink_paths = _tracked_gitlink_paths(repo)
+
     staged_digest = _staged_diff_digest(repo)
     unstaged_digest = _unstaged_diff_digest(repo)
 
@@ -289,12 +359,10 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     renamed_count = 0
     deleted_count = 0
     unreadable_count = 0
-    # Count submodule changes detected via porcelain status in addition to the
-    # `git submodule status` commit-state prefixes (which miss some changes).
-    # A submodule appears in porcelain status as a path ending in ``/`` (git
-    # marks directories with a trailing slash); a non-trivial XY on such a path
-    # indicates a submodule worktree or index change.
-    porcelain_submodule_changes = 0
+    # A tracked gitlink with a non-clean porcelain entry indicates that the
+    # submodule's working tree content differs from what this snapshot
+    # captures — its dirty content is NOT content-snapshotted here.
+    dirty_gitlink_paths: set[str] = set()
     for xy, path, _orig_path in entries:
         x, y = xy[0], xy[1]
         if x == "?" and y == "?":
@@ -310,13 +378,18 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
             renamed_count += 1
         if "D" in xy:
             deleted_count += 1
-        # Submodule-path change: trailing slash + non-trivial XY on either side.
-        if (
-            path
-            and (path.endswith("/") or path.endswith("\\"))
-            and (x not in (" ", "?", "!", "_") or y not in (" ", "?", "!", "_"))
-        ):
-            porcelain_submodule_changes += 1
+        # Gitlink-intersection detection: any non-clean entry whose path is a
+        # tracked submodule gitlink → its dirty content is not snapshotted.
+        # Renames/copies carry the new path in `path` and the original path in
+        # `_orig_path`; check both against the gitlink set.
+        candidate_paths = {path} | ({_orig_path} if _orig_path else set())
+        is_gitlink_change = any(p in gitlink_paths for p in candidate_paths if p)
+        if is_gitlink_change and (x not in (" ", "?") or y not in (" ", "?")):
+            # Count each dirty gitlink path once (use the gitlink path that
+            # matched — for a rename both old/new are tracked gitlinks).
+            for p in candidate_paths:
+                if p and p in gitlink_paths:
+                    dirty_gitlink_paths.add(p)
 
     untracked.sort(key=lambda e: e.path)
 
@@ -365,6 +438,10 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     except SourceUnavailableError:
         submodule_failed = True
 
+    # Sort submodule entries by name so the SourceEvidence model_validator
+    # (which requires sorted + unique names) accepts capture output.
+    submodule_entries.sort(key=lambda s: s.name)
+
     # Derive honest completeness + limitations.
     limitations: list[str] = []
     warnings: list[str] = []
@@ -376,13 +453,17 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
         warnings.append("submodule_inspection_failed")
     # Dirty/changed submodules are not content-snapshotted by `git submodule
     # status` — mark evidence partial. Count both the commit-state prefixes
-    # AND porcelain-detected submodule changes so a submodule that porcelain
-    # flags as modified but `git submodule status` reports as initialized is
-    # still observed as changed.
-    dirty_submodules = [s for s in submodule_entries if s.state in ("changed", "conflicted")]
-    dirty_count = len(dirty_submodules)
-    if porcelain_submodule_changes > dirty_count:
-        dirty_count = porcelain_submodule_changes
+    # (`git submodule status` reports changed/conflicted) AND the tracked-
+    # gitlink porcelain entries (which surface dirty submodule content that the
+    # commit-state prefix misses when the submodule is uninitialized or porcelain
+    # flags it differently). Each distinct dirty submodule is counted once.
+    dirty_submodule_names = {
+        s.name for s in submodule_entries if s.state in ("changed", "conflicted")
+    }
+    # Union: dirty gitlink paths + dirty submodule names (some overlap is
+    # possible; we want a single count per distinct dirty submodule). Use the
+    # larger of the two sets so a gitlink-detected change is never masked.
+    dirty_count = max(len(dirty_submodule_names), len(dirty_gitlink_paths))
     if dirty_count:
         limitations.append(f"dirty_submodules_not_snapshotted:{dirty_count}")
         warnings.append("dirty_submodule_content_not_captured")
@@ -396,6 +477,11 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
         if not unreadable_count and not submodule_failed and not dirty_count
         else "partial"
     )
+
+    # The SourceEvidence model_validator requires sorted + unique limitations
+    # and warnings. Sort here so capture output is canonical.
+    limitations = sorted(set(limitations))
+    warnings = sorted(set(warnings))
 
     return SourceEvidence(
         staged_digest=staged_digest,
@@ -434,24 +520,36 @@ class UntrackedEntry(BaseModel):
     @field_validator("path")
     @classmethod
     def _validate_path(cls, v: str) -> str:
-        """Reject absolute paths and path traversal.
+        """Enforce a canonical repository-relative POSIX path.
 
-        ``path`` is a repo-relative path; it must not be absolute (POSIX or
-        Windows drive form), contain a path separator (the porcelain output is
-        single-segment per entry except for sub-directories which use ``/``),
-        or climb out of the repo via ``..``.
+        ``path`` is a repo-relative path stored in canonical POSIX form. Any
+        backslashes are converted to forward slashes first (Windows porcelain
+        output may use ``\\``). The normalized path must NOT be absolute (POSIX
+        leading ``/`` or Windows drive-letter form), must NOT contain a ``..``
+        component, and must NOT contain empty components (``a//b`` or a trailing
+        slash).
         """
-        # Reject POSIX absolute and any separator.
-        if v.startswith("/") or v.startswith("\\"):
+        # Normalize backslashes to forward slashes before validation so a
+        # Windows porcelain path like ``sub\\dir\\file.txt`` is stored canonically.
+        normalized = v.replace("\\", "/")
+        # Reject POSIX absolute form.
+        if normalized.startswith("/"):
             raise ValueError(f"untracked path {v!r} must be repo-relative, not absolute.")
-        # Reject Windows drive-letter absolute form (C:\ or C:/).
-        if re.match(r"^[A-Za-z]:[\\/]", v):
+        # Reject Windows drive-letter absolute form (C:/ or, pre-normalization,
+        # C:\ — already converted to C:/ above).
+        if re.match(r"^[A-Za-z]:/", normalized):
             raise ValueError(f"untracked path {v!r} must be repo-relative, not absolute.")
+        # Reject empty path.
+        if not normalized:
+            raise ValueError("untracked path must be non-empty.")
+        parts = normalized.split("/")
         # Reject any traversal component anywhere in the path.
-        parts = re.split(r"[\\/]", v)
         if any(part == ".." for part in parts):
             raise ValueError(f"untracked path {v!r} contains a '..' traversal component.")
-        return v
+        # Reject empty components (``a//b``, leading or trailing slash).
+        if any(part == "" for part in parts):
+            raise ValueError(f"untracked path {v!r} contains an empty path component.")
+        return normalized
 
     @field_validator("digest")
     @classmethod
@@ -508,6 +606,88 @@ class SourceEvidence(BaseModel):
             raise ValueError(f"digest must be 64 lowercase hex chars (sha256); got {v!r}.")
         return v
 
+    # Stable warning codes used by ``warnings`` on this model. ``_warning_codes``
+    # is a stable contract that callers can switch on. The standard limitations
+    # that are always present (ignored files + external symlink targets) and do
+    # NOT affect completeness even when ``completeness == "complete"``.
+    _STANDARD_LIMITATIONS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "ignored_files_not_included",
+            "external_symlink_targets_not_followed",
+        }
+    )
+
+    @model_validator(mode="after")
+    def _verify_evidence_invariants(self) -> SourceEvidence:
+        """Enforce canonical model-level invariants on the dirty-evidence record.
+
+        - ``untracked`` is sorted by ``path`` and has unique paths.
+        - ``submodule_status`` is sorted by ``name`` and has unique names.
+        - ``counts.untracked == len(untracked)`` and
+          ``counts.submodules == len(submodule_status)``.
+        - when ``completeness == "complete"``: no entry has ``digest is None``,
+          no warnings, and only the standard limitations may be present.
+        - ``warnings`` are sorted and use stable codes only.
+        - ``limitations`` are sorted.
+        """
+        # untracked: sorted by path + unique paths.
+        untracked_paths = [e.path for e in self.untracked]
+        if untracked_paths != sorted(untracked_paths):
+            raise ValueError(f"untracked entries must be sorted by path; got {untracked_paths!r}.")
+        if len(set(untracked_paths)) != len(untracked_paths):
+            dupes = sorted({p for p in untracked_paths if untracked_paths.count(p) > 1})
+            raise ValueError(f"untracked entries have duplicate paths: {dupes!r}.")
+        # submodule_status: sorted by name + unique names.
+        sub_names = [s.name for s in self.submodule_status]
+        if sub_names != sorted(sub_names):
+            raise ValueError(f"submodule_status entries must be sorted by name; got {sub_names!r}.")
+        if len(set(sub_names)) != len(sub_names):
+            dupes = sorted({n for n in sub_names if sub_names.count(n) > 1})
+            raise ValueError(f"submodule_status entries have duplicate names: {dupes!r}.")
+        # Count consistency.
+        if self.counts.untracked != len(self.untracked):
+            raise ValueError(
+                f"counts.untracked ({self.counts.untracked}) must equal "
+                f"len(untracked) ({len(self.untracked)})."
+            )
+        if self.counts.submodules != len(self.submodule_status):
+            raise ValueError(
+                f"counts.submodules ({self.counts.submodules}) must equal "
+                f"len(submodule_status) ({len(self.submodule_status)})."
+            )
+        # Warnings: sorted + stable codes.
+        if list(self.warnings) != sorted(self.warnings):
+            raise ValueError(f"warnings must be sorted; got {list(self.warnings)!r}.")
+        if len(set(self.warnings)) != len(self.warnings):
+            raise ValueError(f"warnings must be unique; got {list(self.warnings)!r}.")
+        # Limitations: sorted.
+        if list(self.limitations) != sorted(self.limitations):
+            raise ValueError(f"limitations must be sorted; got {list(self.limitations)!r}.")
+        # Completeness="complete" must mean no unreadable content and no
+        # non-standard limitations and no warnings.
+        if self.completeness == "complete":
+            for entry in self.untracked:
+                if entry.digest is None:
+                    raise ValueError(
+                        f"completeness='complete' forbids an untracked entry with "
+                        f"digest=None (path={entry.path!r})."
+                    )
+            if self.warnings:
+                raise ValueError(
+                    f"completeness='complete' forbids warnings; got {self.warnings!r}."
+                )
+            # Only the standard always-present limitations are allowed when
+            # complete. Anything else signals hidden incompleteness.
+            non_standard = [
+                lim for lim in self.limitations if lim not in self._STANDARD_LIMITATIONS
+            ]
+            if non_standard:
+                raise ValueError(
+                    f"completeness='complete' forbids non-standard limitations "
+                    f"{sorted(set(non_standard))!r}."
+                )
+        return self
+
 
 class RemoteWarning(BaseModel):
     """Typed warning about remote URL sanitization (code-only; no free text)."""
@@ -562,33 +742,42 @@ class SourceSnapshot(BaseModel):
             raise ValueError(f"digest must be 64 lowercase hex chars (sha256); got {v!r}.")
         return v
 
-    @field_validator("remote_url")
-    @classmethod
-    def _validate_remote_url(cls, v: str | None) -> str | None:
-        """Model-level URL sanitization (defense in depth, even on load).
+    @model_validator(mode="after")
+    def _verify_remote_url_warnings(self) -> SourceSnapshot:
+        """Correlate ``remote_url`` with ``remote_warnings`` at the model level.
 
-        Applies :func:`sanitize_repository_url` so a tampered sidecar cannot
-        re-introduce a raw credential-bearing or local-path URL after capture.
-        Raw credentials in the URL are rejected outright.
+        Computes the canonical sanitization of the stored ``remote_url`` using
+        the same classifier used at capture time. Whenever the sanitized value
+        differs from what was supplied, the appropriate warning(s) MUST be
+        present in ``remote_warnings`` — otherwise the lossy sanitization would
+        be silent. The stored URL is replaced with the sanitized form (bypassing
+        the frozen check) so callers always see the canonical value.
+
+        A URL with raw credentials (``https://user:secret@host``) is sanitized
+        to the credential-stripped form and requires
+        ``remote_credentials_removed``. SCP-style ``git@host:path`` URLs have
+        no ``://`` scheme; their ``git`` is a protocol user, not a credential —
+        they are NOT flagged.
         """
-        if v is None:
-            return None
-        # Late import to avoid a circular dependency at module load time.
-        from expertforge.provenance.software import sanitize_repository_url
-
-        # Reject raw credentials before sanitizing: a URL that still carries
-        # userinfo (``user:secret@host``) was not sanitized at capture time.
-        # ``git@host:path`` is the SCP-like git form and is NOT a credential.
-        userinfo_check = v
-        if "://" in userinfo_check:
-            after_scheme = userinfo_check.split("://", 1)[1]
-            if "@" in after_scheme and not after_scheme.startswith("git@"):
-                raise ValueError(
-                    "remote_url contains raw credentials; refuse to store an "
-                    "unsanitized credential-bearing URL."
-                )
-        sanitized = sanitize_repository_url(v)
-        return sanitized
+        if self.remote_url is None:
+            return self
+        expected_sanitized, expected_codes = _classify_remote_url_sanitization(self.remote_url)
+        supplied_codes = {w.code for w in self.remote_warnings}
+        # Each expected warning must be present (a missing warning means the
+        # sanitization lost information silently).
+        missing = [c for c in expected_codes if c not in supplied_codes]
+        if missing:
+            raise ValueError(
+                f"remote_url sanitization required warning codes {sorted(missing)!r} "
+                "but they are absent from remote_warnings; remote URL sanitization "
+                "must not lose information silently."
+            )
+        # Replace the stored value with its canonical sanitized form. The model
+        # is frozen; use object.__setattr__ to bypass the frozen check (this is
+        # canonicalization, not mutation of caller-supplied semantics).
+        if expected_sanitized != self.remote_url:
+            object.__setattr__(self, "remote_url", expected_sanitized)
+        return self
 
     @model_validator(mode="after")
     def _verify_source_invariants(self) -> SourceSnapshot:
@@ -683,14 +872,22 @@ def capture_source_snapshot(repo: Path | str, *, allow_dirty: bool = False) -> S
     tree_digest = _clean_tree_digest(repo_path)
     commit_sha = _head_sha(repo_path)
     branch = _branch_ref(repo_path)
-    sanitized_url, remote_warns = _remote_url(repo_path)
+    # Capture the RAW remote URL and pre-compute the expected sanitization
+    # warnings. The SourceSnapshot model_validator recomputes the sanitization
+    # from the (still raw) stored URL and verifies the warnings match — so the
+    # raw URL must be supplied to the constructor, not the sanitized form.
+    raw_url = _raw_remote_url(repo_path)
+    # Pre-compute the expected sanitization warning codes. The model_validator
+    # recomputes the sanitization from the raw stored URL and verifies these
+    # warnings are present, so capture must supply them.
+    _, remote_warn_codes = _classify_remote_url_sanitization(raw_url)
     evidence = _build_dirty_evidence(repo_path) if dirty else None
     input_digest = _envelope_digest(tree_digest, evidence)
     return SourceSnapshot(
         commit_sha=commit_sha,
         branch=branch,
-        remote_url=sanitized_url,  # already sanitized at capture time
-        remote_warnings=tuple(RemoteWarning(code=w) for w in remote_warns),
+        remote_url=raw_url or None,  # raw; model_validator sanitizes + verifies warnings
+        remote_warnings=tuple(RemoteWarning(code=w) for w in remote_warn_codes),
         is_clean=not dirty,
         is_canonical=not dirty,
         tree_digest=tree_digest,

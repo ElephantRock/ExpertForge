@@ -70,16 +70,44 @@ class CompletenessInfo(BaseModel):
 class CPUInfo(BaseModel):
     model_config = _section_config()
 
-    status: ObservationStatus = Field(default="available")
+    # Default to 'unavailable' so the bare ``CPUInfo()`` default_factory used by
+    # ``PlatformInfo`` is internally consistent (status='available' requires a
+    # concrete count).
+    status: ObservationStatus = Field(default="unavailable")
     count: int | None = Field(default=None, ge=1)
     architecture: str | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _check_count_status_consistency(self) -> CPUInfo:
+        if self.status == "available":
+            if self.count is None:
+                raise ValueError("CPUInfo status='available' requires count.")
+        elif self.status in ("unavailable", "error"):
+            if self.count is not None:
+                raise ValueError(f"CPUInfo status={self.status!r} forbids a non-None count.")
+        return self
 
 
 class MemoryInfo(BaseModel):
     model_config = _section_config()
 
-    status: ObservationStatus = Field(default="available")
+    # Default to 'unavailable' so the bare ``MemoryInfo()`` default_factory used
+    # by ``PlatformInfo`` is internally consistent (status='available' requires
+    # a concrete total_bytes).
+    status: ObservationStatus = Field(default="unavailable")
     total_bytes: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _check_total_status_consistency(self) -> MemoryInfo:
+        if self.status == "available":
+            if self.total_bytes is None:
+                raise ValueError("MemoryInfo status='available' requires total_bytes.")
+        elif self.status in ("unavailable", "error"):
+            if self.total_bytes is not None:
+                raise ValueError(
+                    f"MemoryInfo status={self.status!r} forbids a non-None total_bytes."
+                )
+        return self
 
 
 class PlatformInfo(BaseModel):
@@ -212,6 +240,20 @@ class TopologyInfo(BaseModel):
     node_count: int | None = Field(default=None, ge=1)
     backend: str | None = Field(default=None)
     reason: str | None = Field(default=None)
+    # Invalid numeric topology env values observed at capture time (e.g.
+    # ``RANK=not-an-int``) that could not be parsed. Stored durably so a
+    # misconfigured launcher is visible on round-trip rather than silently
+    # discarded. Stable, sorted, unique codes.
+    topology_warnings: tuple[str, ...] = Field(default_factory=tuple)
+
+    @field_validator("topology_warnings")
+    @classmethod
+    def _topology_warnings_sorted_unique(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        if list(v) != sorted(v):
+            raise ValueError("topology_warnings must be sorted.")
+        if len(set(v)) != len(v):
+            raise ValueError("topology_warnings must be unique.")
+        return v
 
     @model_validator(mode="after")
     def _check_consistency(self) -> TopologyInfo:
@@ -220,16 +262,20 @@ class TopologyInfo(BaseModel):
                 raise ValueError("TopologyInfo status='available' requires rank and world_size.")
             if self.rank >= self.world_size:
                 raise ValueError("rank must be < world_size.")
+            # local_rank < world_size when both are present.
+            if self.local_rank is not None and self.local_rank >= self.world_size:
+                raise ValueError("local_rank must be < world_size.")
         else:
-            # error or not_applicable: rank and world_size must be absent. A
-            # record that claims error/not_applicable yet carries concrete
-            # rank/world_size values is internally inconsistent (and a likely
-            # sign of tampering or a logic bug at capture time).
-            if self.rank is not None or self.world_size is not None:
+            # error or not_applicable: rank, world_size, AND local_rank must be
+            # absent. A record that claims error/not_applicable yet carries
+            # concrete rank/world_size/local_rank values is internally
+            # inconsistent (and a likely sign of tampering or a logic bug at
+            # capture time). node_count and backend are descriptive and allowed.
+            if self.rank is not None or self.world_size is not None or self.local_rank is not None:
                 raise ValueError(
-                    f"TopologyInfo status={self.status!r} requires rank and "
-                    "world_size to be None; concrete values are only valid when "
-                    "status is 'available'."
+                    f"TopologyInfo status={self.status!r} requires rank, "
+                    "world_size, and local_rank to be None; concrete values are "
+                    "only valid when status is 'available'."
                 )
         return self
 
@@ -372,6 +418,11 @@ class ProvenanceRecord(BaseModel):
         Returns ``(status, warnings)``. ``error``/``partial`` states in any
         section propagate to the top-level status with typed warnings. Pure
         static derivation so it can run before the frozen record is constructed.
+
+        Invalid numeric topology env values are stored durably on
+        ``TopologyInfo.topology_warnings`` (captured by
+        :func:`capture_hardware`); they are surfaced here so a misconfigured
+        launcher is visible at the whole-record level, not silently dropped.
         """
         warnings: list[str] = []
         has_partial = False
@@ -388,6 +439,34 @@ class ProvenanceRecord(BaseModel):
         if not source.is_clean:
             warnings.append("non_canonical_dirty_source")
         warnings.extend(w.code for w in source.remote_warnings)
+
+        # Software: dependency version conflicts (same normalized name at
+        # different versions) are honest partial-completeness signals.
+        if software.dependency_conflicts:
+            has_partial = True
+            warnings.append("dependency_version_conflict")
+
+        # Software: platform CPU/memory error/redacted states propagate.
+        cpu = software.platform.cpu
+        if cpu.status == "error":
+            has_error = True
+            warnings.append("cpu_error")
+        elif cpu.status == "redacted":
+            has_partial = True
+            warnings.append("cpu_redacted")
+        memory = software.platform.memory
+        if memory.status == "error":
+            has_error = True
+            warnings.append("memory_error")
+        elif memory.status == "redacted":
+            has_partial = True
+            warnings.append("memory_redacted")
+        if software.platform.status == "error":
+            has_error = True
+            warnings.append("platform_error")
+        elif software.platform.status == "redacted":
+            has_partial = True
+            warnings.append("platform_redacted")
 
         # Software lockfile.
         if software.lockfile.status == "error":
@@ -406,6 +485,9 @@ class ProvenanceRecord(BaseModel):
         if topology.status == "error":
             has_error = True
             warnings.append("topology_error")
+        # Invalid numeric topology env values surface as warnings (do not by
+        # themselves force partial unless topology itself is in error).
+        warnings.extend(topology.topology_warnings)
 
         status = "error" if has_error else ("partial" if has_partial or warnings else "complete")
         # Deduplicate + sort warnings for determinism.

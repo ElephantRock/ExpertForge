@@ -25,7 +25,7 @@ from expertforge.identity.fingerprint import (
 from expertforge.identity.ids import ClockProvider, EntropyProvider, ExistsPredicate
 from expertforge.identity.lineage import ResumeLineage
 from expertforge.identity.record import AttemptIdentityRecord
-from expertforge.provenance.hardware import capture_accelerator, capture_topology
+from expertforge.provenance.hardware import capture_accelerator, capture_hardware, capture_topology
 from expertforge.provenance.record import (
     AcceleratorInfo,
     ProvenanceRecord,
@@ -105,10 +105,32 @@ def prepare_run(
     except IdentityEmitError as e:
         raise ProvenanceOrchestrationError(str(e)) from e
 
-    # 4. Capture typed provenance against the identity.
+    # 4. Capture typed provenance against the identity. Use capture_hardware()
+    # (which returns a HardwareAggregate bundling accelerator + topology +
+    # topology_warnings) instead of calling capture_accelerator() and
+    # capture_topology() separately. ``topology_warnings`` carries invalid
+    # numeric topology env values that could not be parsed — without
+    # capture_hardware() they would be silently lost between the two calls.
     resolved_software = software or capture_software_environment(repo_root=repo)
-    resolved_hardware = hardware or capture_accelerator()
-    resolved_topology = topology or capture_topology()
+    if hardware is not None or topology is not None:
+        # An explicit override short-circuits the aggregate; honor each
+        # supplied section independently and default the other.
+        resolved_hardware = hardware or capture_accelerator()
+        resolved_topology = topology or capture_topology()
+    else:
+        aggregate = capture_hardware()
+        resolved_hardware = aggregate.accelerator
+        # Preserve the captured topology_warnings durably on the topology model.
+        resolved_topology = TopologyInfo(
+            status=aggregate.topology.status,
+            rank=aggregate.topology.rank,
+            local_rank=aggregate.topology.local_rank,
+            world_size=aggregate.topology.world_size,
+            node_count=aggregate.topology.node_count,
+            backend=aggregate.topology.backend,
+            reason=aggregate.topology.reason,
+            topology_warnings=aggregate.topology_warnings,
+        )
 
     # Top-level completeness is derived from ALL sections by from_identity()
     # (completeness=None is the default). Do NOT supply a source-only override —
