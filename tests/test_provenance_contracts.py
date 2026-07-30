@@ -316,25 +316,50 @@ class TestSourceFlagContradictions:
                 evidence=evidence,
             )
 
-    def test_remote_url_model_accepts_any_value(self) -> None:
-        # Review item 1: the SourceSnapshot model no longer correlates
-        # remote_url with remote_warnings (that correlation cannot survive a
-        # sidecar round-trip). The model accepts whatever URL/warnings are
-        # supplied; the CAPTURE PATH is the sole place where sanitization +
-        # warning correlation happens. A raw-credential URL is therefore
-        # accepted by the MODEL (it never sees the raw URL in practice —
-        # capture sanitizes first).
-        snap = SourceSnapshot(
-            commit_sha="1" * 40,
-            is_clean=True,
-            is_canonical=True,
-            remote_url="https://user:token@github.com/org/repo.git",
-            tree_digest="c" * 64,
-            input_digest=self._envelope("c" * 64, None),
-        )
-        # The model stores whatever it was given — no sanitization at the
-        # model level.
-        assert snap.remote_url == "https://user:token@github.com/org/repo.git"
+    def test_remote_url_model_rejects_raw_or_local_locators(self) -> None:
+        # Review item 1: the SourceSnapshot model now VALIDATES ``remote_url``
+        # so a tampered sidecar with credentials, a query/fragment, or a local
+        # path cannot pass model parsing. The stored locator MUST already be
+        # canonical/sanitized (``https://host/path``, ``http://host/path``,
+        # ``git@host:path``, or ``None``). The capture path sanitizes BEFORE
+        # construction; the model never accepts a raw/local locator.
+        bad_urls = [
+            "https://user:token@github.com/org/repo.git",  # credentials
+            "https://github.com/org/repo.git?signed=xyz",  # query
+            "https://github.com/org/repo.git#frag",  # fragment
+            "file:///home/secret/repos/ExpertForge",  # file://
+            "C:/Users/secret/repos/ExpertForge",  # drive letter
+            "/home/secret/repos/ExpertForge",  # POSIX absolute path
+            "\\server\\share\\repo",  # UNC/backslash path
+        ]
+        for bad in bad_urls:
+            with pytest.raises(ValidationError):
+                SourceSnapshot(
+                    commit_sha="1" * 40,
+                    is_clean=True,
+                    is_canonical=True,
+                    remote_url=bad,
+                    tree_digest="c" * 64,
+                    input_digest=self._envelope("c" * 64, None),
+                )
+
+    def test_remote_url_model_accepts_canonical_locators(self) -> None:
+        # The accepted canonical forms round-trip through the model validator.
+        for good in (
+            "https://github.com/org/repo.git",
+            "http://example.com/repo",
+            "git@github.com:ElephantRock/ExpertForge.git",
+            None,
+        ):
+            snap = SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                remote_url=good,
+                tree_digest="c" * 64,
+                input_digest=self._envelope("c" * 64, None),
+            )
+            assert snap.remote_url == good
 
     def test_capture_path_sanitizes_raw_credentials(self, tmp_path: Path) -> None:
         # The CAPTURE PATH is where sanitization happens: it strips credentials

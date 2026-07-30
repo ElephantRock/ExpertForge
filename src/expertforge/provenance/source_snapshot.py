@@ -63,8 +63,11 @@ _SHA1_HEX_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 # Canonical octal mode string for an untracked working-tree entry, e.g.
 # ``0o644`` (3 octal digits) or ``0o100644`` (4 octal digits covering the
 # setuid/setgid/sticky bits + rwxrwxrwx). The leading ``0o`` prefix matches
-# Python's ``oct()`` output, which is what the capture path emits.
-_UNTRACKED_MODE_PATTERN = re.compile(r"^0o[0-7]{3,4}$")
+# Python's ``oct()`` output, which is what the capture path emits. The digit
+# count is 1-4: ``oct()`` of a low mode value can produce as few as one octal
+# digit (e.g. ``0o0`` for mode 0, ``0o44`` for mode 36) — these are valid
+# canonical ``oct()`` outputs and must not be rejected.
+_UNTRACKED_MODE_PATTERN = re.compile(r"^0o[0-7]{1,4}$")
 
 
 def _normalize_canonical_rel_path(value: str, label: str) -> str:
@@ -270,27 +273,42 @@ def _tracked_gitlink_paths(repo: Path) -> set[str]:
     marks the resulting evidence ``partial`` with a ``gitlink_discovery_failed``
     limitation rather than silently continuing without submodule detection.
     """
+    return set(_tracked_gitlink_records(repo).keys())
+
+
+def _tracked_gitlink_records(repo: Path) -> dict[str, str]:
+    """Return ``{gitlink_path: sha1}`` for tracked submodule gitlinks (mode 160000).
+
+    Used by :func:`_build_dirty_evidence` to synthesize a :class:`SubmoduleEntry`
+    for a dirty gitlink that ``git submodule status`` did not report as
+    changed/conflicted (e.g. an initialized submodule whose working tree has
+    untracked content but whose checked-out commit matches the recorded one).
+    Recording such entries makes the ``dirty_submodules_not_snapshotted:N`` count
+    fully verifiable from the model's ``submodule_status`` (N equals the number
+    of entries with ``state`` in ``changed``/``conflicted``).
+
+    Raises :class:`SourceUnavailableError` if the ``git ls-files --stage`` call
+    fails — discovery must FAIL CLOSED.
+    """
     raw = _run_git(repo, ["ls-files", "--stage", "-z"])
-    gitlinks: set[str] = set()
+    gitlinks: dict[str, str] = {}
     for part in raw.split(b"\x00"):
         if not part.strip():
             continue
         # Format: "<mode> <sha> <stage>\t<path>"
-        # The mode is the first whitespace-delimited token.
         try:
             decoded = part.decode("utf-8", errors="replace")
         except UnicodeDecodeError:
             continue
-        # Split off the path (after the tab).
         if "\t" not in decoded:
             continue
         meta, path = decoded.split("\t", 1)
         meta_parts = meta.split()
-        if not meta_parts:
+        if len(meta_parts) < 2:
             continue
-        mode = meta_parts[0]
+        mode, sha = meta_parts[0], meta_parts[1]
         if mode == "160000":
-            gitlinks.add(path.strip())
+            gitlinks[path.strip()] = sha
     return gitlinks
 
 
@@ -400,10 +418,11 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     # rather than silently continuing with an empty gitlink set.
     gitlink_discovery_failed = False
     try:
-        gitlink_paths = _tracked_gitlink_paths(repo)
+        gitlink_records = _tracked_gitlink_records(repo)
     except SourceUnavailableError:
-        gitlink_paths = set()
+        gitlink_records = {}
         gitlink_discovery_failed = True
+    gitlink_paths = set(gitlink_records.keys())
 
     staged_digest = _staged_diff_digest(repo)
     unstaged_digest = _unstaged_diff_digest(repo)
@@ -493,6 +512,34 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     except SourceUnavailableError:
         submodule_failed = True
 
+    # A dirty gitlink (tracked submodule path with a non-clean porcelain entry)
+    # indicates the submodule's working-tree content differs from what this
+    # snapshot captures — its content is NOT snapshotted here. ``git submodule
+    # status`` reports commit-state prefixes that MISS worktree-only submodule
+    # changes (a submodule whose checked-out commit matches the recorded one but
+    # whose working tree has new/modified content shows `` M`` in porcelain but
+    # `` `` (initialized) in ``git submodule status``). So that the
+    # ``dirty_submodules_not_snapshotted:N`` count is fully verifiable from the
+    # model (N == number of entries with state changed/conflicted), represent
+    # every dirty gitlink as a changed-state entry: back-fill a missing entry,
+    # OR upgrade an existing non-dirty (initialized/uninitialized) entry to
+    # ``changed``. ``git submodule status`` is still the primary source for the
+    # commit SHA; the gitlink's recorded SHA back-fills entries it omits.
+    entries_by_name: dict[str, SubmoduleEntry] = {s.name: s for s in submodule_entries}
+    for dirty_path in dirty_gitlink_paths:
+        existing = entries_by_name.get(dirty_path)
+        if existing is None:
+            recorded_sha = gitlink_records.get(dirty_path)
+            if recorded_sha and _SHA1_HEX_PATTERN.fullmatch(recorded_sha):
+                entries_by_name[dirty_path] = SubmoduleEntry(
+                    name=dirty_path, commit=recorded_sha, state="changed"
+                )
+        elif existing.state not in ("changed", "conflicted"):
+            # Upgrade a non-dirty entry (initialized/uninitialized) to changed:
+            # porcelain confirmed its working-tree content differs.
+            entries_by_name[dirty_path] = existing.model_copy(update={"state": "changed"})
+    submodule_entries = list(entries_by_name.values())
+
     # Sort submodule entries by name so the SourceEvidence model_validator
     # (which requires sorted + unique names) accepts capture output.
     submodule_entries.sort(key=lambda s: s.name)
@@ -513,19 +560,15 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     if gitlink_discovery_failed:
         limitations.append("gitlink_discovery_failed")
         warnings.append("gitlink_discovery_failed")
-    # Dirty/changed submodules are not content-snapshotted by `git submodule
-    # status` — mark evidence partial. Count both the commit-state prefixes
-    # (`git submodule status` reports changed/conflicted) AND the tracked-
-    # gitlink porcelain entries (which surface dirty submodule content that the
-    # commit-state prefix misses when the submodule is uninitialized or porcelain
-    # flags it differently). Each distinct dirty submodule is counted once.
+    # Dirty/changed submodules are not content-snapshotted by this snapshot —
+    # mark evidence partial. The count is the number of submodule_status entries
+    # with state changed/conflicted (dirty gitlinks missing a commit-state
+    # prefix are synthesized above so the count is honest AND verifiable from
+    # the model). Each distinct dirty submodule is counted once.
     dirty_submodule_names = {
         s.name for s in submodule_entries if s.state in ("changed", "conflicted")
     }
-    # Union: dirty gitlink paths + dirty submodule names (some overlap is
-    # possible; we want a single count per distinct dirty submodule). Use the
-    # larger of the two sets so a gitlink-detected change is never masked.
-    dirty_count = max(len(dirty_submodule_names), len(dirty_gitlink_paths))
+    dirty_count = len(dirty_submodule_names)
     if dirty_count:
         limitations.append(f"dirty_submodules_not_snapshotted:{dirty_count}")
         warnings.append("dirty_submodule_content_not_captured")
@@ -600,17 +643,18 @@ class UntrackedEntry(BaseModel):
         """Validate ``mode`` as a canonical octal mode string when present.
 
         Accepts ``None`` (the only valid value for ``kind="unknown"`` /
-        ``kind="other"``). A present value MUST match ``^0o[0-7]{3,4}$`` so a
+        ``kind="other"``). A present value MUST match ``^0o[0-7]{1,4}$`` so a
         tampered sidecar cannot smuggle in a free-text or non-octal mode. The
         capture path emits ``oct(stat.S_IMODE(...))`` which already produces
-        this canonical form.
+        this canonical form (1-4 octal digits, e.g. ``0o644`` or ``0o0`` for a
+        zero mode).
         """
         if v is None:
             return None
         if not _UNTRACKED_MODE_PATTERN.fullmatch(v):
             raise ValueError(
                 f"UntrackedEntry mode must be a canonical octal mode string "
-                f"matching {{:0o[0-7]{{3,4}}}} (e.g. '0o644'); got {v!r}."
+                f"matching {{:0o[0-7]{{1,4}}}} (e.g. '0o644'); got {v!r}."
             )
         return v
 
@@ -864,6 +908,14 @@ class SourceEvidence(BaseModel):
         - the ``dirty_submodule_content_not_captured`` warning and the
           ``dirty_submodules_not_snapshotted:N`` limitation are correlated: one
           cannot appear without the other (and vice-versa).
+        - count-bearing limitations are validated against the verifiable facts:
+          ``unreadable_untracked_files:N`` must equal the count of untracked
+          entries with ``digest is None``; ``dirty_submodules_not_snapshotted:N``
+          must equal the count of dirty (changed/conflicted) submodule entries.
+        - bidirectional warning↔limitation pairing: the
+          ``unreadable_untracked_content`` /
+          ``submodule_inspection_failed`` / ``gitlink_discovery_failed`` warnings
+          each require their matching limitation (and vice-versa).
         """
         # untracked: sorted by path + unique paths.
         untracked_paths = [e.path for e in self.untracked]
@@ -966,6 +1018,66 @@ class SourceEvidence(BaseModel):
                 "together (one cannot be present without the other); got "
                 f"warnings={list(self.warnings)!r}, limitations={list(self.limitations)!r}."
             )
+        # Count-bearing limitations must agree with the verifiable facts.
+        # ``unreadable_untracked_files:N`` — N must equal the number of untracked
+        # entries whose ``digest is None``. A tampered sidecar that inflates or
+        # deflates the count (relative to the actual unreadable entries) is
+        # rejected.
+        unreadable_actual = sum(1 for e in self.untracked if e.digest is None)
+        for lim in self.limitations:
+            if lim.startswith("unreadable_untracked_files:"):
+                stated = int(lim[len("unreadable_untracked_files:") :])
+                if stated != unreadable_actual:
+                    raise ValueError(
+                        f"evidence limitation {lim!r} count does not match the number of "
+                        f"untracked entries with digest=None ({unreadable_actual}); the count "
+                        "must equal the actual unreadable-entry count."
+                    )
+        # ``dirty_submodules_not_snapshotted:N`` — N must equal the number of
+        # ``submodule_status`` entries with ``state`` in changed/conflicted (the
+        # dirty submodule entries the model can see). The capture path
+        # synthesizes a changed-state entry for any dirty gitlink that
+        # ``git submodule status`` did not report, so this count is honest and
+        # verifiable.
+        dirty_actual = sum(1 for s in self.submodule_status if s.state in ("changed", "conflicted"))
+        for lim in self.limitations:
+            if lim.startswith("dirty_submodules_not_snapshotted:"):
+                stated = int(lim[len("dirty_submodules_not_snapshotted:") :])
+                if stated != dirty_actual:
+                    raise ValueError(
+                        f"evidence limitation {lim!r} count does not match the number of "
+                        f"dirty submodule entries (state changed/conflicted) in "
+                        f"submodule_status ({dirty_actual}); the count must equal the "
+                        "actual dirty-submodule-entry count."
+                    )
+        # Bidirectional warning ↔ limitation pairing. Each of these warnings
+        # describes a condition whose durable count/limitation MUST also be
+        # present (and vice-versa) so a tampered sidecar cannot fabricate a
+        # warning without the matching limitation, or drop the limitation while
+        # keeping the warning.
+        warning_limitation_pairs: tuple[tuple[_EvidenceWarningCode, str | None, str], ...] = (
+            # warning, limitation-prefix-or-None, human label
+            (
+                "unreadable_untracked_content",
+                "unreadable_untracked_files:",
+                "unreadable_untracked_files:N",
+            ),
+            ("submodule_inspection_failed", None, "submodule_inspection_failed"),
+            ("gitlink_discovery_failed", None, "gitlink_discovery_failed"),
+        )
+        for warn_code, lim_prefix, lim_label in warning_limitation_pairs:
+            has_warn = warn_code in self.warnings
+            if lim_prefix is not None:
+                has_lim = any(lim.startswith(lim_prefix) for lim in self.limitations)
+            else:
+                has_lim = lim_label in self.limitations
+            if has_warn != has_lim:
+                raise ValueError(
+                    f"evidence warning {warn_code!r} and its limitation {lim_label!r} "
+                    "must appear together (one cannot be present without the other); "
+                    f"got warnings={list(self.warnings)!r}, "
+                    f"limitations={list(self.limitations)!r}."
+                )
         return self
 
 
@@ -991,6 +1103,19 @@ class RemoteWarning(BaseModel):
         "remote_query_fragment_removed",
         "remote_local_or_unsupported_removed",
     ]
+
+
+# Canonical accepted forms for the stored (already-sanitized) ``remote_url``:
+#   - ``https://host/path...`` or ``http://host/path...`` — scheme URL with NO
+#     userinfo (``@``), query (``?``), or fragment (``#``); the host/path run
+#     contains only non-credential, non-delimiter characters.
+#   - ``git@host:path...`` — SCP-style with NO scheme; the ``git`` part is a
+#     protocol user (not a credential), and no query/fragment is allowed.
+# A tampered sidecar that smuggles in credentials, a query/fragment, or a local
+# path (``file://``, drive letter ``C:``, leading ``/`` or ``\``) is rejected
+# so model parsing cannot be bypassed with a raw or local locator.
+_REMOTE_URL_HTTP_PATTERN = re.compile(r"^https?://[^\s@?#]+$")
+_REMOTE_URL_SCP_PATTERN = re.compile(r"^git@[^\s@?#]*:[^\s@?#]*$")
 
 
 class SourceSnapshot(BaseModel):
@@ -1036,6 +1161,73 @@ class SourceSnapshot(BaseModel):
                 f"Unsupported source-snapshot version {v}; this version "
                 f"supports {SOURCE_SNAPSHOT_VERSION}."
             )
+        return v
+
+    @field_validator("remote_url")
+    @classmethod
+    def _validate_remote_url(cls, v: str | None) -> str | None:
+        """Validate the stored ``remote_url`` is already canonical/sanitized.
+
+        ``None`` is allowed (a local/unsupported remote that was redacted to
+        ``None`` at capture time). A present value MUST be one of the accepted
+        canonical forms so a tampered sidecar cannot smuggle in a raw or local
+        locator:
+
+        - ``https://host/path...`` / ``http://host/path...`` — scheme URL with
+          NO userinfo (``@``), query (``?``), or fragment (``#``).
+        - ``git@host:path...`` — SCP-style with NO scheme (the ``git`` part is
+          a protocol user, not a credential).
+
+        Rejected shapes include credential-bearing scheme URLs
+        (``https://user:token@host``), any query/fragment, ``file://``, Windows
+        drive letters (``C:``), and POSIX/local absolute paths (leading ``/``
+        or ``\\``).
+        """
+        if v is None:
+            return None
+        # Reject the local/unsupported locator shapes outright (these sanitize
+        # to None at capture time, so a present value of this shape is tampering).
+        if v.startswith("file://"):
+            raise ValueError(f"remote_url {v!r} must not be a file:// locator.")
+        if re.match(r"^[A-Za-z]:[\\/]", v):
+            raise ValueError(f"remote_url {v!r} must not be a Windows drive path.")
+        if v.startswith("/") or v.startswith("\\"):
+            raise ValueError(f"remote_url {v!r} must not be a local absolute path.")
+        # Reject any credential/query/fragment leakage that sanitization should
+        # have stripped. ``@`` is only credential-bearing inside a ``://``-scheme
+        # URL; the SCP-style ``git@host:path`` form has no scheme and its ``@``
+        # is a protocol user, so it is matched by the SCP pattern below instead.
+        if "://" in v:
+            if not _REMOTE_URL_HTTP_PATTERN.fullmatch(v):
+                raise ValueError(
+                    f"remote_url {v!r} is not a canonical sanitized HTTP(S) URL; "
+                    "it must not contain '@' (credentials), '?' (query), or '#' (fragment)."
+                )
+            return v
+        # No scheme: only the SCP-style ``git@host:path`` form is accepted.
+        if not _REMOTE_URL_SCP_PATTERN.fullmatch(v):
+            raise ValueError(
+                f"remote_url {v!r} is not a canonical sanitized locator; accepted "
+                "forms are 'https://host/path', 'http://host/path', 'git@host:path', or None."
+            )
+        return v
+
+    @field_validator("remote_warnings")
+    @classmethod
+    def _validate_remote_warnings_canonical(
+        cls, v: tuple[RemoteWarning, ...]
+    ) -> tuple[RemoteWarning, ...]:
+        """``remote_warnings`` must be sorted by code and unique.
+
+        The codes are Literal-validated by :class:`RemoteWarning`; this validator
+        enforces the canonical ordering so a tampered sidecar cannot smuggle in
+        a duplicate or out-of-order warning.
+        """
+        codes = [w.code for w in v]
+        if codes != sorted(codes):
+            raise ValueError(f"remote_warnings must be sorted by code; got {codes!r}.")
+        if len(set(codes)) != len(codes):
+            raise ValueError(f"remote_warnings must be unique; got {codes!r}.")
         return v
 
     @field_validator("tree_digest", "input_digest")
@@ -1151,11 +1343,15 @@ def capture_source_snapshot(repo: Path | str, *, allow_dirty: bool = False) -> S
     sanitized_url, remote_warn_codes = _classify_remote_url_sanitization(raw_url)
     evidence = _build_dirty_evidence(repo_path) if dirty else None
     input_digest = _envelope_digest(tree_digest, evidence)
+    # Canonicalize the warning codes (sorted + unique) so the
+    # ``remote_warnings`` field_validator accepts capture output on the first
+    # pass regardless of the order the classifier appended the codes.
+    canonical_warn_codes = sorted(set(remote_warn_codes))
     return SourceSnapshot(
         commit_sha=commit_sha,
         branch=branch,
         remote_url=sanitized_url,
-        remote_warnings=tuple(RemoteWarning(code=w) for w in remote_warn_codes),
+        remote_warnings=tuple(RemoteWarning(code=w) for w in canonical_warn_codes),
         is_clean=not dirty,
         is_canonical=not dirty,
         tree_digest=tree_digest,

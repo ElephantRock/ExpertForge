@@ -199,10 +199,10 @@ class LockfileDigest(BaseModel):
     status: ObservationStatus
     algorithm: str | None = Field(default=None)
     digest: str | None = Field(default=None)
-    # Stable reason domain: only emitted by the capture path on an error/unavailable
-    # status. ``None`` for available / not_applicable / redacted (a present
-    # lockfile needs no explanation; a not_applicable/redacted status is its own
-    # explanation).
+    # Stable reason domain: only emitted by the capture path on an error
+    # status. ``None`` for available / unavailable / not_applicable / redacted.
+    # ``status="error"`` REQUIRES a reason (an error with no explanation is
+    # under-constrained); every other status FORBIDS a reason.
     reason: Literal["io_error", "not_found"] | None = Field(default=None)
 
     @model_validator(mode="after")
@@ -212,16 +212,13 @@ class LockfileDigest(BaseModel):
         - ``status="available"``: ``algorithm`` must be exactly ``"sha256"`` and
           ``digest`` must be a valid 64-lowercase-hex SHA-256. ``reason`` must
           be ``None`` (an available lockfile carries no explanation).
-        - ``status="not_applicable"``: ``algorithm``, ``digest``, AND ``reason``
-          must all be ``None`` (a not_applicable status is its own explanation).
-        - ``status="unavailable"``: ``reason`` may be ``None`` (no lockfile
-          found) or ``"not_found"``; ``algorithm`` and ``digest`` must be
-          ``None``.
-        - ``status="error"``: ``reason`` must be a stable error code
-          (``"io_error"`` or ``"not_found"``); ``algorithm`` and ``digest``
-          must be ``None``.
-        - ``status="redacted"``: ``algorithm``, ``digest``, AND ``reason``
-          must all be ``None``.
+        - ``status="error"``: ``reason`` MUST be a stable error code
+          (``"io_error"`` or ``"not_found"``) — an error without a reason is
+          semantically under-constrained and rejected. ``algorithm`` and
+          ``digest`` must be ``None``.
+        - ``status="unavailable"`` / ``"not_applicable"`` / ``"redacted"``:
+          ``algorithm``, ``digest``, AND ``reason`` must all be ``None`` (these
+          statuses are their own explanation; a present reason is rejected).
         """
         if self.status == "available":
             if self.algorithm != "sha256":
@@ -244,12 +241,20 @@ class LockfileDigest(BaseModel):
                     f"LockfileDigest status={self.status!r} requires algorithm=None and "
                     f"digest=None; got algorithm={self.algorithm!r}, digest={self.digest!r}."
                 )
-            # reason is only meaningful on unavailable/error. not_applicable/
-            # redacted are their own explanation and forbid a reason.
-            if self.status in ("not_applicable", "redacted") and self.reason is not None:
-                raise ValueError(
-                    f"LockfileDigest status={self.status!r} forbids a reason; got {self.reason!r}."
-                )
+            if self.status == "error":
+                # An error REQUIRES a stable reason — no reason is under-constrained.
+                if self.reason is None:
+                    raise ValueError(
+                        "LockfileDigest status='error' requires a reason "
+                        "('io_error' or 'not_found'); got None."
+                    )
+            else:
+                # unavailable / not_applicable / redacted forbid a reason.
+                if self.reason is not None:
+                    raise ValueError(
+                        f"LockfileDigest status={self.status!r} forbids a reason; "
+                        f"got {self.reason!r}."
+                    )
         return self
 
 
@@ -392,10 +397,14 @@ class AcceleratorInfo(BaseModel):
         - ``status="available"``: ``device_count`` > 0, ``len(devices) ==
           device_count``, device ordinals are unique, and ``reason`` must be
           ``None`` (an available accelerator needs no explanation).
-        - any non-available status: ``devices`` must be empty,
-          ``device_count`` must be None or 0, ``framework``,
-          ``framework_version``, and ``runtime_version`` must all be ``None``
-          (descriptive metadata is only meaningful when devices were observed).
+        - ``status="error"``: ``reason`` MUST be one of the stable error codes
+          (an error without a reason is semantically under-constrained and
+          rejected); ``devices`` empty, ``device_count`` None/0, and framework/
+          runtime metadata ``None``.
+        - any other non-available status (``unavailable``/``not_applicable``/
+          ``redacted``): ``reason`` must be ``None`` (these statuses are their
+          own explanation), ``devices`` empty, ``device_count`` None/0, and
+          framework/runtime metadata ``None``.
         - ``precision_status="available"`` is only meaningful when devices were
           observed — it is rejected on any non-available ``status`` (you cannot
           have available precision info with no accelerator).
@@ -434,6 +443,19 @@ class AcceleratorInfo(BaseModel):
                     f"framework_version/runtime_version; got framework="
                     f"{self.framework!r}, framework_version={self.framework_version!r}, "
                     f"runtime_version={self.runtime_version!r}."
+                )
+            # status='error' REQUIRES a reason; unavailable/not_applicable/redacted
+            # forbid a reason (they are their own explanation).
+            if self.status == "error":
+                if self.reason is None:
+                    raise ValueError(
+                        "AcceleratorInfo status='error' requires a reason "
+                        "('io_error', 'timeout', 'decode_error', "
+                        "'duplicate_device_ordinals', or 'not_found'); got None."
+                    )
+            elif self.reason is not None:
+                raise ValueError(
+                    f"AcceleratorInfo status={self.status!r} forbids a reason; got {self.reason!r}."
                 )
         # precision_status="available" requires devices were observed — it is
         # contradictory on any non-available status.
@@ -490,15 +512,13 @@ class TopologyInfo(BaseModel):
           ``rank < world_size``, and ``local_rank < world_size`` when present,
           AND ``reason`` must be ``None`` (an available topology needs no
           explanation).
-        - ``status="error"`` or ``"not_applicable"``: ALL of ``rank``,
-          ``world_size``, ``local_rank``, ``node_count``, and ``backend`` must
-          be ``None``. A record that claims error/not_applicable yet carries
-          ANY concrete topology value is internally inconsistent (and a likely
-          sign of tampering or a logic bug at capture time). ``node_count`` and
-          ``backend`` are NOT allowed here — only meaningful alongside a real
-          distributed topology (status='available'). ``reason`` is meaningful
-          only on status='error' (forbidden on not_applicable, which is its
-          own explanation).
+        - ``status="error"``: ALL of ``rank``, ``world_size``, ``local_rank``,
+          ``node_count``, and ``backend`` must be ``None`` AND ``reason`` MUST
+          be one of the stable error codes (an error without a reason is
+          semantically under-constrained and rejected).
+        - ``status="not_applicable"``: ALL of ``rank``, ``world_size``,
+          ``local_rank``, ``node_count``, and ``backend`` must be ``None`` AND
+          ``reason`` must be ``None`` (not_applicable is its own explanation).
         """
         if self.status == "available":
             if self.rank is None or self.world_size is None:
@@ -532,12 +552,26 @@ class TopologyInfo(BaseModel):
                     "local_rank, node_count, and backend to ALL be None; got "
                     f"concrete values {sorted(present)!r}."
                 )
-            # reason is only meaningful on status='error' — not_applicable is
-            # its own explanation and forbids a reason.
-            if self.status == "not_applicable" and self.reason is not None:
-                raise ValueError(
-                    f"TopologyInfo status='not_applicable' forbids a reason; got {self.reason!r}."
-                )
+            if self.status == "error":
+                # status='error' REQUIRES a stable reason — no reason is
+                # under-constrained.
+                if self.reason is None:
+                    raise ValueError(
+                        "TopologyInfo status='error' requires a reason "
+                        "('rank_and_world_size_required_together', "
+                        "'partial_topology_env_without_rank_world_size', "
+                        "'rank_must_be_less_than_world_size', "
+                        "'partial_explicit_input_without_rank_world_size', "
+                        "'node_count_must_be_positive', or 'invalid_local_rank'); "
+                        "got None."
+                    )
+            else:
+                # not_applicable is its own explanation and forbids a reason.
+                if self.reason is not None:
+                    raise ValueError(
+                        f"TopologyInfo status='not_applicable' forbids a reason; "
+                        f"got {self.reason!r}."
+                    )
         return self
 
 

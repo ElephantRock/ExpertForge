@@ -435,21 +435,27 @@ class TestSanitizedRemoteSidecarRoundTrip:
         self, tmp_path: Path, remote_url: str
     ) -> tuple[ProvenanceRecord, ProvenanceRecord]:
         from expertforge.config.resolve import resolve_config
-        from expertforge.provenance.sidecar import parse_provenance_sidecar
+        from expertforge.provenance.sidecar import load_provenance_sidecar
 
         repo = tmp_path / "repo"
         repo.mkdir()
         _init_repo(repo)
         if remote_url:  # empty string → leave no origin configured
             self._set_origin(repo, remote_url)
-        _, provenance, path = prepare_run(
+        identity, provenance, path = prepare_run(
             artifact_root=tmp_path / "runs",
             config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
             repo=repo,
             clock=lambda: _FIXED,
             entropy=lambda n: bytes(n),
         )
-        loaded = parse_provenance_sidecar(path)
+        # Use the AUTHORITATIVE verified load path (not just parse) so the full
+        # binding-verification + remote_url field_validator path is exercised.
+        loaded = load_provenance_sidecar(
+            path,
+            expected_identity=identity,
+            expected_source_snapshot=provenance.source,
+        )
         return provenance, loaded
 
     def test_credential_https_round_trips(self, tmp_path: Path) -> None:

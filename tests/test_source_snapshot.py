@@ -570,8 +570,18 @@ class TestEvidenceCodeVocabularies:
             )
 
     def test_known_warning_codes_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SubmoduleEntry,
+        )
+
+        # The dirty_submodules_not_snapshotted:1 count is backed by one dirty
+        # submodule entry (count-validated against facts). gitlink_discovery_failed
+        # warning/limitation pair together.
         evidence = _make_evidence(
             completeness="partial",
+            submodule_status=(SubmoduleEntry(name="vendor/sub", commit="1" * 40, state="changed"),),
+            counts=SourceCounts(submodules=1),
             warnings=(
                 "dirty_submodule_content_not_captured",
                 "gitlink_discovery_failed",
@@ -1027,16 +1037,32 @@ class TestEvidencePartialRequiresExplanation:
     is mandatory."""
 
     def test_partial_with_warning_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import SourceCounts, UntrackedEntry
+
+        # The unreadable_untracked_files:1 count MUST match one untracked entry
+        # with digest=None (count-validated against facts). kind='file' requires
+        # a mode; the missing digest marks it unreadable.
         evidence = _make_evidence(
             completeness="partial",
+            untracked=(UntrackedEntry(path="a.txt", kind="file", mode="0o644", digest=None),),
+            counts=SourceCounts(untracked=1),
             warnings=("unreadable_untracked_content",),
             limitations=("unreadable_untracked_files:1",),
         )
         assert evidence is not None
 
     def test_partial_with_non_standard_limitation_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SubmoduleEntry,
+        )
+
+        # The dirty_submodules_not_snapshotted:1 count MUST match one dirty
+        # (changed/conflicted) submodule entry (count-validated against facts).
         evidence = _make_evidence(
             completeness="partial",
+            submodule_status=(SubmoduleEntry(name="vendor/sub", commit="1" * 40, state="changed"),),
+            counts=SourceCounts(submodules=1),
             limitations=(
                 "dirty_submodules_not_snapshotted:1",
                 "external_symlink_targets_not_followed",
@@ -1066,7 +1092,8 @@ class TestEvidencePartialRequiresExplanation:
 class TestEvidenceDirtySubmoduleCorrelation:
     """Review item 2: the ``dirty_submodule_content_not_captured`` warning and
     the ``dirty_submodules_not_snapshotted:N`` limitation describe the SAME
-    condition; one cannot appear without the other."""
+    condition; one cannot appear without the other. The count N must also equal
+    the number of dirty (changed/conflicted) submodule entries."""
 
     def test_warning_without_limitation_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -1087,8 +1114,20 @@ class TestEvidenceDirtySubmoduleCorrelation:
             )
 
     def test_warning_and_limitation_together_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SubmoduleEntry,
+        )
+
+        # Two dirty submodule entries back the dirty_submodules_not_snapshotted:2
+        # count (count-validated against facts).
         evidence = _make_evidence(
             completeness="partial",
+            submodule_status=(
+                SubmoduleEntry(name="a/sub", commit="1" * 40, state="changed"),
+                SubmoduleEntry(name="b/sub", commit="2" * 40, state="conflicted"),
+            ),
+            counts=SourceCounts(submodules=2),
             warnings=("dirty_submodule_content_not_captured",),
             limitations=(
                 "dirty_submodules_not_snapshotted:2",
@@ -1101,7 +1140,9 @@ class TestEvidenceDirtySubmoduleCorrelation:
 
 class TestUntrackedEntryModeValidator:
     """Review item 2: ``UntrackedEntry.mode`` is validated as a canonical octal
-    mode string (``^0o[0-7]{3,4}$``), not an arbitrary string."""
+    mode string (``^0o[0-7]{1,4}$``), not an arbitrary string. 1-4 octal digits
+    are accepted because ``oct()`` of a low mode value can produce as few as one
+    digit (e.g. ``0o0`` for mode 0, ``0o44`` for mode 36)."""
 
     def test_canonical_octal_mode_3_digits_accepted(self) -> None:
         from expertforge.provenance.source_snapshot import UntrackedEntry
@@ -1117,6 +1158,22 @@ class TestUntrackedEntryModeValidator:
 
         entry = UntrackedEntry(path="a.txt", kind="file", mode="0o4755", digest="0" * 64)
         assert entry.mode == "0o4755"
+
+    def test_canonical_octal_mode_1_digit_accepted(self) -> None:
+        # ``oct(0)`` produces ``0o0`` — a single octal digit. The previous
+        # ``{3,4}`` regex rejected this valid ``oct()`` output for low modes.
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        entry = UntrackedEntry(path="a.fifo", kind="other", mode="0o0", digest=None)
+        assert entry.mode == "0o0"
+
+    def test_canonical_octal_mode_2_digits_accepted(self) -> None:
+        # ``oct(36)`` produces ``0o44`` — two octal digits. Accepted now that the
+        # regex allows 1-4 digits.
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        entry = UntrackedEntry(path="a.fifo", kind="other", mode="0o44", digest=None)
+        assert entry.mode == "0o44"
 
     def test_decimal_mode_rejected(self) -> None:
         from expertforge.provenance.source_snapshot import UntrackedEntry
@@ -1138,17 +1195,11 @@ class TestUntrackedEntryModeValidator:
 
     def test_too_many_digits_rejected(self) -> None:
         # 5+ octal digits (e.g. the full st_mode with file-type bits) is
-        # rejected; only S_IMODE (3-4 octal digits) is canonical.
+        # rejected; only S_IMODE (1-4 octal digits) is canonical.
         from expertforge.provenance.source_snapshot import UntrackedEntry
 
         with pytest.raises(ValidationError):
             UntrackedEntry(path="a.txt", kind="file", mode="0o100644", digest="0" * 64)
-
-    def test_too_few_digits_rejected(self) -> None:
-        from expertforge.provenance.source_snapshot import UntrackedEntry
-
-        with pytest.raises(ValidationError):
-            UntrackedEntry(path="a.txt", kind="file", mode="0o64", digest="0" * 64)
 
 
 class TestUntrackedEntryOtherKindRejectsDigest:
@@ -1211,3 +1262,310 @@ class TestSubmoduleEntryCommitStateCorrelation:
 
         entry = SubmoduleEntry(name="vendor/sub", commit="1" * 40, state="changed")
         assert entry.state == "changed"
+
+
+# --- remote_url / remote_warnings field validators (review item 1) ----------
+
+
+class TestRemoteUrlFieldValidator:
+    """Review item 1: ``SourceSnapshot.remote_url`` is field-validated so a
+    tampered sidecar carrying credentials, a query/fragment, or a local path
+    cannot pass model parsing. The stored locator must already be canonical/
+    sanitized."""
+
+    @staticmethod
+    def _build(remote_url: object) -> object:
+        from expertforge.provenance.source_snapshot import SourceSnapshot
+
+        tree = "c" * 64
+        return SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            remote_url=remote_url,  # type: ignore[arg-type]
+            tree_digest=tree,
+            input_digest=_envelope_digest_for(tree, None),
+        )
+
+    def test_credential_https_url_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._build("https://user:token@github.com/org/repo.git")
+
+    def test_https_url_with_query_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._build("https://github.com/org/repo.git?signed=xyz")
+
+    def test_https_url_with_fragment_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._build("https://github.com/org/repo.git#frag")
+
+    def test_https_url_with_at_after_scheme_rejected(self) -> None:
+        # ``https://git@host`` has a scheme + userinfo → credential-bearing.
+        with pytest.raises(ValidationError):
+            self._build("https://git@host/repo.git")
+
+    def test_file_scheme_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._build("file:///home/secret/repos/ExpertForge")
+
+    def test_windows_drive_letter_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._build("C:/Users/secret/repos/ExpertForge")
+
+    def test_posix_absolute_path_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._build("/home/secret/repos/ExpertForge")
+
+    def test_backslash_local_path_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._build("\\\\server\\share\\repo")
+
+    def test_https_clean_url_accepted(self) -> None:
+        snap = self._build("https://github.com/org/repo.git")
+        assert snap is not None
+        assert snap.remote_url == "https://github.com/org/repo.git"  # type: ignore[attr-defined]
+
+    def test_http_clean_url_accepted(self) -> None:
+        snap = self._build("http://example.com/repo")
+        assert snap is not None
+        assert snap.remote_url == "http://example.com/repo"  # type: ignore[attr-defined]
+
+    def test_scp_style_url_accepted(self) -> None:
+        # SCP-style ``git@host:path`` has no scheme; the ``git`` is a protocol
+        # user (not a credential) and is preserved verbatim.
+        snap = self._build("git@github.com:ElephantRock/ExpertForge.git")
+        assert snap is not None
+        assert snap.remote_url == "git@github.com:ElephantRock/ExpertForge.git"  # type: ignore[attr-defined]
+
+    def test_none_remote_url_accepted(self) -> None:
+        snap = self._build(None)
+        assert snap is not None
+        assert snap.remote_url is None  # type: ignore[attr-defined]
+
+
+class TestRemoteWarningsSortedUnique:
+    """Review item 1: ``SourceSnapshot.remote_warnings`` must be sorted by code
+    and unique so a tampered sidecar cannot smuggle in a duplicate or
+    out-of-order warning."""
+
+    def test_unsorted_remote_warnings_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import RemoteWarning, SourceSnapshot
+
+        tree = "c" * 64
+        # 'remote_query_fragment_removed' > 'remote_credentials_removed'
+        # alphabetically, so this order is unsorted.
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                remote_url="https://github.com/org/repo.git",
+                remote_warnings=(
+                    RemoteWarning(code="remote_query_fragment_removed"),
+                    RemoteWarning(code="remote_credentials_removed"),
+                ),
+                tree_digest=tree,
+                input_digest=_envelope_digest_for(tree, None),
+            )
+
+    def test_duplicate_remote_warnings_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import RemoteWarning, SourceSnapshot
+
+        tree = "c" * 64
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                remote_url="https://github.com/org/repo.git",
+                remote_warnings=(
+                    RemoteWarning(code="remote_credentials_removed"),
+                    RemoteWarning(code="remote_credentials_removed"),
+                ),
+                tree_digest=tree,
+                input_digest=_envelope_digest_for(tree, None),
+            )
+
+    def test_sorted_unique_remote_warnings_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import RemoteWarning, SourceSnapshot
+
+        tree = "c" * 64
+        snap = SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            remote_url="https://github.com/org/repo.git",
+            remote_warnings=(
+                RemoteWarning(code="remote_credentials_removed"),
+                RemoteWarning(code="remote_query_fragment_removed"),
+            ),
+            tree_digest=tree,
+            input_digest=_envelope_digest_for(tree, None),
+        )
+        assert {w.code for w in snap.remote_warnings} == {
+            "remote_credentials_removed",
+            "remote_query_fragment_removed",
+        }
+
+
+# --- SourceEvidence count validation against facts (review item 2) ----------
+
+
+class TestEvidenceCountValidationAgainstFacts:
+    """Review item 2: count-bearing limitations are validated against the
+    verifiable facts. ``unreadable_untracked_files:N`` must equal the number of
+    untracked entries with ``digest is None``; ``dirty_submodules_not_snapshotted:N``
+    must equal the number of dirty (changed/conflicted) submodule entries."""
+
+    def test_unreadable_count_mismatch_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import SourceCounts, UntrackedEntry
+
+        # One unreadable entry, but the limitation claims 2.
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                untracked=(UntrackedEntry(path="a.txt", kind="file", mode="0o644", digest=None),),
+                counts=SourceCounts(untracked=1),
+                warnings=("unreadable_untracked_content",),
+                limitations=("unreadable_untracked_files:2",),
+            )
+
+    def test_unreadable_count_matches_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import SourceCounts, UntrackedEntry
+
+        evidence = _make_evidence(
+            completeness="partial",
+            untracked=(
+                UntrackedEntry(path="a.txt", kind="file", mode="0o644", digest=None),
+                UntrackedEntry(path="b.txt", kind="file", mode="0o600", digest=None),
+            ),
+            counts=SourceCounts(untracked=2),
+            warnings=("unreadable_untracked_content",),
+            limitations=("unreadable_untracked_files:2",),
+        )
+        assert evidence is not None
+
+    def test_dirty_submodule_count_mismatch_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SubmoduleEntry,
+        )
+
+        # One dirty submodule entry, but the limitation claims 3.
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                submodule_status=(
+                    SubmoduleEntry(name="vendor/sub", commit="1" * 40, state="changed"),
+                ),
+                counts=SourceCounts(submodules=1),
+                warnings=("dirty_submodule_content_not_captured",),
+                limitations=("dirty_submodules_not_snapshotted:3",),
+            )
+
+    def test_dirty_submodule_count_matches_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SubmoduleEntry,
+        )
+
+        evidence = _make_evidence(
+            completeness="partial",
+            submodule_status=(
+                SubmoduleEntry(name="a/sub", commit="1" * 40, state="changed"),
+                SubmoduleEntry(name="b/sub", commit="2" * 40, state="conflicted"),
+            ),
+            counts=SourceCounts(submodules=2),
+            warnings=("dirty_submodule_content_not_captured",),
+            limitations=(
+                "dirty_submodules_not_snapshotted:2",
+                "external_symlink_targets_not_followed",
+                "ignored_files_not_included",
+            ),
+        )
+        assert evidence is not None
+
+
+class TestEvidenceWarningLimitationPairing:
+    """Review item 2: bidirectional warning↔limitation pairing. The
+    ``unreadable_untracked_content`` / ``submodule_inspection_failed`` /
+    ``gitlink_discovery_failed`` warnings each require their matching limitation
+    (and vice-versa)."""
+
+    def test_unreadable_warning_without_limitation_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                warnings=("unreadable_untracked_content",),
+            )
+
+    def test_unreadable_limitation_without_warning_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import SourceCounts, UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                untracked=(UntrackedEntry(path="a.txt", kind="file", mode="0o644", digest=None),),
+                counts=SourceCounts(untracked=1),
+                limitations=("unreadable_untracked_files:1",),
+            )
+
+    def test_submodule_inspection_warning_without_limitation_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                warnings=("submodule_inspection_failed",),
+            )
+
+    def test_submodule_inspection_limitation_without_warning_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                limitations=(
+                    "submodule_inspection_failed",
+                    "external_symlink_targets_not_followed",
+                    "ignored_files_not_included",
+                ),
+            )
+
+    def test_submodule_inspection_pair_accepted(self) -> None:
+        evidence = _make_evidence(
+            completeness="partial",
+            warnings=("submodule_inspection_failed",),
+            limitations=(
+                "external_symlink_targets_not_followed",
+                "ignored_files_not_included",
+                "submodule_inspection_failed",
+            ),
+        )
+        assert evidence is not None
+
+    def test_gitlink_discovery_warning_without_limitation_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                warnings=("gitlink_discovery_failed",),
+            )
+
+    def test_gitlink_discovery_limitation_without_warning_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                limitations=(
+                    "external_symlink_targets_not_followed",
+                    "gitlink_discovery_failed",
+                    "ignored_files_not_included",
+                ),
+            )
+
+    def test_gitlink_discovery_pair_accepted(self) -> None:
+        evidence = _make_evidence(
+            completeness="partial",
+            warnings=("gitlink_discovery_failed",),
+            limitations=(
+                "external_symlink_targets_not_followed",
+                "gitlink_discovery_failed",
+                "ignored_files_not_included",
+            ),
+        )
+        assert evidence is not None

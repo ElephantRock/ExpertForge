@@ -357,10 +357,15 @@ class TestLockfileDigestExhaustiveValidator:
                 LockfileDigest(status=status, algorithm=None, digest="a" * 64)
 
     def test_unavailable_with_both_none_accepted(self) -> None:
-        for status in ("unavailable", "error", "not_applicable", "redacted"):
+        # unavailable / not_applicable / redacted forbid a reason (their own
+        # explanation); error REQUIRES a reason.
+        for status in ("unavailable", "not_applicable", "redacted"):
             lock = LockfileDigest(status=status, algorithm=None, digest=None)
             assert lock.algorithm is None
             assert lock.digest is None
+        lock_err = LockfileDigest(status="error", algorithm=None, digest=None, reason="io_error")
+        assert lock_err.algorithm is None
+        assert lock_err.digest is None
 
 
 # --- AcceleratorInfo exhaustive validator (review item 5) ------------------
@@ -554,7 +559,9 @@ class TestLockfileDigestReasonDomain:
         assert lock.reason == "io_error"
 
     def test_not_found_reason_accepted(self) -> None:
-        lock = LockfileDigest(status="unavailable", reason="not_found")
+        # ``not_found`` is a stable error reason; it is only valid on
+        # status='error' (unavailable forbids a reason).
+        lock = LockfileDigest(status="error", reason="not_found")
         assert lock.reason == "not_found"
 
     def test_unknown_reason_rejected(self) -> None:
@@ -652,6 +659,73 @@ class TestTopologyInfoReasonDomain:
             TopologyInfo(status="available", rank=0, world_size=2, reason="invalid_local_rank")
 
     def test_not_applicable_forbids_reason(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="not_applicable", reason="invalid_local_rank")
+
+
+class TestReasonStatusBinding:
+    """Review item 3: reason domains are exhaustively bound to status. An error
+    status REQUIRES a reason (an error without one is under-constrained); every
+    non-available/non-error status FORBIDS a reason (those statuses are their
+    own explanation)."""
+
+    # --- LockfileDigest ---------------------------------------------------
+
+    def test_lockfile_error_without_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="error", reason=None)
+
+    def test_lockfile_error_with_reason_accepted(self) -> None:
+        for r in ("io_error", "not_found"):
+            lock = LockfileDigest(status="error", reason=r)
+            assert lock.reason == r
+
+    def test_lockfile_unavailable_with_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="unavailable", reason="not_found")
+
+    def test_lockfile_not_applicable_with_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="not_applicable", reason="io_error")
+
+    def test_lockfile_redacted_with_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="redacted", reason="io_error")
+
+    # --- AcceleratorInfo --------------------------------------------------
+
+    def test_accelerator_error_without_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="error", reason=None)
+
+    def test_accelerator_error_with_reason_accepted(self) -> None:
+        for r in ("io_error", "timeout", "decode_error", "duplicate_device_ordinals", "not_found"):
+            accel = AcceleratorInfo(status="error", reason=r)
+            assert accel.reason == r
+
+    def test_accelerator_unavailable_with_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="unavailable", reason="io_error")
+
+    def test_accelerator_not_applicable_with_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="not_applicable", reason="io_error")
+
+    def test_accelerator_redacted_with_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="redacted", reason="io_error")
+
+    # --- TopologyInfo -----------------------------------------------------
+
+    def test_topology_error_without_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="error", reason=None)
+
+    def test_topology_error_with_reason_accepted(self) -> None:
+        topo = TopologyInfo(status="error", reason="node_count_must_be_positive")
+        assert topo.reason == "node_count_must_be_positive"
+
+    def test_topology_not_applicable_with_reason_rejected(self) -> None:
         with pytest.raises(ValidationError):
             TopologyInfo(status="not_applicable", reason="invalid_local_rank")
 
