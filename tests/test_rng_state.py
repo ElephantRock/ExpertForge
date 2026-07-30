@@ -262,7 +262,7 @@ def test_numpy_legacy_state_rejects_noncanonical_gaussian_cache() -> None:
         )
 
 
-def test_numpy_generator_rejects_invalid_increment_and_cache() -> None:
+def test_numpy_generator_rejects_invalid_increment() -> None:
     with pytest.raises(ValidationError, match="increment must be odd"):
         NumpyGeneratorState(
             state=0,
@@ -270,13 +270,28 @@ def test_numpy_generator_rejects_invalid_increment_and_cache() -> None:
             has_uint32=0,
             uinteger=0,
         )
-    with pytest.raises(ValidationError, match="must store 0"):
-        NumpyGeneratorState(
-            state=0,
-            increment=1,
-            has_uint32=0,
-            uinteger=1,
-        )
+
+
+def test_numpy_generator_normalizes_inactive_uint32_cache() -> None:
+    # When no uint32 is cached (``has_uint32 == 0``) NumPy may still carry the
+    # just-consumed value in ``uinteger``. That value is opaque and must be
+    # accepted and normalized to a canonical 0 rather than rejected.
+    normalized = NumpyGeneratorState(
+        state=1,
+        increment=1,
+        has_uint32=0,
+        uinteger=0xDEADBEEF,
+    )
+
+    assert normalized.uinteger == 0
+
+    cached = NumpyGeneratorState(
+        state=1,
+        increment=1,
+        has_uint32=1,
+        uinteger=0xDEADBEEF,
+    )
+    assert cached.uinteger == 0xDEADBEEF
 
 
 def test_numpy_states_reject_wrong_algorithms() -> None:

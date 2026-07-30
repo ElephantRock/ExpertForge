@@ -213,6 +213,31 @@ def test_state_json_round_trip_restores_exact_next_samples() -> None:
     assert _samples(restored, count=3) == expected
 
 
+def test_inactive_numpy_uint32_cache_value_round_trips_opaque() -> None:
+    # NumPy may leave a just-consumed uint32 in ``uinteger`` while
+    # ``has_uint32 == 0``. That value is opaque to the next-sample position and
+    # must survive capture/restore without breaking reproducibility, regardless
+    # of the residual value the runtime exposes.
+    from expertforge.rng.state import RngStateBundle
+
+    manager = RngManager(root_seed=23, context=SeedContext(component="sampling"))
+    manager.initialize()
+    manager.generator.random()
+    bundle = manager.capture_state()
+
+    assert bundle.numpy_generator.has_uint32 == 0
+    opaque_data = bundle.model_dump(mode="json")
+    opaque_data["numpy_generator"]["uinteger"] = 0xDEADBEEF
+    opaque_bundle = RngStateBundle.model_validate(opaque_data, strict=False)
+    assert opaque_bundle.numpy_generator.uinteger == 0
+
+    expected = _samples(manager, count=3)
+    restored = RngManager(root_seed=23, context=SeedContext(component="sampling"))
+    restored.restore_state(opaque_bundle)
+
+    assert _samples(restored, count=3) == expected
+
+
 def test_restore_rejects_contract_mismatch_before_mutating_globals() -> None:
     source = RngManager(root_seed=7, context=SeedContext(component="run"))
     source.initialize()

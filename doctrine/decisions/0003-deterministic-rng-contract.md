@@ -1,6 +1,6 @@
 # Decision Record 0003 — Deterministic RNG Contract
 
-**Status:** Proposed in PR for Issue #8
+**Status:** Accepted
 **Date:** 2026-07-30
 **Supersedes:** none
 **Related:** Issue #8; Issue #11 checkpointing; `doctrine/data-and-training.md`
@@ -54,7 +54,10 @@ checkpoint embedding without pre-empting Issue #11's file-format ownership.
     states are structural. Framework byte states use canonical base64 transport
     with SHA-256 verification. Persisted JSON permits structural array-to-tuple
     decoding but forbids scalar/domain coercion, including boolean values posing
-    as integer state flags. Issue #11 embeds this payload into checkpoints.
+    as integer state flags. The owned PCG64 generator's inactive uint32 cache
+    (``has_uint32 == 0``) is opaque: NumPy may leave the just-consumed value in
+    ``uinteger``, so that field is accepted and normalized to a canonical 0
+    rather than rejected. Issue #11 embeds this payload into checkpoints.
 
 ## Alternatives considered
 

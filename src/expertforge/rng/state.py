@@ -118,8 +118,13 @@ class NumpyGeneratorState(_FrozenModel):
     def _validate_state(self) -> NumpyGeneratorState:
         if self.increment % 2 != 1:
             raise ValueError("NumPy PCG64 increment must be odd")
+        # When no uint32 is cached, NumPy leaves ``uinteger`` holding the value
+        # that was just consumed (or zero). That field is opaque and not part of
+        # the next-sample position, so it is normalized to a canonical 0 rather
+        # than rejected. This keeps persisted state reproducible while accepting
+        # every valid runtime snapshot NumPy can produce.
         if self.has_uint32 == 0 and self.uinteger != 0:
-            raise ValueError("NumPy PCG64 state without a cached uint32 must store 0")
+            object.__setattr__(self, "uinteger", 0)
         return self
 
 
