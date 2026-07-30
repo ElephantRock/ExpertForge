@@ -190,6 +190,14 @@ def capture_topology(
     resolved_nodes = node_count if node_count is not None else env.get("NNODES")
 
     if resolved_rank is None and resolved_world is None and not env:
+        # Check if any partial explicit input was supplied (local_rank, node_count, backend).
+        # If so, it's an error — partial topology without rank/world_size.
+        has_partial_input = any(v is not None for v in (local_rank, node_count, backend))
+        if has_partial_input:
+            return TopologyInfo(
+                status=FieldStatus.ERROR.value,
+                reason="partial_explicit_input_without_rank_world_size",
+            )
         return TopologyInfo(status=FieldStatus.NOT_APPLICABLE.value)
 
     # rank and world_size must both be present or both absent.
