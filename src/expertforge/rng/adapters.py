@@ -26,6 +26,7 @@ __all__ = [
 
 FrameworkErrorCode = Literal[
     "framework_not_installed",
+    "framework_import_failed",
     "framework_api_unavailable",
     "framework_probe_failed",
     "framework_configure_failed",
@@ -123,6 +124,8 @@ class TorchRngAdapter:
                 torch_module = importlib.import_module("torch")
             except ModuleNotFoundError as exc:
                 raise FrameworkAdapterError("framework_not_installed") from exc
+            except Exception as exc:
+                raise FrameworkAdapterError("framework_import_failed") from exc
         self._torch = torch_module
 
     @property
@@ -131,12 +134,17 @@ class TorchRngAdapter:
 
     def capture_configuration(self) -> object:
         try:
+            deterministic_api = getattr(self._torch, "use_deterministic_algorithms", None)
             enabled_api = getattr(self._torch, "are_deterministic_algorithms_enabled", None)
             warn_api = getattr(
                 self._torch,
                 "is_deterministic_algorithms_warn_only_enabled",
                 None,
             )
+            if callable(deterministic_api) and (
+                not callable(enabled_api) or not callable(warn_api)
+            ):
+                raise FrameworkAdapterError("framework_api_unavailable")
             enabled = bool(enabled_api()) if callable(enabled_api) else None
             warn_only = bool(warn_api()) if callable(warn_api) else None
             cudnn = self._cudnn_backend()
@@ -146,7 +154,9 @@ class TorchRngAdapter:
                 else None
             )
             cudnn_benchmark = (
-                bool(cudnn.benchmark) if cudnn is not None and hasattr(cudnn, "benchmark") else None
+                bool(cudnn.benchmark)
+                if cudnn is not None and hasattr(cudnn, "benchmark")
+                else None
             )
             return _TorchConfigurationSnapshot(
                 deterministic_algorithms=enabled,
@@ -154,6 +164,8 @@ class TorchRngAdapter:
                 cudnn_deterministic=cudnn_deterministic,
                 cudnn_benchmark=cudnn_benchmark,
             )
+        except FrameworkAdapterError:
+            raise
         except Exception as exc:
             raise FrameworkAdapterError("framework_capture_failed") from exc
 
@@ -332,8 +344,10 @@ class TorchRngAdapter:
         if cuda is None:
             return None, 0
         is_available = getattr(cuda, "is_available", None)
+        if not callable(is_available):
+            raise FrameworkAdapterError("framework_api_unavailable")
         try:
-            if not callable(is_available) or not bool(is_available()):
+            if not bool(is_available()):
                 return cuda, 0
             device_count_api = getattr(cuda, "device_count", None)
             if not callable(device_count_api):
