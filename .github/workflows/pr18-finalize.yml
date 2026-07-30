@@ -48,6 +48,9 @@ jobs:
       - name: Sync locked environment
         run: uv sync --locked
 
+      - name: Format generated edits
+        run: uv run --locked ruff format .
+
       - name: Check formatting
         run: uv run --locked ruff format --check .
 
