@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #7 complete and #13 Phase A CI foundation active.
+Last updated: Milestone 0 in progress; #8 complete, #11 unblocked, #13 Phase A CI foundation active.
 
 ## Current milestone
 
@@ -41,24 +41,29 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#8 — M0.5 deterministic seed and RNG-state management** — available next;
-  depends only on #4/#5.
 - **#9 — M0.6 structured logging and metrics** — available next now that #7 is
   complete; #10 follows #9.
+- **#11 — M0.8 checkpoint serialization and exact restoration** — now available
+  following #8 completion; depends on #8 seed/RNG for deterministic state
+  capture/restoration.
 - **#13 — M0.10 test/CI harness — in progress.** Phase A merged via PR #21,
   squash commit `aaa31187d5d6b63671ee96df14a85a75b125f068`: permanent read-only CI,
   strict fast/integration/smoke/accelerator tiers, pinned toolchain, and
   repository-native policy checks are active. #13 remains open until the full
   Milestone 0 component and integration suite is present.
-- **#10 — artifact management** follows #9; **#11 — checkpoints** follows #8;
-  **#12 — experiment manifests** follows #5/#6/#7/#9/#10/#11; **#14 — smoke and
-  recovery gate** remains last.
+- **#10 — artifact management** follows #9; **#12 — experiment manifests**
+  follows #5/#6/#7/#9/#10/#11; **#14 — smoke and recovery gate** remains last.
 - #3 umbrella remains open.
 - **#4 — M0.1 repository and Python package scaffold — completed.**
 - **#5 — M0.2 validated configuration resolution — completed.**
 - **#6 — M0.3 run identity and configuration fingerprints — completed.**
 - **#7 — M0.4 source provenance and execution environment — completed** via
   PR #18, squash commit `f59916228d730675151149c74e0dde2ac2a1aadc`.
+- **#8 — M0.5 deterministic seed and RNG-state management — completed** via
+  PR #24, squash commit `fa49c95f7b926dc7d2255ae923b90a1512a21147`. Versioned
+  SHA-256 seed derivation, `RngManager` with Python/NumPy/optional-PyTorch
+  adapters, immutable strict checkpoint state serialization, exact
+  capture/restoration, failure-atomic initialization and restoration, ADR 0003.
 
 ## Open pull requests
 
@@ -66,12 +71,13 @@ order (see #3 for the full graph):
 
 ## Known blockers
 
-- #8 and #9 have no remaining dependency blocker and may proceed. Their PRs must
-  extend the permanent #13 fast/integration tiers with component coverage.
+- #9 has no remaining dependency blocker and may proceed. Its PR must extend the
+  permanent #13 fast/integration tiers with component coverage.
+- #11 is now unblocked following #8 and may proceed.
 - #13 remains open as a cross-cutting integration responsibility, not a blocker
-  to beginning #8 or #9.
-- #10 waits for #9; #11 waits for #8; #12 waits for #9/#10/#11; #14 waits for
-  the complete Milestone 0 substrate.
+  to beginning #9 or #11.
+- #10 waits for #9; #12 waits for #9/#10/#11; #14 waits for the complete
+  Milestone 0 substrate.
 
 ## Latest accepted experiment
 
@@ -82,14 +88,13 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#8 (seed/RNG)** and **#9 (logging/metrics)**. Each implementation PR
-   must add its unit and portable integration coverage to the permanent CI tiers.
-2. Continue **#13** incrementally as #8–#12 land; do not close it until the full
+1. Begin **#9 (logging/metrics)** — unlocks #10 artifact management.
+2. In parallel, **#11 (checkpoints)** may proceed now that #8 is complete —
+   unlocks #12 experiment manifests.
+3. Continue **#13** incrementally as #9–#12 land; do not close it until the full
    Milestone 0 suite, schema checks, and exact commands satisfy its issue contract.
-3. After #9, implement **#10 (artifacts)**; after #8, implement **#11
-   (checkpoints)**.
-4. Implement **#12 (manifests)** after #9/#10/#11, then complete **#14
-   (smoke-and-recovery gate)** last.
+4. After #9, implement **#10 (artifacts)**. After #9/#10/#11, implement **#12
+   (manifests)**, then complete **#14 (smoke-and-recovery gate)** last.
 5. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
