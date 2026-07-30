@@ -115,10 +115,22 @@ class ModelConfig(_Section):
 
 
 class TrainingConfig(_Section):
-    """Training-loop parameters. Progress is measured primarily in tokens
-    (doctrine/data-and-training.md §3.1)."""
+    """Training-loop parameters and the root reproducibility policy.
 
-    seed: int = Field(..., description="Base RNG seed; derived sub-seeds are deterministic.")
+    ``seed`` is the one declared root seed. Runtime subsystems derive separate,
+    domain-separated streams from it; callers must not reuse it directly for
+    every component (Issue #8).
+    """
+
+    seed: int = Field(..., description="Root RNG seed for deterministic derived streams.")
+    determinism_mode: Literal["reproducible", "performance"] = Field(
+        default="reproducible",
+        description="Reproducible enforcement or explicitly non-deterministic performance mode.",
+    )
+    unsupported_determinism: Literal["error", "warn"] = Field(
+        default="error",
+        description="Fail or return typed warnings when deterministic enforcement is unavailable.",
+    )
     tokens: int = Field(..., gt=0, description="Training-token budget for this run.")
     batch_size: int = Field(..., gt=0, description="Effective batch size in sequences.")
     seq_len: int | None = Field(default=None, gt=0, description="Override for data.seq_len if set.")
