@@ -153,7 +153,7 @@ class TestSymlinkNoFollow:
         snap = capture_source_snapshot(tmp_path, allow_dirty=True)
         assert snap.evidence is not None
         # Find the symlink in the untracked manifest.
-        symlinks = [e for e in snap.evidence.untracked if e.get("kind") == "symlink"]
+        symlinks = [e for e in snap.evidence.untracked if e.kind == "symlink"]
         assert len(symlinks) == 1
         # The symlink's digest is the target PATH string digest, not the
         # target FILE CONTENT digest. "secret" must not appear.

@@ -88,7 +88,7 @@ def _capture_memory() -> MemoryInfo:
     total: int | None = None
     try:
         # psutil is not a dependency; degrade gracefully if absent.
-        import psutil  # type: ignore[import-not-found]
+        import psutil  # type: ignore[import-untyped]
 
         total = psutil.virtual_memory().total
     except ImportError:
