@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from expertforge.rng.derivation import DerivedSeed, SeedContext, derive_substream_seed
 from expertforge.rng.state import (
@@ -192,7 +192,8 @@ class TorchRngAdapter:
             return ("framework_determinism_unavailable",)
         try:
             if mode == "reproducible":
-                deterministic_api(True, warn_only=unsupported_policy == "warn")
+                deterministic_call = cast(Callable[..., Any], deterministic_api)
+                deterministic_call(True, warn_only=unsupported_policy == "warn")
                 self._set_cudnn_flags(deterministic=True, benchmark=False)
             else:
                 if callable(deterministic_api):
@@ -228,6 +229,8 @@ class TorchRngAdapter:
             cuda_device = getattr(cuda, "device", None)
             if not callable(cuda_manual_seed) or not callable(cuda_device):
                 raise FrameworkAdapterError("framework_api_unavailable")
+        cuda_manual_seed_call = cast(Callable[[int], Any], cuda_manual_seed)
+        cuda_device_call = cast(Callable[[int], Any], cuda_device)
 
         derived_seeds = self.derive_seeds(root_seed, context)
         cpu_seed = derived_seeds[0]
@@ -235,8 +238,8 @@ class TorchRngAdapter:
         try:
             manual_seed(cpu_seed.seed_u64)
             for ordinal, seed in enumerate(cuda_seeds):
-                with cuda_device(ordinal):
-                    cuda_manual_seed(seed.seed_u64)
+                with cuda_device_call(ordinal):
+                    cuda_manual_seed_call(seed.seed_u64)
         except Exception as exc:
             raise FrameworkAdapterError("framework_seed_failed") from exc
 
@@ -306,20 +309,21 @@ class TorchRngAdapter:
             raise FrameworkAdapterError("framework_api_unavailable")
         cuda_devices = [state.device for state in states if state.device.startswith("cuda:")]
         cuda_tensors: list[Any] = []
-        set_all: Any | None = None
+        set_all_call: Callable[[list[Any]], Any] | None = None
         if cuda_devices:
             cuda, _ = self._cuda_runtime()
             set_all = getattr(cuda, "set_rng_state_all", None)
             if not callable(set_all):
                 raise FrameworkAdapterError("framework_api_unavailable")
+            set_all_call = cast(Callable[[list[Any]], Any], set_all)
             cuda_tensors = [
                 self._bytes_to_tensor(by_device[device].payload_bytes()) for device in cuda_devices
             ]
         cpu_tensor = self._bytes_to_tensor(by_device["cpu"].payload_bytes())
         try:
             set_cpu_state(cpu_tensor)
-            if cuda_devices:
-                set_all(cuda_tensors)
+            if set_all_call is not None:
+                set_all_call(cuda_tensors)
         except Exception as exc:
             raise FrameworkAdapterError("framework_restore_failed") from exc
 

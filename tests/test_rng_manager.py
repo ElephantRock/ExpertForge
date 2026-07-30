@@ -53,7 +53,7 @@ class FakeFrameworkAdapter:
     def restore_configuration(self, snapshot: object) -> None:
         if snapshot is not None and snapshot not in {"reproducible", "performance"}:
             raise FrameworkAdapterError("framework_state_invalid")
-        self.mode = cast(DeterminismMode | None, snapshot)
+        self.mode = snapshot
 
     def configure(
         self,

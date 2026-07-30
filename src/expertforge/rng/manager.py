@@ -281,7 +281,7 @@ class RngManager:
                     bundle.python.gauss_next,
                 )
             )
-            np.random.set_state(self._numpy_legacy_to_runtime(bundle.numpy_legacy))
+            np.random.set_state(cast(Any, self._numpy_legacy_to_runtime(bundle.numpy_legacy)))
             for adapter in self._adapters:
                 adapter.restore(states_by_provider[adapter.provider])
         except Exception:
