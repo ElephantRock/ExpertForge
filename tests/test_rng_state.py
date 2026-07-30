@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -21,32 +22,37 @@ from expertforge.rng.state import (
 
 def _python_state() -> PythonRandomState:
     version, internal, gauss_next = random.Random(7).getstate()
+    assert version == 3
     return PythonRandomState(
-        version=version,
+        version=3,
         internal_state=tuple(int(value) for value in internal),
         gauss_next=gauss_next,
     )
 
 
 def _legacy_state() -> NumpyLegacyState:
-    state = np.random.RandomState(7).get_state()
+    state = cast(tuple[Any, ...], np.random.RandomState(7).get_state(legacy=True))
+    assert state[0] == "MT19937"
+    assert state[3] in {0, 1}
     return NumpyLegacyState(
         algorithm="MT19937",
-        keys=tuple(int(value) for value in state[1].tolist()),
+        keys=tuple(int(value) for value in np.asarray(state[1], dtype=np.uint32).tolist()),
         position=int(state[2]),
-        has_gauss=int(state[3]),
+        has_gauss=state[3],
         cached_gaussian=float(state[4]),
     )
 
 
 def _generator_state() -> NumpyGeneratorState:
-    state = np.random.Generator(np.random.PCG64(7)).bit_generator.state
-    nested = state["state"]
+    state = cast(dict[str, Any], np.random.Generator(np.random.PCG64(7)).bit_generator.state)
+    nested = cast(dict[str, Any], state["state"])
+    assert state["bit_generator"] == "PCG64"
+    assert state["has_uint32"] in {0, 1}
     return NumpyGeneratorState(
         bit_generator="PCG64",
         state=int(nested["state"]),
         increment=int(nested["inc"]),
-        has_uint32=int(state["has_uint32"]),
+        has_uint32=state["has_uint32"],
         uinteger=int(state["uinteger"]),
     )
 
