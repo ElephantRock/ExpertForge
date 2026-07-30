@@ -43,14 +43,33 @@ def _stable_reason(exc: BaseException) -> str:
     return type(exc).__name__.lower()
 
 
-def _detect_framework_version(framework: str) -> str | None:
-    """Best-effort accelerator-framework package version via importlib.metadata."""
+# Common CUDA runtime distribution names published on PyPI. The first one
+# found via importlib.metadata wins; the rest are not queried.
+_CUDA_RUNTIME_PACKAGES = (
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cuda-runtime-cu11",
+    "nvidia-cuda-runtime-cu13",
+)
+
+
+def _detect_runtime_version() -> str | None:
+    """Best-effort CUDA runtime distribution version via importlib.metadata.
+
+    Probes common ``nvidia-cuda-runtime-*`` distributions. This is the CUDA
+    *runtime* (not a deep-learning framework) — the naming reflects that.
+    """
     try:
         from importlib import metadata as md
-
-        return md.version(framework)
-    except Exception:
+    except ImportError:  # pragma: no cover - importlib.metadata is stdlib
         return None
+    for pkg in _CUDA_RUNTIME_PACKAGES:
+        try:
+            return md.version(pkg)
+        except md.PackageNotFoundError:
+            continue
+        except Exception:
+            return None
+    return None
 
 
 def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0) -> AcceleratorInfo:
@@ -111,11 +130,13 @@ def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0)
 
     # Sort by ordinal for deterministic ordering.
     devices.sort(key=lambda d: d.ordinal)
-    fw_version = _detect_framework_version("nvidia-cuda-runtime-cu12")
+    runtime_version = _detect_runtime_version()
     return AcceleratorInfo(
         status=FieldStatus.AVAILABLE.value,
         framework="cuda",
-        framework_version=fw_version,
+        framework_version=runtime_version,
+        runtime_version=runtime_version,
+        precision_status=FieldStatus.NOT_APPLICABLE.value,
         device_count=len(devices),
         devices=tuple(devices),
     )

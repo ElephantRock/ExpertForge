@@ -100,7 +100,7 @@ class LockfileDigest(BaseModel):
     reason: str | None = Field(default=None)
 
     @model_validator(mode="after")
-    def _check_available_has_digest(self) -> "LockfileDigest":
+    def _check_available_has_digest(self) -> LockfileDigest:
         if self.status == "available" and not self.digest:
             raise ValueError("LockfileDigest status='available' requires a digest.")
         return self
@@ -172,7 +172,7 @@ class AcceleratorInfo(BaseModel):
     reason: str | None = Field(default=None)
 
     @model_validator(mode="after")
-    def _check_consistency(self) -> "AcceleratorInfo":
+    def _check_consistency(self) -> AcceleratorInfo:
         if self.status == "available":
             if self.device_count is None or self.device_count == 0:
                 raise ValueError("AcceleratorInfo status='available' requires device_count > 0.")
@@ -198,7 +198,7 @@ class TopologyInfo(BaseModel):
     reason: str | None = Field(default=None)
 
     @model_validator(mode="after")
-    def _check_consistency(self) -> "TopologyInfo":
+    def _check_consistency(self) -> TopologyInfo:
         if self.status == "available":
             if self.rank is None or self.world_size is None:
                 raise ValueError("TopologyInfo status='available' requires rank and world_size.")
@@ -316,6 +316,7 @@ class ProvenanceRecord(BaseModel):
             source=source,
             software=software
             or SoftwareEnvironment(
+                python=PythonInfo(version="unknown", implementation="unknown"),
                 platform=PlatformInfo(
                     cpu=CPUInfo(status="unavailable"),
                     memory=MemoryInfo(status="unavailable"),

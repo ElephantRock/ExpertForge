@@ -32,7 +32,7 @@ def _software_lines(record: ProvenanceRecord) -> list[str]:
     py = sw.python
     plat = sw.platform
     out = [
-        f"python: {py.get('version', '?')} ({py.get('implementation', '?')})",
+        f"python: {py.version} ({py.implementation})",
         f"platform: {plat.system}/{plat.machine}",
     ]
     if plat.cpu.status == "available" and plat.cpu.count:

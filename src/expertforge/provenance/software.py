@@ -13,21 +13,30 @@ import re
 import sys
 from importlib import metadata
 from pathlib import Path
-from platform import machine, system
+from platform import machine, python_compiler, system
 
 from expertforge.provenance.record import (
     CPUInfo,
+    DependencyObservation,
     LockfileDigest,
     MemoryInfo,
     PlatformInfo,
+    PythonInfo,
     SoftwareEnvironment,
 )
 
 __all__ = [
     "capture_software_environment",
+    "dependency_notes",
     "redact_token_patterns",
     "sanitize_repository_url",
 ]
+
+
+def dependency_notes() -> tuple[str, ...]:
+    """Return any dependency-capture notes (e.g. version conflicts, first wins)."""
+    return tuple(_dependency_notes)
+
 
 _TOKEN_PATTERNS = [
     re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"),
@@ -35,6 +44,11 @@ _TOKEN_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----"),
 ]
+
+# Notes populated by :func:`_capture_dependencies` when the SAME normalized
+# dependency name is observed at DIFFERENT versions. First observation wins;
+# the conflict is recorded here rather than silently overwriting.
+_dependency_notes: list[str] = []
 
 
 def redact_token_patterns(value: str) -> str:
@@ -63,11 +77,14 @@ def sanitize_repository_url(raw: str) -> str | None:
     return m.group("scheme") + rest
 
 
-def _capture_python() -> dict[str, str]:
-    return {
-        "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-        "implementation": sys.implementation.name,
-    }
+def _capture_python() -> PythonInfo:
+    """Capture typed Python interpreter info (version, implementation, build)."""
+    build = python_compiler() or None
+    return PythonInfo(
+        version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        implementation=sys.implementation.name,
+        build=build,
+    )
 
 
 def _capture_cpu() -> CPUInfo:
@@ -109,10 +126,17 @@ def _capture_platform() -> PlatformInfo:
     )
 
 
-def _capture_dependencies() -> dict[str, str]:
-    """Installed distributions: normalized name → version, sorted, deduplicated."""
-    deps: dict[str, str] = {}
+def _capture_dependencies() -> tuple[DependencyObservation, ...]:
+    """Installed distributions as sorted, deduplicated typed observations.
+
+    Names are PEP 503 normalized. When the SAME normalized name appears with
+    DIFFERENT versions, the FIRST observation wins (no silent last-write-wins)
+    and a note is recorded via the module-level :data:`_dependency_notes`.
+    """
     path_like = re.compile(r"(file://|/Users/|/home/|[A-Za-z]:\\\\)")
+    first_version: dict[str, str] = {}
+    order: list[str] = []
+    conflicts: list[str] = []
     for dist in metadata.distributions():
         raw_name = (dist.metadata["Name"] or "").strip()
         if not raw_name:
@@ -122,10 +146,23 @@ def _capture_dependencies() -> dict[str, str]:
         version = (dist.version or "").strip()
         if version and path_like.search(version):
             continue
-        # Last-write-wins on exact normalized duplicates (same name+version).
-        deps[normalized] = version
-    # Return sorted by name for deterministic output.
-    return dict(sorted(deps.items()))
+        if normalized in first_version:
+            if version != first_version[normalized] and version:
+                # Same normalized name, different version: keep the first
+                # (do NOT silently last-write-wins) and note the conflict.
+                conflicts.append(
+                    f"dependency_version_conflict:{normalized}:"
+                    f"{first_version[normalized]}!={version}"
+                )
+            continue
+        first_version[normalized] = version
+        order.append(normalized)
+    _dependency_notes.clear()
+    _dependency_notes.extend(conflicts)
+    observations = tuple(
+        DependencyObservation(name=name, version=first_version[name]) for name in sorted(order)
+    )
+    return observations
 
 
 def _capture_lockfile(repo_root: Path | None) -> LockfileDigest:

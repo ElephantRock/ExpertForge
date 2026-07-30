@@ -26,6 +26,7 @@ from expertforge.provenance.record import (
     MemoryInfo,
     PlatformInfo,
     ProvenanceRecord,
+    PythonInfo,
     SoftwareEnvironment,
     TopologyInfo,
 )
@@ -76,6 +77,7 @@ def _unavailable_sections() -> _UnavailableSections:
     """Typed unavailable software/hardware/topology for direct construction."""
     return {
         "software": SoftwareEnvironment(
+            python=PythonInfo(version="0.0.0", implementation="cpython"),
             platform=PlatformInfo(
                 cpu=CPUInfo(status="unavailable"),
                 memory=MemoryInfo(status="unavailable"),

@@ -80,14 +80,15 @@ class TestSoftwareCaptureAllowlist:
 
     def test_capture_records_python_and_platform_facts(self) -> None:
         env = capture_software_environment()
-        assert "version" in env.python
+        assert env.python.version
+        assert env.python.implementation
         assert env.platform.status == "available"
         assert env.platform.cpu.status in ("available", "unavailable")
 
     def test_dependency_versions_recorded_without_local_urls(self) -> None:
         env = capture_software_environment()
-        for _name, version in env.dependencies.items():
-            assert not re.search(r"(file://|/Users/|/home/|C:\\)", str(version))
+        for dep in env.dependencies:
+            assert not re.search(r"(file://|/Users/|/home/|C:\\)", str(dep.version))
 
     def test_lockfile_digest_recorded_when_present(self, tmp_path: Path) -> None:
         env = capture_software_environment(repo_root=tmp_path)
