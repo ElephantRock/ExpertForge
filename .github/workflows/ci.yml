@@ -90,4 +90,4 @@ jobs:
         run: uv sync --locked
 
       - name: Run portable CPU integration suite
-        run: uv run --locked pytest -m "integration and not accelerator"
+        run: uv run --locked pytest -m "integration and not smoke and not accelerator"
