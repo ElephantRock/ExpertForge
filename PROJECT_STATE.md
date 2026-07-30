@@ -41,33 +41,24 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#8 — M0.5 deterministic seed and RNG-state management** — next
-  dependency-ordered implementation action (depends only on #4/#5).
-- **#9 — M0.6 structured logging and metric collection** — may proceed now
-  that #7 (provenance) is complete.
-- **#10 — M0.7 artifact management** — may proceed now; registers the
-  provenance sidecar (produced by #7) and the identity sidecar (#6).
-- **#13 — M0.10 test/CI harness** — may begin early in parallel to establish
-  the harness that subsystem tests plug into.
-- #3 umbrella and #11/#12/#14 are open and dependency-ordered.
+- **#7 — M0.4 source provenance and execution environment — in review**
+  (PR #18, not yet merged). The next dependency-ordered action after #7 merges.
+- **#8 — M0.5 deterministic seed and RNG-state management** — may proceed in
+  parallel (depends only on #4/#5).
+- **#13 — M0.10 test/CI harness** — may begin early in parallel.
+- #3 umbrella and #9–#14 (other than #7) are open and dependency-ordered.
 - **#4 — M0.1 repository and Python package scaffold — completed.**
 - **#5 — M0.2 validated configuration resolution — completed.**
 - **#6 — M0.3 run identity and configuration fingerprints — completed.**
-- **#7 — M0.4 source provenance and execution environment — completed.** The
-  provenance subsystem (source-content snapshot as behavioral identity;
-  identity-bound record; allowlist-first software capture; optional
-  hardware/topology providers with typed degradation; durable provenance sidecar;
-  human-readable summary) is on `main`.
 
 ## Open pull requests
 
-- None. The #7 provenance PR merged.
+- PR #18 — #7 source provenance and execution environment (open, in review).
 
 ## Known blockers
 
-- None. After #7, the foundation + reproducibility/observability layers are
-  advancing; #8/#9/#10 may proceed, with #11 (checkpoints) after #8, #12
-  (manifests) after #5/#6/#7/#9/#10/#11, and #14 (smoke gate) last.
+- PR #18 (#7) is under review; #9 (logging), #10 (artifacts) wait for #7 to
+  merge. #8 (seed/RNG) and #13 (CI) may proceed in parallel.
 
 ## Latest accepted experiment
 
@@ -78,12 +69,12 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#8 (seed/RNG)** — next in the #3 dependency order (depends only on
-   #4/#5).
-2. In parallel, **#9 (logging)**, **#10 (artifacts)**, and **#13 (test/CI
-   harness)** may proceed.
-3. #11 (checkpoints) after #8; #12 (manifests) after #5/#6/#7/#9/#10/#11; #14
-   (smoke gate) last.
+1. Resolve PR #18 (#7 provenance) review — the binding contract gaps must be
+   fixed before #7 can merge.
+2. In parallel, **#8 (seed/RNG)** may proceed (depends only on #4/#5), and
+   **#13 (test/CI harness)** may start early.
+3. After #7 merges: #9 (logging), #10 (artifacts); #11 after #8; #12 after
+   #5/#6/#7/#9/#10/#11; #14 last.
 4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
