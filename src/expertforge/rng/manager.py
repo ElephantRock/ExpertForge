@@ -6,7 +6,7 @@ import random
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 
@@ -31,8 +31,11 @@ RngManagerErrorCode = Literal[
     "already_initialized",
     "not_initialized",
     "duplicate_framework_provider",
+    "invalid_determinism_mode",
+    "invalid_unsupported_determinism_policy",
     "state_contract_mismatch",
     "framework_provider_set_mismatch",
+    "python_state_invalid",
     "numpy_state_invalid",
 ]
 
@@ -73,6 +76,10 @@ class RngManager:
     ) -> None:
         if isinstance(root_seed, bool) or not isinstance(root_seed, int):
             raise TypeError("root_seed must be an integer, not a bool or coercible value")
+        if determinism_mode not in {"reproducible", "performance"}:
+            raise RngManagerError("invalid_determinism_mode")
+        if unsupported_determinism not in {"error", "warn"}:
+            raise RngManagerError("invalid_unsupported_determinism_policy")
         self.root_seed = root_seed
         self.context = context
         self.determinism_mode = determinism_mode
@@ -294,14 +301,19 @@ class RngManager:
     @staticmethod
     def _python_state_from_runtime(state: object) -> PythonRandomState:
         if not isinstance(state, tuple) or len(state) != 3:
-            raise RngManagerError("numpy_state_invalid")
+            raise RngManagerError("python_state_invalid")
         version, internal, gauss_next = state
-        if not isinstance(version, int) or not isinstance(internal, tuple):
-            raise RngManagerError("numpy_state_invalid")
+        if version != 3 or not isinstance(internal, tuple):
+            raise RngManagerError("python_state_invalid")
+        try:
+            internal_state = tuple(int(value) for value in internal)
+            normalized_gauss = None if gauss_next is None else float(gauss_next)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RngManagerError("python_state_invalid") from exc
         return PythonRandomState(
-            version=version,
-            internal_state=tuple(int(value) for value in internal),
-            gauss_next=None if gauss_next is None else float(gauss_next),
+            version=3,
+            internal_state=internal_state,
+            gauss_next=normalized_gauss,
         )
 
     @staticmethod
@@ -309,31 +321,35 @@ class RngManager:
         if len(state) != 5:
             raise RngManagerError("numpy_state_invalid")
         algorithm, keys, position, has_gauss, cached_gaussian = state
-        if str(algorithm) != "MT19937":
+        if algorithm != "MT19937" or has_gauss not in {0, 1}:
             raise RngManagerError("numpy_state_invalid")
         try:
             key_tuple = tuple(int(value) for value in np.asarray(keys, dtype=np.uint32).tolist())
+            normalized_position = int(position)
+            normalized_cached = float(cached_gaussian)
         except (TypeError, ValueError, OverflowError) as exc:
             raise RngManagerError("numpy_state_invalid") from exc
         return NumpyLegacyState(
             algorithm="MT19937",
             keys=key_tuple,
-            position=int(position),
-            has_gauss=int(has_gauss),
-            cached_gaussian=float(cached_gaussian),
+            position=normalized_position,
+            has_gauss=cast(Literal[0, 1], has_gauss),
+            cached_gaussian=normalized_cached,
         )
 
     @staticmethod
     def _numpy_generator_from_runtime(state: dict[str, object]) -> NumpyGeneratorState:
         try:
+            bit_generator = state["bit_generator"]
             nested = state["state"]
-            if not isinstance(nested, dict):
+            has_uint32 = state["has_uint32"]
+            if bit_generator != "PCG64" or not isinstance(nested, dict) or has_uint32 not in {0, 1}:
                 raise TypeError
             return NumpyGeneratorState(
-                bit_generator=str(state["bit_generator"]),
+                bit_generator="PCG64",
                 state=int(nested["state"]),
                 increment=int(nested["inc"]),
-                has_uint32=int(state["has_uint32"]),
+                has_uint32=cast(Literal[0, 1], has_uint32),
                 uinteger=int(state["uinteger"]),
             )
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
