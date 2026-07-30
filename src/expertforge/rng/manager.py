@@ -12,11 +12,7 @@ import numpy as np
 
 from expertforge.config.models import ConfigRoot
 from expertforge.rng.adapters import FrameworkRngAdapter
-from expertforge.rng.derivation import (
-    DerivedSeed,
-    SeedContext,
-    derive_substream_seed,
-)
+from expertforge.rng.derivation import DerivedSeed, SeedContext, derive_substream_seed
 from expertforge.rng.state import (
     RNG_STATE_SCHEMA_VERSION,
     DeterminismMode,
@@ -229,7 +225,9 @@ class RngManager:
             unsupported_determinism=self.unsupported_determinism,
             python=self._python_state_from_runtime(random.getstate()),
             numpy_legacy=self._numpy_legacy_from_runtime(np.random.get_state(legacy=True)),
-            numpy_generator=self._numpy_generator_from_runtime(self.generator.bit_generator.state),
+            numpy_generator=self._numpy_generator_from_runtime(
+                self.generator.bit_generator.state
+            ),
             framework_states=framework_states,
             warning_codes=initialization.warning_codes,
         )
@@ -272,7 +270,9 @@ class RngManager:
                 configure_warnings.update(
                     adapter.configure(self.determinism_mode, self.unsupported_determinism)
                 )
-            if not configure_warnings.issubset(set(bundle.warning_codes)):
+            runtime_warning = "framework_determinism_unavailable" in configure_warnings
+            stored_warning = "framework_determinism_unavailable" in bundle.warning_codes
+            if runtime_warning != stored_warning:
                 raise RngManagerError("state_contract_mismatch")
             random.setstate(
                 (
@@ -281,7 +281,9 @@ class RngManager:
                     bundle.python.gauss_next,
                 )
             )
-            np.random.set_state(cast(Any, self._numpy_legacy_to_runtime(bundle.numpy_legacy)))
+            np.random.set_state(
+                cast(Any, self._numpy_legacy_to_runtime(bundle.numpy_legacy))
+            )
             for adapter in self._adapters:
                 adapter.restore(states_by_provider[adapter.provider])
         except Exception:
