@@ -10,6 +10,7 @@ source evidence.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -42,6 +43,9 @@ __all__ = [
 
 PROVENANCE_SCHEMA_VERSION: int = 1
 SOURCE_SNAPSHOT_INPUT_NAME = "source.snapshot"
+# 64 lowercase hexadecimal characters (SHA-256). Shared by the cross-field
+# validators so a tampered sidecar cannot smuggle in a malformed digest.
+_DIGEST_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _section_config() -> ConfigDict:
@@ -79,10 +83,16 @@ class CPUInfo(BaseModel):
 
     @model_validator(mode="after")
     def _check_count_status_consistency(self) -> CPUInfo:
+        """Exhaustive status↔count consistency.
+
+        - ``status="available"``: ``count`` must be present (≥1).
+        - any other status (``unavailable``/``error``/``not_applicable``/
+          ``redacted``): ``count`` must be ``None``.
+        """
         if self.status == "available":
             if self.count is None:
                 raise ValueError("CPUInfo status='available' requires count.")
-        elif self.status in ("unavailable", "error"):
+        else:
             if self.count is not None:
                 raise ValueError(f"CPUInfo status={self.status!r} forbids a non-None count.")
         return self
@@ -99,10 +109,16 @@ class MemoryInfo(BaseModel):
 
     @model_validator(mode="after")
     def _check_total_status_consistency(self) -> MemoryInfo:
+        """Exhaustive status↔total_bytes consistency.
+
+        - ``status="available"``: ``total_bytes`` must be present (≥0).
+        - any other status (``unavailable``/``error``/``not_applicable``/
+          ``redacted``): ``total_bytes`` must be ``None``.
+        """
         if self.status == "available":
             if self.total_bytes is None:
                 raise ValueError("MemoryInfo status='available' requires total_bytes.")
-        elif self.status in ("unavailable", "error"):
+        else:
             if self.total_bytes is not None:
                 raise ValueError(
                     f"MemoryInfo status={self.status!r} forbids a non-None total_bytes."
@@ -130,8 +146,30 @@ class LockfileDigest(BaseModel):
 
     @model_validator(mode="after")
     def _check_available_has_digest(self) -> LockfileDigest:
-        if self.status == "available" and not self.digest:
-            raise ValueError("LockfileDigest status='available' requires a digest.")
+        """Exhaustive status↔(algorithm, digest) consistency.
+
+        - ``status="available"``: ``algorithm`` must be exactly ``"sha256"`` and
+          ``digest`` must be a valid 64-lowercase-hex SHA-256.
+        - any other status (``unavailable``/``error``/``not_applicable``/
+          ``redacted``): ``algorithm`` AND ``digest`` must both be ``None``.
+        """
+        if self.status == "available":
+            if self.algorithm != "sha256":
+                raise ValueError(
+                    f"LockfileDigest status='available' requires algorithm='sha256'; "
+                    f"got {self.algorithm!r}."
+                )
+            if not self.digest or not _DIGEST_HEX_PATTERN.fullmatch(self.digest):
+                raise ValueError(
+                    "LockfileDigest status='available' requires a valid 64-lowercase-hex "
+                    f"digest; got {self.digest!r}."
+                )
+        else:
+            if self.algorithm is not None or self.digest is not None:
+                raise ValueError(
+                    f"LockfileDigest status={self.status!r} requires algorithm=None and "
+                    f"digest=None; got algorithm={self.algorithm!r}, digest={self.digest!r}."
+                )
         return self
 
 
@@ -217,6 +255,15 @@ class AcceleratorInfo(BaseModel):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> AcceleratorInfo:
+        """Exhaustive status↔(devices, device_count, framework/runtime) consistency.
+
+        - ``status="available"``: ``device_count`` > 0, ``len(devices) ==
+          device_count``, and device ordinals are unique.
+        - any non-available status: ``devices`` must be empty,
+          ``device_count`` must be None or 0, and ``framework``,
+          ``framework_version``, and ``runtime_version`` must all be ``None``
+          (descriptive metadata is only meaningful when devices were observed).
+        """
         if self.status == "available":
             if self.device_count is None or self.device_count == 0:
                 raise ValueError("AcceleratorInfo status='available' requires device_count > 0.")
@@ -227,6 +274,27 @@ class AcceleratorInfo(BaseModel):
             ordinals = [d.ordinal for d in self.devices]
             if len(set(ordinals)) != len(ordinals):
                 raise ValueError(f"Duplicate device ordinals: {ordinals}")
+        else:
+            if self.devices:
+                raise ValueError(
+                    f"AcceleratorInfo status={self.status!r} forbids non-empty devices."
+                )
+            if self.device_count not in (None, 0):
+                raise ValueError(
+                    f"AcceleratorInfo status={self.status!r} forbids a non-zero "
+                    f"device_count; got {self.device_count!r}."
+                )
+            if (
+                self.framework is not None
+                or self.framework_version is not None
+                or self.runtime_version is not None
+            ):
+                raise ValueError(
+                    f"AcceleratorInfo status={self.status!r} forbids framework/"
+                    f"framework_version/runtime_version; got framework="
+                    f"{self.framework!r}, framework_version={self.framework_version!r}, "
+                    f"runtime_version={self.runtime_version!r}."
+                )
         return self
 
 
@@ -257,6 +325,18 @@ class TopologyInfo(BaseModel):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> TopologyInfo:
+        """Exhaustive status↔field consistency.
+
+        - ``status="available"``: ``rank`` and ``world_size`` present,
+          ``rank < world_size``, and ``local_rank < world_size`` when present.
+        - ``status="error"`` or ``"not_applicable"``: ALL of ``rank``,
+          ``world_size``, ``local_rank``, ``node_count``, and ``backend`` must
+          be ``None``. A record that claims error/not_applicable yet carries
+          ANY concrete topology value is internally inconsistent (and a likely
+          sign of tampering or a logic bug at capture time). ``node_count`` and
+          ``backend`` are NOT allowed here — only meaningful alongside a real
+          distributed topology (status='available').
+        """
         if self.status == "available":
             if self.rank is None or self.world_size is None:
                 raise ValueError("TopologyInfo status='available' requires rank and world_size.")
@@ -266,16 +346,24 @@ class TopologyInfo(BaseModel):
             if self.local_rank is not None and self.local_rank >= self.world_size:
                 raise ValueError("local_rank must be < world_size.")
         else:
-            # error or not_applicable: rank, world_size, AND local_rank must be
-            # absent. A record that claims error/not_applicable yet carries
-            # concrete rank/world_size/local_rank values is internally
-            # inconsistent (and a likely sign of tampering or a logic bug at
-            # capture time). node_count and backend are descriptive and allowed.
-            if self.rank is not None or self.world_size is not None or self.local_rank is not None:
+            # error or not_applicable: rank, world_size, local_rank, node_count,
+            # AND backend must ALL be absent.
+            present = {
+                name: val
+                for name, val in (
+                    ("rank", self.rank),
+                    ("world_size", self.world_size),
+                    ("local_rank", self.local_rank),
+                    ("node_count", self.node_count),
+                    ("backend", self.backend),
+                )
+                if val is not None
+            }
+            if present:
                 raise ValueError(
-                    f"TopologyInfo status={self.status!r} requires rank, "
-                    "world_size, and local_rank to be None; concrete values are "
-                    "only valid when status is 'available'."
+                    f"TopologyInfo status={self.status!r} requires rank, world_size, "
+                    "local_rank, node_count, and backend to ALL be None; got "
+                    f"concrete values {sorted(present)!r}."
                 )
         return self
 
@@ -386,11 +474,14 @@ class ProvenanceRecord(BaseModel):
         Catches tampered sidecars (a record whose stored ``completeness`` does
         not reflect the actual section states) and explicit overrides supplied
         to :meth:`from_identity` that disagree with the captured sections. The
-        stored status must equal the recomputed status, and the stored warning
-        set must equal the recomputed warning set.
+        stored status must equal the recomputed status, the stored warning set
+        must equal the recomputed warning set, AND the stored limitation set
+        must equal the recomputed limitation set.
         """
-        derived_status, derived_warnings = ProvenanceRecord._derive_completeness(
-            self.source, self.software, self.hardware, self.topology
+        derived_status, derived_warnings, derived_limitations = (
+            ProvenanceRecord._derive_completeness(
+                self.source, self.software, self.hardware, self.topology
+            )
         )
         if self.completeness.status != derived_status:
             raise ValueError(
@@ -404,6 +495,11 @@ class ProvenanceRecord(BaseModel):
                 f"Stored completeness warnings {self.completeness.warnings!r} do "
                 f"not match the derived whole-record warnings {derived_warnings!r}."
             )
+        if self.completeness.limitations != derived_limitations:
+            raise ValueError(
+                f"Stored completeness limitations {self.completeness.limitations!r} do "
+                f"not match the derived whole-record limitations {derived_limitations!r}."
+            )
         return self
 
     @staticmethod
@@ -412,12 +508,18 @@ class ProvenanceRecord(BaseModel):
         software: SoftwareEnvironment,
         hardware: AcceleratorInfo,
         topology: TopologyInfo,
-    ) -> tuple[str, tuple[str, ...]]:
-        """Derive top-level completeness + warnings from all mandatory sections.
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        """Derive top-level completeness + warnings + limitations from sections.
 
-        Returns ``(status, warnings)``. ``error``/``partial`` states in any
-        section propagate to the top-level status with typed warnings. Pure
-        static derivation so it can run before the frozen record is constructed.
+        Returns ``(status, warnings, limitations)``. ``error``/``partial`` states
+        in any section propagate to the top-level status with typed warnings and
+        typed limitations. Pure static derivation so it can run before the frozen
+        record is constructed.
+
+        Limitations are propagated from source evidence (unreadable files,
+        submodule/gitlink inspection failures, dirty submodules, the always-on
+        standard limitations) so the whole-record completeness honestly reports
+        what could not be captured — never silently ``complete``.
 
         Invalid numeric topology env values are stored durably on
         ``TopologyInfo.topology_warnings`` (captured by
@@ -425,6 +527,7 @@ class ProvenanceRecord(BaseModel):
         launcher is visible at the whole-record level, not silently dropped.
         """
         warnings: list[str] = []
+        limitations: list[str] = []
         has_partial = False
         has_error = False
 
@@ -436,8 +539,13 @@ class ProvenanceRecord(BaseModel):
             elif source.evidence.completeness == "error":
                 has_error = True
                 warnings.extend(source.evidence.warnings)
+            # Propagate the section's own limitations to the whole record so a
+            # hidden incompleteness (unreadable files, submodule failures, dirty
+            # submodule content not snapshotted) is visible at the top level.
+            limitations.extend(source.evidence.limitations)
         if not source.is_clean:
             warnings.append("non_canonical_dirty_source")
+            limitations.append("non_canonical_dirty_source")
         warnings.extend(w.code for w in source.remote_warnings)
 
         # Software: dependency version conflicts (same normalized name at
@@ -445,53 +553,75 @@ class ProvenanceRecord(BaseModel):
         if software.dependency_conflicts:
             has_partial = True
             warnings.append("dependency_version_conflict")
+            limitations.append("dependency_version_conflict")
 
         # Software: platform CPU/memory error/redacted states propagate.
         cpu = software.platform.cpu
         if cpu.status == "error":
             has_error = True
             warnings.append("cpu_error")
+            limitations.append("cpu_error")
         elif cpu.status == "redacted":
             has_partial = True
             warnings.append("cpu_redacted")
+            limitations.append("cpu_redacted")
+        elif cpu.status == "unavailable":
+            limitations.append("cpu_unavailable")
         memory = software.platform.memory
         if memory.status == "error":
             has_error = True
             warnings.append("memory_error")
+            limitations.append("memory_error")
         elif memory.status == "redacted":
             has_partial = True
             warnings.append("memory_redacted")
+            limitations.append("memory_redacted")
+        elif memory.status == "unavailable":
+            limitations.append("memory_unavailable")
         if software.platform.status == "error":
             has_error = True
             warnings.append("platform_error")
+            limitations.append("platform_error")
         elif software.platform.status == "redacted":
             has_partial = True
             warnings.append("platform_redacted")
+            limitations.append("platform_redacted")
 
         # Software lockfile.
         if software.lockfile.status == "error":
             has_error = True
             warnings.append("lockfile_error")
+            limitations.append("lockfile_error")
+        elif software.lockfile.status == "unavailable":
+            limitations.append("lockfile_unavailable")
 
         # Hardware.
         if hardware.status == "error":
             has_error = True
             warnings.append("accelerator_error")
+            limitations.append("accelerator_error")
         elif hardware.status == "redacted":
             has_partial = True
             warnings.append("accelerator_redacted")
+            limitations.append("accelerator_redacted")
+        elif hardware.status == "unavailable":
+            limitations.append("accelerator_unavailable")
 
         # Topology.
         if topology.status == "error":
             has_error = True
             warnings.append("topology_error")
+            limitations.append("topology_error")
+        elif topology.status == "not_applicable":
+            limitations.append("topology_not_applicable")
         # Invalid numeric topology env values surface as warnings (do not by
         # themselves force partial unless topology itself is in error).
         warnings.extend(topology.topology_warnings)
+        limitations.extend(topology.topology_warnings)
 
         status = "error" if has_error else ("partial" if has_partial or warnings else "complete")
-        # Deduplicate + sort warnings for determinism.
-        return status, tuple(sorted(set(warnings)))
+        # Deduplicate + sort warnings and limitations for determinism.
+        return status, tuple(sorted(set(warnings))), tuple(sorted(set(limitations)))
 
     @classmethod
     def from_identity(
@@ -527,12 +657,13 @@ class ProvenanceRecord(BaseModel):
         # first pass. An explicit override must itself match the derived value
         # (the validator rejects overrides that disagree with the sections).
         if completeness is None:
-            derived_status, derived_warnings = cls._derive_completeness(
+            derived_status, derived_warnings, derived_limitations = cls._derive_completeness(
                 source, resolved_software, resolved_hw, resolved_topo
             )
             resolved_completeness = CompletenessInfo(
                 status=cast("CompletenessStatus", derived_status),
                 warnings=derived_warnings,
+                limitations=derived_limitations,
             )
         else:
             resolved_completeness = completeness

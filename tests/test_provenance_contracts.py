@@ -12,6 +12,7 @@ from __future__ import annotations
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -400,7 +401,7 @@ class TestUnsafeUntrackedPaths:
     def test_safe_relative_path_accepted(self) -> None:
         from expertforge.provenance.source_snapshot import UntrackedEntry
 
-        entry = UntrackedEntry(path="sub/dir/file.txt", kind="file", digest="a" * 64)
+        entry = UntrackedEntry(path="sub/dir/file.txt", kind="file", mode="0o644", digest="a" * 64)
         assert entry.path == "sub/dir/file.txt"
 
 
@@ -474,14 +475,50 @@ class TestCompletenessPropagation:
             )
 
     def test_explicit_completeness_override_that_matches_accepted(self, tmp_path: Path) -> None:
-        # An explicit override that matches the derived value is accepted.
+        # An explicit override that matches the derived value (status, warnings,
+        # AND limitations) is accepted.
         ident, snap = _identity_and_snap(tmp_path)
+        # Use the default-derived software/hardware/topology so the override
+        # exactly matches what from_identity() would derive.
+        from expertforge.provenance.record import (
+            AcceleratorInfo,
+            CompletenessStatus,
+            CPUInfo,
+            LockfileDigest,
+            MemoryInfo,
+            PlatformInfo,
+            PythonInfo,
+            SoftwareEnvironment,
+            TopologyInfo,
+        )
+
+        software = SoftwareEnvironment(
+            python=PythonInfo(version="unknown", implementation="unknown"),
+            platform=PlatformInfo(
+                cpu=CPUInfo(status="unavailable"),
+                memory=MemoryInfo(status="unavailable"),
+            ),
+            lockfile=LockfileDigest(status="unavailable"),
+        )
+        hardware = AcceleratorInfo(status="unavailable")
+        topology = TopologyInfo(status="not_applicable")
+        derived_status, derived_warnings, derived_limitations = (
+            ProvenanceRecord._derive_completeness(snap, software, hardware, topology)
+        )
         rec = ProvenanceRecord.from_identity(
             ident,
             source=snap,
-            completeness=CompletenessInfo(status="complete"),
+            software=software,
+            hardware=hardware,
+            topology=topology,
+            completeness=CompletenessInfo(
+                status=cast("CompletenessStatus", derived_status),
+                warnings=derived_warnings,
+                limitations=derived_limitations,
+            ),
         )
-        assert rec.completeness.status == "complete"
+        assert rec.completeness.status == derived_status
+        assert rec.completeness.limitations == derived_limitations
 
 
 # --- topology partial input → error ----------------------------------------

@@ -25,7 +25,7 @@ from expertforge.identity.fingerprint import (
 from expertforge.identity.ids import ClockProvider, EntropyProvider, ExistsPredicate
 from expertforge.identity.lineage import ResumeLineage
 from expertforge.identity.record import AttemptIdentityRecord
-from expertforge.provenance.hardware import capture_accelerator, capture_hardware, capture_topology
+from expertforge.provenance.hardware import capture_hardware
 from expertforge.provenance.record import (
     AcceleratorInfo,
     ProvenanceRecord,
@@ -105,22 +105,38 @@ def prepare_run(
     except IdentityEmitError as e:
         raise ProvenanceOrchestrationError(str(e)) from e
 
-    # 4. Capture typed provenance against the identity. Use capture_hardware()
-    # (which returns a HardwareAggregate bundling accelerator + topology +
-    # topology_warnings) instead of calling capture_accelerator() and
-    # capture_topology() separately. ``topology_warnings`` carries invalid
-    # numeric topology env values that could not be parsed — without
-    # capture_hardware() they would be silently lost between the two calls.
+    # 4. Capture typed provenance against the identity. ALWAYS call
+    # capture_hardware() (even when hardware/topology are explicitly supplied) so
+    # the HardwareAggregate's ``topology_warnings`` are never lost. When an
+    # explicit hardware or topology override is supplied, it wins for the section
+    # fields — but the aggregate is still consulted for topology_warnings so an
+    # invalid numeric topology env value is surfaced rather than dropped.
     resolved_software = software or capture_software_environment(repo_root=repo)
-    if hardware is not None or topology is not None:
-        # An explicit override short-circuits the aggregate; honor each
-        # supplied section independently and default the other.
-        resolved_hardware = hardware or capture_accelerator()
-        resolved_topology = topology or capture_topology()
+    aggregate = capture_hardware()
+    if hardware is not None:
+        resolved_hardware = hardware
     else:
-        aggregate = capture_hardware()
         resolved_hardware = aggregate.accelerator
-        # Preserve the captured topology_warnings durably on the topology model.
+    if topology is not None:
+        # Honor the explicit override for every field, but COPY the aggregate's
+        # topology_warnings onto the supplied TopologyInfo so they do not
+        # disappear. Rebuild a frozen model carrying the captured warnings. If
+        # the caller already supplied topology_warnings, union them (deduped +
+        # sorted). The key invariant: topology_warnings must never disappear.
+        combined_warnings = tuple(
+            sorted(set((*topology.topology_warnings, *aggregate.topology_warnings)))
+        )
+        resolved_topology = TopologyInfo(
+            status=topology.status,
+            rank=topology.rank,
+            local_rank=topology.local_rank,
+            world_size=topology.world_size,
+            node_count=topology.node_count,
+            backend=topology.backend,
+            reason=topology.reason,
+            topology_warnings=combined_warnings,
+        )
+    else:
         resolved_topology = TopologyInfo(
             status=aggregate.topology.status,
             rank=aggregate.topology.rank,
@@ -129,6 +145,8 @@ def prepare_run(
             node_count=aggregate.topology.node_count,
             backend=aggregate.topology.backend,
             reason=aggregate.topology.reason,
+            # Preserve the captured topology_warnings durably on the topology
+            # model. The key invariant: topology_warnings must never disappear.
             topology_warnings=aggregate.topology_warnings,
         )
 

@@ -56,6 +56,41 @@ _GIT_TIMEOUT: float = 10.0
 # fields on the source-snapshot models so a tampered sidecar cannot smuggle in
 # a malformed digest.
 _DIGEST_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+# 40 lowercase hexadecimal characters (SHA-1). Git submodule commits are full
+# SHA-1 object names; a tampered sidecar must not smuggle in a truncated or
+# malformed commit.
+_SHA1_HEX_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _normalize_canonical_rel_path(value: str, label: str) -> str:
+    """Enforce a canonical repository-relative POSIX path.
+
+    Backslashes are normalized to forward slashes (Windows porcelain output may
+    use ``\\``). The normalized path must NOT be absolute (POSIX leading ``/`` or
+    Windows drive-letter form), must NOT contain a ``..`` OR ``.`` component,
+    and must NOT contain empty components (``a//b`` or a trailing slash). Shared
+    by :class:`UntrackedEntry.path` and :class:`SubmoduleEntry.name`.
+    """
+    normalized = value.replace("\\", "/")
+    if not normalized:
+        raise ValueError(f"{label} must be non-empty.")
+    # Reject POSIX absolute form.
+    if normalized.startswith("/"):
+        raise ValueError(f"{label} {value!r} must be repo-relative, not absolute.")
+    # Reject Windows drive-letter absolute form (C:/ — backslashes already
+    # normalized to forward slashes above).
+    if re.match(r"^[A-Za-z]:/", normalized):
+        raise ValueError(f"{label} {value!r} must be repo-relative, not absolute.")
+    parts = normalized.split("/")
+    # Reject any traversal or self-referential component anywhere in the path.
+    if any(part in ("..", ".") for part in parts):
+        raise ValueError(f"{label} {value!r} contains a '.' or '..' component.")
+    # Reject empty components (``a//b``, leading or trailing slash).
+    if any(part == "" for part in parts):
+        raise ValueError(f"{label} {value!r} contains an empty path component.")
+    return normalized
+
+
 # Deterministic locale environment for git subprocess calls. Strip GIT_*
 # environment variables that could alter diff behavior (external diff drivers,
 # aliases, config overrides) — only carry safe locale settings.
@@ -220,11 +255,13 @@ def _tracked_gitlink_paths(repo: Path) -> set[str]:
         <mode> <sha1> <stage>\t<path>
 
     Each line is NUL-delimited when ``-z`` is passed.
+
+    Raises :class:`SourceUnavailableError` if the ``git ls-files --stage`` call
+    fails — discovery must FAIL CLOSED. The caller (``_build_dirty_evidence``)
+    marks the resulting evidence ``partial`` with a ``gitlink_discovery_failed``
+    limitation rather than silently continuing without submodule detection.
     """
-    try:
-        raw = _run_git(repo, ["ls-files", "--stage", "-z"])
-    except SourceUnavailableError:
-        return set()
+    raw = _run_git(repo, ["ls-files", "--stage", "-z"])
     gitlinks: set[str] = set()
     for part in raw.split(b"\x00"):
         if not part.strip():
@@ -348,7 +385,16 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     # porcelain does NOT add trailing slashes to submodule entries, so trailing-
     # slash heuristics miss real dirty submodules. The correct detection is the
     # intersection of non-clean porcelain paths with tracked gitlink paths.
-    gitlink_paths = _tracked_gitlink_paths(repo)
+    # Discovery FAILS CLOSED: if ``git ls-files --stage`` fails, we cannot tell
+    # which paths are submodules, so any dirty content might hide an uninspected
+    # submodule. Surface that as a typed limitation + ``partial`` completeness
+    # rather than silently continuing with an empty gitlink set.
+    gitlink_discovery_failed = False
+    try:
+        gitlink_paths = _tracked_gitlink_paths(repo)
+    except SourceUnavailableError:
+        gitlink_paths = set()
+        gitlink_discovery_failed = True
 
     staged_digest = _staged_diff_digest(repo)
     unstaged_digest = _unstaged_diff_digest(repo)
@@ -442,15 +488,22 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     # (which requires sorted + unique names) accepts capture output.
     submodule_entries.sort(key=lambda s: s.name)
 
-    # Derive honest completeness + limitations.
+    # Derive honest completeness + limitations. ``warnings`` is typed as the
+    # closed Literal vocabulary so the SourceEvidence field accepts it directly.
     limitations: list[str] = []
-    warnings: list[str] = []
+    warnings: list[_EvidenceWarningCode] = []
     if unreadable_count > 0:
         limitations.append(f"unreadable_untracked_files:{unreadable_count}")
         warnings.append("unreadable_untracked_content")
     if submodule_failed:
         limitations.append("submodule_inspection_failed")
         warnings.append("submodule_inspection_failed")
+    # Gitlink discovery failure is a hard partial-completeness signal: without
+    # the tracked gitlink set we cannot tell whether any dirty working-tree
+    # content belongs to a submodule (and therefore is not captured here).
+    if gitlink_discovery_failed:
+        limitations.append("gitlink_discovery_failed")
+        warnings.append("gitlink_discovery_failed")
     # Dirty/changed submodules are not content-snapshotted by `git submodule
     # status` — mark evidence partial. Count both the commit-state prefixes
     # (`git submodule status` reports changed/conflicted) AND the tracked-
@@ -474,7 +527,10 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
 
     completeness: Literal["complete", "partial"] = (
         "complete"
-        if not unreadable_count and not submodule_failed and not dirty_count
+        if not unreadable_count
+        and not submodule_failed
+        and not gitlink_discovery_failed
+        and not dirty_count
         else "partial"
     )
 
@@ -520,41 +576,42 @@ class UntrackedEntry(BaseModel):
     @field_validator("path")
     @classmethod
     def _validate_path(cls, v: str) -> str:
-        """Enforce a canonical repository-relative POSIX path.
+        """Enforce a canonical repository-relative POSIX path (shared validator).
 
-        ``path`` is a repo-relative path stored in canonical POSIX form. Any
-        backslashes are converted to forward slashes first (Windows porcelain
-        output may use ``\\``). The normalized path must NOT be absolute (POSIX
-        leading ``/`` or Windows drive-letter form), must NOT contain a ``..``
-        component, and must NOT contain empty components (``a//b`` or a trailing
-        slash).
+        See :func:`_normalize_canonical_rel_path`: backslashes are normalized to
+        forward slashes, absolute forms (POSIX ``/`` or Windows drive-letter) are
+        rejected, ``..`` AND ``.`` components are rejected, and empty components
+        (``a//b`` or a trailing slash) are rejected.
         """
-        # Normalize backslashes to forward slashes before validation so a
-        # Windows porcelain path like ``sub\\dir\\file.txt`` is stored canonically.
-        normalized = v.replace("\\", "/")
-        # Reject POSIX absolute form.
-        if normalized.startswith("/"):
-            raise ValueError(f"untracked path {v!r} must be repo-relative, not absolute.")
-        # Reject Windows drive-letter absolute form (C:/ or, pre-normalization,
-        # C:\ — already converted to C:/ above).
-        if re.match(r"^[A-Za-z]:/", normalized):
-            raise ValueError(f"untracked path {v!r} must be repo-relative, not absolute.")
-        # Reject empty path.
-        if not normalized:
-            raise ValueError("untracked path must be non-empty.")
-        parts = normalized.split("/")
-        # Reject any traversal component anywhere in the path.
-        if any(part == ".." for part in parts):
-            raise ValueError(f"untracked path {v!r} contains a '..' traversal component.")
-        # Reject empty components (``a//b``, leading or trailing slash).
-        if any(part == "" for part in parts):
-            raise ValueError(f"untracked path {v!r} contains an empty path component.")
-        return normalized
+        return _normalize_canonical_rel_path(v, "untracked path")
 
     @field_validator("digest")
     @classmethod
     def _validate_digest(cls, v: str | None) -> str | None:
         return _validate_optional_digest(v)
+
+    @model_validator(mode="after")
+    def _check_kind_consistency(self) -> UntrackedEntry:
+        """Cross-field consistency between ``kind`` and ``mode``/``digest``.
+
+        - ``kind="file"`` must carry a ``mode`` (a regular file always has a
+          mode; a missing mode signals an incomplete capture).
+        - ``kind="symlink"`` should carry a ``digest`` (the symlink-target path
+          digest). ``None`` here is allowed (unreadable target) but only when
+          ``mode`` is present.
+        - ``kind="unknown"`` must have BOTH ``mode`` and ``digest`` set to None
+          — an "unknown" kind with concrete mode/digest is contradictory.
+        """
+        if self.kind == "file" and self.mode is None:
+            raise ValueError(f"UntrackedEntry kind='file' requires a mode (path={self.path!r}).")
+        if self.kind == "symlink" and self.mode is None:
+            raise ValueError(f"UntrackedEntry kind='symlink' requires a mode (path={self.path!r}).")
+        if self.kind == "unknown" and (self.mode is not None or self.digest is not None):
+            raise ValueError(
+                f"UntrackedEntry kind='unknown' requires mode=None and digest=None "
+                f"(path={self.path!r})."
+            )
+        return self
 
 
 class SubmoduleEntry(BaseModel):
@@ -563,8 +620,34 @@ class SubmoduleEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
 
     name: str = Field(..., min_length=1)
-    commit: str = Field(..., min_length=1)  # full SHA, not truncated
+    commit: str = Field(..., min_length=1)  # full SHA-1, or "unknown"
     state: Literal["initialized", "uninitialized", "changed", "conflicted"]
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        """Enforce a canonical repository-relative POSIX path (same rules as
+        :class:`UntrackedEntry.path`). The submodule name is its tracked
+        gitlink path."""
+        return _normalize_canonical_rel_path(v, "submodule name")
+
+    @field_validator("commit")
+    @classmethod
+    def _validate_commit(cls, v: str) -> str:
+        """Exactly 40 lowercase hex (SHA-1) or the literal ``"unknown"``.
+
+        Git submodule commits are full SHA-1 object names. An uninitialized
+        submodule may report no commit; capture records that as ``"unknown"``.
+        Any other value (truncated, uppercase, non-hex) is rejected so a
+        tampered sidecar cannot smuggle in a malformed commit.
+        """
+        if v == "unknown":
+            return v
+        if not _SHA1_HEX_PATTERN.fullmatch(v):
+            raise ValueError(
+                f"submodule commit must be 40 lowercase hex chars (sha-1) or 'unknown'; got {v!r}."
+            )
+        return v
 
 
 class SourceCounts(BaseModel):
@@ -580,12 +663,88 @@ class SourceCounts(BaseModel):
     submodules: int = Field(default=0, ge=0)
 
 
+# Stable, closed warning-code vocabulary for :class:`SourceEvidence`. A warning
+# MUST be one of these codes — free text is rejected so callers can switch on a
+# stable contract and a tampered sidecar cannot smuggle in fabricated warnings.
+_EvidenceWarningCode = Literal[
+    "unreadable_untracked_content",
+    "submodule_inspection_failed",
+    "dirty_submodule_content_not_captured",
+    "gitlink_discovery_failed",
+]
+_EVIDENCE_WARNING_CODES: frozenset[str] = frozenset(
+    {
+        "unreadable_untracked_content",
+        "submodule_inspection_failed",
+        "dirty_submodule_content_not_captured",
+        "gitlink_discovery_failed",
+    }
+)
+
+
+def _validate_evidence_warning(v: str) -> str:
+    """Reject any warning code outside the closed vocabulary."""
+    if v not in _EVIDENCE_WARNING_CODES:
+        raise ValueError(
+            f"evidence warning {v!r} is not a recognized code; "
+            f"allowed: {sorted(_EVIDENCE_WARNING_CODES)}."
+        )
+    return v
+
+
+# Stable, closed limitation-code vocabulary for :class:`SourceEvidence`. Two
+# codes carry a dynamic count suffix (``unreadable_untracked_files:N`` and
+# ``dirty_submodules_not_snapshotted:N``); the rest are exact literals. A
+# limitation MUST match an allowed code or a recognized ``<prefix>:<count>``
+# pattern — free text is rejected so the limitation contract is stable.
+_EVIDENCE_LIMITATION_EXACT_CODES: frozenset[str] = frozenset(
+    {
+        "submodule_inspection_failed",
+        "ignored_files_not_included",
+        "external_symlink_targets_not_followed",
+        "gitlink_discovery_failed",
+    }
+)
+_EVIDENCE_LIMITATION_PREFIXES: frozenset[str] = frozenset(
+    {
+        "unreadable_untracked_files:",
+        "dirty_submodules_not_snapshotted:",
+    }
+)
+
+
+def _validate_evidence_limitation(v: str) -> str:
+    """Reject any limitation code outside the closed vocabulary or its patterns.
+
+    Exact codes must match a known literal. Count-bearing codes must look like
+    ``<known_prefix>:<non-negative-integer>``.
+    """
+    if v in _EVIDENCE_LIMITATION_EXACT_CODES:
+        return v
+    for prefix in _EVIDENCE_LIMITATION_PREFIXES:
+        if v.startswith(prefix):
+            count_str = v[len(prefix) :]
+            if count_str.isdigit() and int(count_str) >= 0:
+                return v
+            raise ValueError(
+                f"evidence limitation {v!r} has a malformed count suffix "
+                f"(expected non-negative integer after {prefix!r})."
+            )
+    raise ValueError(
+        f"evidence limitation {v!r} is not a recognized code or pattern; "
+        f"allowed exact codes: {sorted(_EVIDENCE_LIMITATION_EXACT_CODES)}; "
+        f"allowed prefixes: {sorted(_EVIDENCE_LIMITATION_PREFIXES)}."
+    )
+
+
 class SourceEvidence(BaseModel):
     """Structured dirty-source evidence (staged/unstaged/untracked/submodule).
 
     All containers are tuples of frozen models — deeply immutable.
     Completeness is honestly derived: ``partial`` when any file was unreadable
-    or submodule inspection failed, with typed limitations/warnings.
+    or submodule inspection failed, with typed limitations/warnings. The
+    ``warnings`` and ``limitations`` fields use a closed code vocabulary — free
+    text is rejected so the contract is stable and tamper-evident.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
@@ -597,7 +756,7 @@ class SourceEvidence(BaseModel):
     counts: SourceCounts = Field(default_factory=SourceCounts)
     completeness: Literal["complete", "partial", "error"] = Field(default="complete")
     limitations: tuple[str, ...] = Field(default_factory=tuple)
-    warnings: tuple[str, ...] = Field(default_factory=tuple)
+    warnings: tuple[_EvidenceWarningCode, ...] = Field(default_factory=tuple)
 
     @field_validator("staged_digest", "unstaged_digest")
     @classmethod
@@ -606,10 +765,19 @@ class SourceEvidence(BaseModel):
             raise ValueError(f"digest must be 64 lowercase hex chars (sha256); got {v!r}.")
         return v
 
-    # Stable warning codes used by ``warnings`` on this model. ``_warning_codes``
-    # is a stable contract that callers can switch on. The standard limitations
-    # that are always present (ignored files + external symlink targets) and do
-    # NOT affect completeness even when ``completeness == "complete"``.
+    @field_validator("warnings")
+    @classmethod
+    def _validate_warnings_codes(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(_validate_evidence_warning(w) for w in v)
+
+    @field_validator("limitations")
+    @classmethod
+    def _validate_limitations_codes(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(_validate_evidence_limitation(lim) for lim in v)
+
+    # The standard limitations that are always present (ignored files + external
+    # symlink targets) and do NOT affect completeness even when
+    # ``completeness == "complete"``.
     _STANDARD_LIMITATIONS: ClassVar[frozenset[str]] = frozenset(
         {
             "ignored_files_not_included",
@@ -627,8 +795,8 @@ class SourceEvidence(BaseModel):
           ``counts.submodules == len(submodule_status)``.
         - when ``completeness == "complete"``: no entry has ``digest is None``,
           no warnings, and only the standard limitations may be present.
-        - ``warnings`` are sorted and use stable codes only.
-        - ``limitations`` are sorted.
+        - ``warnings`` are sorted, unique, and use stable codes only.
+        - ``limitations`` are sorted and use stable codes/patterns only.
         """
         # untracked: sorted by path + unique paths.
         untracked_paths = [e.path for e in self.untracked]
@@ -746,23 +914,38 @@ class SourceSnapshot(BaseModel):
     def _verify_remote_url_warnings(self) -> SourceSnapshot:
         """Correlate ``remote_url`` with ``remote_warnings`` at the model level.
 
-        Computes the canonical sanitization of the stored ``remote_url`` using
-        the same classifier used at capture time. Whenever the sanitized value
-        differs from what was supplied, the appropriate warning(s) MUST be
-        present in ``remote_warnings`` — otherwise the lossy sanitization would
-        be silent. The stored URL is replaced with the sanitized form (bypassing
-        the frozen check) so callers always see the canonical value.
+        The correlation is TWO-WAY. Computes the canonical sanitization of the
+        stored ``remote_url`` using the same classifier used at capture time:
 
-        A URL with raw credentials (``https://user:secret@host``) is sanitized
-        to the credential-stripped form and requires
-        ``remote_credentials_removed``. SCP-style ``git@host:path`` URLs have
-        no ``://`` scheme; their ``git`` is a protocol user, not a credential —
-        they are NOT flagged.
+        - Required warnings must be present: whenever the sanitized value
+          differs from what was supplied, the appropriate warning(s) MUST be in
+          ``remote_warnings`` — otherwise the lossy sanitization would be silent.
+        - Impossible warnings must be ABSENT: when ``remote_url`` is a clean
+          HTTPS URL with no credentials/query/fragment (or any URL the classifier
+          leaves untouched), the supplied warnings MUST exactly equal the
+          expected set. A fabricated warning (e.g. ``remote_credentials_removed``
+          on a URL that never carried credentials) is rejected as contradictory.
+
+        A ``None`` ``remote_url`` (no origin) MUST carry no warnings: warnings
+        without a URL are contradictory and a likely sign of a tampered sidecar.
+
+        The stored URL is replaced with the sanitized form (bypassing the frozen
+        check) so callers always see the canonical value. SCP-style
+        ``git@host:path`` URLs have no ``://`` scheme; their ``git`` is a
+        protocol user, not a credential — they are NOT flagged.
         """
+        supplied_codes = {w.code for w in self.remote_warnings}
         if self.remote_url is None:
+            # No origin → no sanitization ever happened → no warnings are valid.
+            if supplied_codes:
+                raise ValueError(
+                    f"remote_url is None but remote_warnings are present "
+                    f"{sorted(supplied_codes)!r}; a missing remote URL cannot "
+                    "carry sanitization warnings."
+                )
             return self
         expected_sanitized, expected_codes = _classify_remote_url_sanitization(self.remote_url)
-        supplied_codes = {w.code for w in self.remote_warnings}
+        expected_set = set(expected_codes)
         # Each expected warning must be present (a missing warning means the
         # sanitization lost information silently).
         missing = [c for c in expected_codes if c not in supplied_codes]
@@ -771,6 +954,16 @@ class SourceSnapshot(BaseModel):
                 f"remote_url sanitization required warning codes {sorted(missing)!r} "
                 "but they are absent from remote_warnings; remote URL sanitization "
                 "must not lose information silently."
+            )
+        # No extra/impossible warnings: the supplied set must equal the expected
+        # set. A warning that the classifier did not require is fabricated
+        # (e.g. ``remote_credentials_removed`` on a clean URL with no userinfo).
+        extra = sorted(supplied_codes - expected_set)
+        if extra:
+            raise ValueError(
+                f"remote_url {self.remote_url!r} does not justify remote_warnings "
+                f"{extra!r}; the classifier expected only {sorted(expected_set)!r}. "
+                "Fabricated or impossible remote warnings are not permitted."
             )
         # Replace the stored value with its canonical sanitized form. The model
         # is frozen; use object.__setattr__ to bypass the frozen check (this is

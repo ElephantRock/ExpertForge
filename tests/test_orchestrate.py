@@ -222,6 +222,62 @@ class TestPrepareRun:
         assert "invalid_topology_env_value:RANK" in provenance.topology.topology_warnings
         assert "invalid_topology_env_value:RANK" in provenance.completeness.warnings
 
+    def test_prepare_run_preserves_topology_warnings_when_topology_supplied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review item 4: when topology is EXPLICITLY supplied, prepare_run() must
+        # still call capture_hardware() and copy the aggregate's
+        # topology_warnings onto the supplied TopologyInfo — they must not
+        # disappear just because an override was provided.
+        from expertforge.config.resolve import resolve_config
+        from expertforge.provenance.record import TopologyInfo
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        monkeypatch.setenv("RANK", "not-an-int")
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        explicit_topology = TopologyInfo(status="available", rank=0, world_size=2)
+        _, provenance, _ = prepare_run(
+            artifact_root=tmp_path / "runs",
+            config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+            repo=repo,
+            topology=explicit_topology,
+            clock=lambda: _FIXED,
+            entropy=lambda n: bytes(n),
+        )
+        # The explicit override's fields win, but the captured topology_warning
+        # is preserved (not dropped).
+        assert provenance.topology.rank == 0
+        assert provenance.topology.world_size == 2
+        assert "invalid_topology_env_value:RANK" in provenance.topology.topology_warnings
+        assert "invalid_topology_env_value:RANK" in provenance.completeness.warnings
+
+    def test_prepare_run_preserves_topology_warnings_when_hardware_supplied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review item 4: when hardware is EXPLICITLY supplied (but topology is
+        # not), prepare_run() must still call capture_hardware() and the
+        # aggregate's topology_warnings must reach the derived TopologyInfo.
+        from expertforge.config.resolve import resolve_config
+        from expertforge.provenance.record import AcceleratorInfo
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        monkeypatch.setenv("RANK", "not-an-int")
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        _, provenance, _ = prepare_run(
+            artifact_root=tmp_path / "runs",
+            config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+            repo=repo,
+            hardware=AcceleratorInfo(status="unavailable"),
+            clock=lambda: _FIXED,
+            entropy=lambda n: bytes(n),
+        )
+        assert "invalid_topology_env_value:RANK" in provenance.topology.topology_warnings
+        assert "invalid_topology_env_value:RANK" in provenance.completeness.warnings
+
 
 # --- RESUME / FORK / LEGACY via prepare_run --------------------------------
 

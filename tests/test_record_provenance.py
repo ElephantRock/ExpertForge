@@ -293,11 +293,19 @@ class TestTopologyInfoInvariants:
         with pytest.raises(ValidationError):
             TopologyInfo(status="not_applicable", local_rank=0)
 
-    def test_error_allows_node_count_and_backend(self) -> None:
-        # node_count and backend are descriptive; allowed even on error.
-        topo = TopologyInfo(status="error", node_count=2, backend="nccl")
-        assert topo.node_count == 2
-        assert topo.backend == "nccl"
+    def test_error_rejects_node_count_and_backend(self) -> None:
+        # Review item 5 (tightened): status='error' must not carry node_count
+        # OR backend — they are only meaningful alongside a real distributed
+        # topology (status='available'). A record claiming error yet carrying
+        # these is internally inconsistent / likely tampered.
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="error", node_count=2, backend="nccl")
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="error", node_count=2)
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="error", backend="nccl")
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="not_applicable", node_count=2, backend="nccl")
 
     def test_available_rejects_local_rank_ge_world_size(self) -> None:
         with pytest.raises(ValidationError):
@@ -311,3 +319,218 @@ class TestTopologyInfoInvariants:
                 world_size=2,
                 topology_warnings=("z_warn", "a_warn"),
             )
+
+
+# --- LockfileDigest exhaustive validator (review item 5) -------------------
+
+
+class TestLockfileDigestExhaustiveValidator:
+    """Review item 5: LockfileDigest status↔(algorithm, digest) consistency."""
+
+    def test_available_requires_sha256_algorithm(self) -> None:
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="available", algorithm="md5", digest="a" * 64)
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="available", algorithm="sha1", digest="a" * 64)
+
+    def test_available_requires_valid_64_hex_digest(self) -> None:
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="available", algorithm="sha256", digest="a" * 63)
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="available", algorithm="sha256", digest="A" * 64)
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="available", algorithm="sha256", digest=None)
+
+    def test_available_with_sha256_and_valid_digest_accepted(self) -> None:
+        lock = LockfileDigest(status="available", algorithm="sha256", digest="a" * 64)
+        assert lock.algorithm == "sha256"
+
+    def test_unavailable_requires_none_algorithm_and_digest(self) -> None:
+        for status in ("unavailable", "error", "not_applicable", "redacted"):
+            with pytest.raises(ValidationError):
+                LockfileDigest(status=status, algorithm="sha256", digest=None)
+            with pytest.raises(ValidationError):
+                LockfileDigest(status=status, algorithm=None, digest="a" * 64)
+
+    def test_unavailable_with_both_none_accepted(self) -> None:
+        for status in ("unavailable", "error", "not_applicable", "redacted"):
+            lock = LockfileDigest(status=status, algorithm=None, digest=None)
+            assert lock.algorithm is None
+            assert lock.digest is None
+
+
+# --- AcceleratorInfo exhaustive validator (review item 5) ------------------
+
+
+class TestAcceleratorInfoExhaustiveValidator:
+    """Review item 5: non-available AcceleratorInfo must have empty devices,
+    None/zero device_count, and None framework/runtime/framework_version."""
+
+    def test_unavailable_rejects_framework(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="unavailable", framework="cuda")
+
+    def test_unavailable_rejects_runtime_version(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="unavailable", runtime_version="12.0")
+
+    def test_unavailable_rejects_framework_version(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="unavailable", framework_version="2.0")
+
+    def test_error_rejects_nonzero_device_count(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="error", device_count=1, reason="io_error")
+
+    def test_error_allows_zero_or_none_device_count(self) -> None:
+        a = AcceleratorInfo(status="error", device_count=0, reason="io_error")
+        assert a.device_count == 0
+        b = AcceleratorInfo(status="error", reason="io_error")
+        assert b.device_count is None
+
+    def test_unavailable_rejects_non_empty_devices(self) -> None:
+        from expertforge.provenance.record import DeviceInfo
+
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(
+                status="unavailable",
+                devices=(DeviceInfo(ordinal=0, model="A100"),),
+            )
+
+    def test_available_rejects_empty_devices(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceleratorInfo(status="available", device_count=0, devices=())
+
+
+# --- CPUInfo / MemoryInfo exhaustive validator (review item 5) --------------
+
+
+class TestCpuMemoryExhaustiveValidator:
+    """Review item 5: CPUInfo and MemoryInfo forbid count/total_bytes on ALL
+    non-available statuses (unavailable/error/not_applicable/redacted)."""
+
+    def test_cpu_not_applicable_rejects_count(self) -> None:
+        with pytest.raises(ValidationError):
+            CPUInfo(status="not_applicable", count=4)
+
+    def test_cpu_redacted_rejects_count(self) -> None:
+        with pytest.raises(ValidationError):
+            CPUInfo(status="redacted", count=4)
+
+    def test_cpu_available_requires_count_ge_one(self) -> None:
+        with pytest.raises(ValidationError):
+            CPUInfo(status="available", count=0)
+
+    def test_cpu_non_available_with_none_count_accepted(self) -> None:
+        for status in ("unavailable", "error", "not_applicable", "redacted"):
+            cpu = CPUInfo(status=status, count=None)
+            assert cpu.count is None
+
+    def test_memory_not_applicable_rejects_total_bytes(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryInfo(status="not_applicable", total_bytes=1024)
+
+    def test_memory_redacted_rejects_total_bytes(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryInfo(status="redacted", total_bytes=1024)
+
+    def test_memory_available_with_zero_total_bytes_accepted(self) -> None:
+        # total_bytes >= 0 is valid; zero is a legitimate (if unusual) value.
+        mem = MemoryInfo(status="available", total_bytes=0)
+        assert mem.total_bytes == 0
+
+    def test_memory_non_available_with_none_total_bytes_accepted(self) -> None:
+        for status in ("unavailable", "error", "not_applicable", "redacted"):
+            mem = MemoryInfo(status=status, total_bytes=None)
+            assert mem.total_bytes is None
+
+
+# --- TopologyInfo tightened validator (review item 5) ----------------------
+
+
+class TestTopologyInfoTightenedValidator:
+    """Review item 5: status='error'/'not_applicable' now requires ALL of rank,
+    world_size, local_rank, node_count, AND backend to be None."""
+
+    def test_error_rejects_rank(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="error", rank=0)
+
+    def test_error_rejects_world_size(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="error", world_size=2)
+
+    def test_not_applicable_rejects_node_count(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="not_applicable", node_count=1)
+
+    def test_not_applicable_rejects_backend(self) -> None:
+        with pytest.raises(ValidationError):
+            TopologyInfo(status="not_applicable", backend="nccl")
+
+    def test_error_with_only_reason_accepted(self) -> None:
+        topo = TopologyInfo(status="error", reason="partial_input")
+        assert topo.reason == "partial_input"
+        assert topo.rank is None
+        assert topo.backend is None
+
+    def test_available_allows_node_count_and_backend(self) -> None:
+        topo = TopologyInfo(status="available", rank=0, world_size=2, node_count=2, backend="nccl")
+        assert topo.node_count == 2
+        assert topo.backend == "nccl"
+
+
+# --- CompletenessInfo limitations derivation/check (review item 4) ----------
+
+
+class TestCompletenessLimitationsDerivation:
+    """Review item 4: CompletenessInfo.limitations is now DERIVED from the
+    sections and CHECKED by the consistency validator (not just status/warnings)."""
+
+    def test_accelerator_error_propagates_limitation(self, tmp_path: Path) -> None:
+        ident, snap = _identity(tmp_path)
+        rec = ProvenanceRecord.from_identity(
+            ident,
+            source=snap,
+            hardware=AcceleratorInfo(status="error", reason="io_error"),
+        )
+        assert "accelerator_error" in rec.completeness.limitations
+
+    def test_default_sections_carry_unavailable_limitations(self, tmp_path: Path) -> None:
+        # Default unavailable sections surface as honest limitations.
+        ident, snap = _identity(tmp_path)
+        rec = ProvenanceRecord.from_identity(ident, source=snap)
+        limitations = rec.completeness.limitations
+        assert "cpu_unavailable" in limitations
+        assert "memory_unavailable" in limitations
+        assert "lockfile_unavailable" in limitations
+        assert "accelerator_unavailable" in limitations
+        assert "topology_not_applicable" in limitations
+
+    def test_tampered_limitations_rejected(self, tmp_path: Path) -> None:
+        # A record whose stored limitations disagree with the derived set is
+        # rejected by the completeness-consistency validator.
+        ident, snap = _identity(tmp_path)
+        rec = ProvenanceRecord.from_identity(
+            ident,
+            source=snap,
+            hardware=AcceleratorInfo(status="error", reason="io_error"),
+        )
+        tampered = rec.model_dump()
+        # Drop the accelerator_error limitation while keeping the rest.
+        tampered["completeness"]["limitations"] = tuple(
+            lim for lim in rec.completeness.limitations if lim != "accelerator_error"
+        )
+        with pytest.raises(ValidationError):
+            ProvenanceRecord.model_validate(tampered)
+
+    def test_topology_warnings_appear_in_limitations(self, tmp_path: Path) -> None:
+        ident, snap = _identity(tmp_path)
+        topo = TopologyInfo(
+            status="available",
+            rank=0,
+            world_size=2,
+            topology_warnings=("invalid_topology_env_value:RANK",),
+        )
+        rec = ProvenanceRecord.from_identity(ident, source=snap, topology=topo)
+        assert "invalid_topology_env_value:RANK" in rec.completeness.limitations
