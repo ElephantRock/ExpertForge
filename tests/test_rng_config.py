@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -11,7 +12,7 @@ from expertforge.config.models import ConfigRoot
 from expertforge.config.resolve import canonical_bytes, resolve_config
 
 
-def _base_mapping() -> dict[str, object]:
+def _base_mapping() -> dict[str, Any]:
     return {
         "format_version": 1,
         "run": {"name": "rng-test"},
@@ -43,7 +44,7 @@ def test_reproducibility_policy_defaults_are_backward_compatible() -> None:
 )
 def test_reproducibility_policy_rejects_unknown_values(field: str, value: str) -> None:
     mapping = _base_mapping()
-    training = dict(mapping["training"])  # type: ignore[arg-type]
+    training = dict(mapping["training"])
     training[field] = value
     mapping["training"] = training
 
