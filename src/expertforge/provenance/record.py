@@ -290,6 +290,50 @@ class ProvenanceRecord(BaseModel):
             )
         return self
 
+    def _derive_completeness(self) -> tuple[str, tuple[str, ...]]:
+        """Derive top-level completeness + warnings from all mandatory sections.
+
+        Returns ``(status, warnings)``. ``error``/``partial`` states in any
+        section propagate to the top-level status with typed warnings.
+        """
+        warnings: list[str] = []
+        has_partial = False
+        has_error = False
+
+        # Source evidence.
+        if self.source.evidence is not None:
+            if self.source.evidence.completeness == "partial":
+                has_partial = True
+                warnings.extend(self.source.evidence.warnings)
+            elif self.source.evidence.completeness == "error":
+                has_error = True
+                warnings.extend(self.source.evidence.warnings)
+        if not self.source.is_clean:
+            warnings.append("non_canonical_dirty_source")
+        warnings.extend(w.code for w in self.source.remote_warnings)
+
+        # Software lockfile.
+        if self.software.lockfile.status == "error":
+            has_error = True
+            warnings.append("lockfile_error")
+
+        # Hardware.
+        if self.hardware.status == "error":
+            has_error = True
+            warnings.append("accelerator_error")
+        elif self.hardware.status == "redacted":
+            has_partial = True
+            warnings.append("accelerator_redacted")
+
+        # Topology.
+        if self.topology.status == "error":
+            has_error = True
+            warnings.append("topology_error")
+
+        status = "error" if has_error else ("partial" if has_partial or warnings else "complete")
+        # Deduplicate + sort warnings for determinism.
+        return status, tuple(sorted(set(warnings)))
+
     @classmethod
     def from_identity(
         cls,
@@ -305,28 +349,45 @@ class ProvenanceRecord(BaseModel):
 
         ``source`` (the complete typed SourceSnapshot) is mandatory.
         Software/hardware/topology default to typed unavailable values when
-        not supplied.
+        not supplied. Completeness is derived from all sections unless
+        explicitly overridden.
         """
-        return cls(
+        resolved_software = software or SoftwareEnvironment(
+            python=PythonInfo(version="unknown", implementation="unknown"),
+            platform=PlatformInfo(
+                cpu=CPUInfo(status="unavailable"),
+                memory=MemoryInfo(status="unavailable"),
+            ),
+            lockfile=LockfileDigest(status="unavailable"),
+        )
+        resolved_hw = hardware or AcceleratorInfo(status="unavailable")
+        resolved_topo = topology or TopologyInfo(status="not_applicable")
+
+        # Build the record first (without completeness), then derive it.
+        record = cls(
             run_id=identity.run_id,
             attempt_id=identity.attempt_id,
             specification_fingerprint=identity.specification_fingerprint,
             immutable_inputs=identity.specification_fingerprint.immutable_inputs,
             start_time_utc=identity.created_at_utc,
             source=source,
-            software=software
-            or SoftwareEnvironment(
-                python=PythonInfo(version="unknown", implementation="unknown"),
-                platform=PlatformInfo(
-                    cpu=CPUInfo(status="unavailable"),
-                    memory=MemoryInfo(status="unavailable"),
-                ),
-                lockfile=LockfileDigest(status="unavailable"),
-            ),
-            hardware=hardware or AcceleratorInfo(status="unavailable"),
-            topology=topology or TopologyInfo(status="not_applicable"),
+            software=resolved_software,
+            hardware=resolved_hw,
+            topology=resolved_topo,
             completeness=completeness or CompletenessInfo(),
         )
+        if completeness is None:
+            derived_status, derived_warnings = record._derive_completeness()
+            # Reconstruct with derived completeness (frozen model).
+            return record.model_copy(
+                update={
+                    "completeness": CompletenessInfo(
+                        status=derived_status,
+                        warnings=derived_warnings,
+                    )
+                }
+            )
+        return record
 
     def to_deterministic_json(self) -> bytes:
         """Compact, sorted-key, UTF-8, non-finite-prohibiting JSON."""

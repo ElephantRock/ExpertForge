@@ -51,8 +51,12 @@ __all__ = [
 SOURCE_SNAPSHOT_VERSION: int = 1
 _SNAPSHOT_SCHEMA = "expertforge.source-snapshot"
 _GIT_TIMEOUT: float = 10.0
-# Deterministic locale environment for git subprocess calls.
-_GIT_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+# Deterministic locale environment for git subprocess calls. Strip GIT_*
+# environment variables that could alter diff behavior (external diff drivers,
+# aliases, config overrides) — only carry safe locale settings.
+_GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+_GIT_ENV["LC_ALL"] = "C"
+_GIT_ENV["LANG"] = "C"
 
 
 class DirtySourceError(Exception):
@@ -160,14 +164,14 @@ def _is_dirty(repo: Path) -> bool:
 
 
 def _staged_diff_digest(repo: Path) -> str:
-    """Deterministic digest of staged changes (binary, no textconv)."""
-    out = _run_git(repo, ["diff", "--cached", "--no-textconv", "--binary"])
+    """Deterministic digest of staged changes (binary, no textconv, no ext-diff)."""
+    out = _run_git(repo, ["diff", "--cached", "--no-textconv", "--no-ext-diff", "--binary"])
     return hashlib.sha256(out).hexdigest()
 
 
 def _unstaged_diff_digest(repo: Path) -> str:
-    """Deterministic digest of unstaged tracked changes (binary, no textconv)."""
-    out = _run_git(repo, ["diff", "--no-textconv", "--binary"])
+    """Deterministic digest of unstaged tracked changes (binary, no textconv, no ext-diff)."""
+    out = _run_git(repo, ["diff", "--no-textconv", "--no-ext-diff", "--binary"])
     return hashlib.sha256(out).hexdigest()
 
 
@@ -320,11 +324,22 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     if submodule_failed:
         limitations.append("submodule_inspection_failed")
         warnings.append("submodule_inspection_failed")
+    # Dirty/changed submodules are not content-snapshotted by `git submodule
+    # status` — mark evidence partial.
+    dirty_submodules = [s for s in submodule_entries if s.state in ("changed", "conflicted")]
+    if dirty_submodules:
+        limitations.append(f"dirty_submodules_not_snapshotted:{len(dirty_submodules)}")
+        warnings.append("dirty_submodule_content_not_captured")
 
-    # Always note that ignored files are not included.
+    # Always note that ignored files and external symlink targets are not included.
     limitations.append("ignored_files_not_included")
+    limitations.append("external_symlink_targets_not_followed")
 
-    completeness = "complete" if not unreadable_count and not submodule_failed else "partial"
+    completeness = (
+        "complete"
+        if not unreadable_count and not submodule_failed and not dirty_submodules
+        else "partial"
+    )
 
     return SourceEvidence(
         staged_digest=staged_digest,
