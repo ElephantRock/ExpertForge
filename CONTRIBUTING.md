@@ -79,7 +79,9 @@ architectural decisions require explicit review before merge (collaboration §10
 ## 7. Validation
 
 Validation must be performed in the same session in which completion is claimed,
-and the actual command output must be reported — not asserted.
+and the actual command output must be reported — not asserted. The permanent
+`.github/workflows/ci.yml` workflow repeats the portable checks on pull requests
+and pushes to `main` with read-only repository permissions.
 
 ### Environment bootstrap (first checkout / CI)
 
@@ -88,16 +90,44 @@ uv python install 3.11
 uv sync --locked
 ```
 
-### Canonical checks (run all from a clean `uv sync --locked` environment)
+### Canonical full validation
+
+Run all commands from a clean `uv sync --locked` environment:
 
 ```bash
 uv sync --locked
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy src tests
-uv run pytest
-uv run python -c "import expertforge"
+uv run --locked ruff format --check .
+uv run --locked ruff check .
+uv run --locked mypy src tests
+uv run --locked pytest
+uv run --locked python -c "import expertforge"
+uv run --locked expertforge-config configs/smoke.yaml > /dev/null
+uv run --locked python scripts/validate_repository.py all
+uv lock --check
 ```
+
+### Test tiers
+
+Fast CPU suite for routine development:
+
+```bash
+uv run --locked pytest -m "not integration and not smoke and not accelerator"
+```
+
+Portable CPU integration suite:
+
+```bash
+uv run --locked pytest -m "integration and not accelerator"
+```
+
+The unfiltered `uv run --locked pytest` command is the complete current suite.
+Pytest markers are strict:
+
+- `integration` identifies portable cross-component, subprocess, or isolated
+  filesystem tests;
+- `smoke` identifies end-to-end training/recovery checks owned by Issue #14;
+- `accelerator` identifies optional hardware/runtime-dependent tests, which must
+  skip with an explicit reason when unavailable.
 
 ### Minimum per-PR review set
 
@@ -105,10 +135,12 @@ uv run python -c "import expertforge"
 |-------|---------|
 | Intended working-tree state | `git status --porcelain` |
 | Staged file set matches plan | `git diff --cached --name-only` |
-| No secrets staged | `git diff --cached` (scan for tokens/keys/passwords) |
-| No ExpertOS content copied | path audit on `git diff --cached` (boundary is the schema/contract) |
+| Repository policy checks | `uv run --locked python scripts/validate_repository.py all` |
 | Local HEAD pushed to origin | `git rev-parse HEAD` equals `origin/<branch>` |
-| Issue/PR template YAML parses | `uv run --locked python -c "import yaml,glob; [yaml.safe_load(open(f, encoding='utf-8')) for f in sorted(glob.glob('.github/ISSUE_TEMPLATE/*.yml'))]"` (validates all templates; PyYAML is in the dev group) |
+
+The repository-policy command parses all issue-template YAML, performs the
+high-confidence tracked-file secret scan, and audits the ExpertOS source
+boundary. It is deterministic, network-free, and emits stable diagnostics.
 
 Implementation/training PRs restate their lint/format/test commands verbatim
 (the canonical set above) and respect the scientific baseline rules
