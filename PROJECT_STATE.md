@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #8 complete, #11 unblocked, #13 Phase A CI foundation active.
+Last updated: Milestone 0 in progress; #8 complete, #9 available next, #13 Phase A CI foundation active.
 
 ## Current milestone
 
@@ -41,18 +41,18 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#9 — M0.6 structured logging and metrics** — available next now that #7 is
-  complete; #10 follows #9.
-- **#11 — M0.8 checkpoint serialization and exact restoration** — now available
-  following #8 completion; depends on #8 seed/RNG for deterministic state
-  capture/restoration.
+- **#9 — M0.6 structured logging and metrics** — available next; depends only on
+  #6. Its completion unlocks #10 artifact management.
 - **#13 — M0.10 test/CI harness — in progress.** Phase A merged via PR #21,
   squash commit `aaa31187d5d6b63671ee96df14a85a75b125f068`: permanent read-only CI,
   strict fast/integration/smoke/accelerator tiers, pinned toolchain, and
   repository-native policy checks are active. #13 remains open until the full
   Milestone 0 component and integration suite is present.
-- **#10 — artifact management** follows #9; **#12 — experiment manifests**
-  follows #5/#6/#7/#9/#10/#11; **#14 — smoke and recovery gate** remains last.
+- **#10 — artifact management** follows #9.
+- **#11 — checkpoint serialization and exact restoration** has its #8 dependency
+  satisfied, but still waits for #10 artifact management.
+- **#12 — experiment manifests** follows #5/#6/#7/#9/#10/#11; **#14 — smoke and
+  recovery gate** remains last.
 - #3 umbrella remains open.
 - **#4 — M0.1 repository and Python package scaffold — completed.**
 - **#5 — M0.2 validated configuration resolution — completed.**
@@ -73,11 +73,11 @@ order (see #3 for the full graph):
 
 - #9 has no remaining dependency blocker and may proceed. Its PR must extend the
   permanent #13 fast/integration tiers with component coverage.
-- #11 is now unblocked following #8 and may proceed.
+- #10 waits for #9.
+- #11 has completed #8 but still waits for #10.
 - #13 remains open as a cross-cutting integration responsibility, not a blocker
-  to beginning #9 or #11.
-- #10 waits for #9; #12 waits for #9/#10/#11; #14 waits for the complete
-  Milestone 0 substrate.
+  to beginning #9.
+- #12 waits for #9/#10/#11; #14 waits for the complete Milestone 0 substrate.
 
 ## Latest accepted experiment
 
@@ -88,14 +88,15 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#9 (logging/metrics)** — unlocks #10 artifact management.
-2. In parallel, **#11 (checkpoints)** may proceed now that #8 is complete —
-   unlocks #12 experiment manifests.
-3. Continue **#13** incrementally as #9–#12 land; do not close it until the full
+1. Begin **#9 (logging/metrics)** — the only currently unblocked implementation
+   issue on the persistence critical path.
+2. After #9, implement **#10 (artifact management)**.
+3. After #10, implement **#11 (checkpoint serialization and exact restoration)**.
+4. Continue **#13** incrementally as #9–#12 land; do not close it until the full
    Milestone 0 suite, schema checks, and exact commands satisfy its issue contract.
-4. After #9, implement **#10 (artifacts)**. After #9/#10/#11, implement **#12
-   (manifests)**, then complete **#14 (smoke-and-recovery gate)** last.
-5. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
+5. After #11, implement **#12 (manifests)**, then complete **#14
+   (smoke-and-recovery gate)** last.
+6. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
 ## Relationship to ExpertOS
