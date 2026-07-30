@@ -8,6 +8,7 @@ from expertforge.rng.adapters import (
     DeterminismUnavailableError,
     FrameworkAdapterError,
     FrameworkRngAdapter,
+    FrameworkSeedResult,
     TorchRngAdapter,
 )
 from expertforge.rng.derivation import (
@@ -16,6 +17,7 @@ from expertforge.rng.derivation import (
     DerivedSeed,
     SeedContext,
     derive_seed,
+    derive_substream_seed,
     seed_derivation_bytes,
 )
 from expertforge.rng.manager import RngInitialization, RngManager, RngManagerError
@@ -37,6 +39,7 @@ __all__ = [
     "FrameworkAdapterError",
     "FrameworkRngAdapter",
     "FrameworkRngState",
+    "FrameworkSeedResult",
     "NumpyGeneratorState",
     "NumpyLegacyState",
     "PythonRandomState",
@@ -47,5 +50,6 @@ __all__ = [
     "SeedContext",
     "TorchRngAdapter",
     "derive_seed",
+    "derive_substream_seed",
     "seed_derivation_bytes",
 ]
