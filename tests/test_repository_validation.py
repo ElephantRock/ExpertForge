@@ -68,9 +68,7 @@ def test_issue_template_validation_parses_mapping_documents(tmp_path: Path) -> N
     template.parent.mkdir(parents=True)
     template.write_text("name: Implementation\ndescription: Work item\nbody: []\n", encoding="utf-8")
 
-    assert validate_issue_templates(tmp_path) == (
-        ".github/ISSUE_TEMPLATE/implementation.yml",
-    )
+    assert validate_issue_templates(tmp_path) == (".github/ISSUE_TEMPLATE/implementation.yml",)
 
 
 def test_issue_template_validation_rejects_non_mapping_root(tmp_path: Path) -> None:
