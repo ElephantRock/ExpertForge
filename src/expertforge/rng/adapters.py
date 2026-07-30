@@ -90,6 +90,8 @@ class FrameworkRngAdapter(Protocol):
         unsupported_policy: UnsupportedDeterminismPolicy,
     ) -> tuple[RngWarningCode, ...]: ...
 
+    def derive_seeds(self, root_seed: int, context: SeedContext) -> tuple[DerivedSeed, ...]: ...
+
     def seed(self, root_seed: int, context: SeedContext) -> FrameworkSeedResult: ...
 
     def capture(self) -> tuple[FrameworkRngState, ...]: ...
@@ -202,6 +204,20 @@ class TorchRngAdapter:
             raise FrameworkAdapterError("framework_configure_failed") from exc
         return ()
 
+    def derive_seeds(self, root_seed: int, context: SeedContext) -> tuple[DerivedSeed, ...]:
+        _, device_count = self._cuda_runtime()
+        cpu_seed = derive_substream_seed(root_seed, context, f"{self.provider}.cpu")
+        cuda_seeds = tuple(
+            derive_substream_seed(
+                root_seed,
+                context,
+                f"{self.provider}.cuda",
+                device=ordinal,
+            )
+            for ordinal in range(device_count)
+        )
+        return (cpu_seed, *cuda_seeds)
+
     def seed(self, root_seed: int, context: SeedContext) -> FrameworkSeedResult:
         manual_seed = getattr(self._torch, "manual_seed", None)
         if not callable(manual_seed):
@@ -215,16 +231,9 @@ class TorchRngAdapter:
             if not callable(cuda_manual_seed) or not callable(cuda_device):
                 raise FrameworkAdapterError("framework_api_unavailable")
 
-        cpu_seed = derive_substream_seed(root_seed, context, f"{self.provider}.cpu")
-        cuda_seeds = tuple(
-            derive_substream_seed(
-                root_seed,
-                context,
-                f"{self.provider}.cuda",
-                device=ordinal,
-            )
-            for ordinal in range(device_count)
-        )
+        derived_seeds = self.derive_seeds(root_seed, context)
+        cpu_seed = derived_seeds[0]
+        cuda_seeds = derived_seeds[1:]
         try:
             manual_seed(cpu_seed.seed_u64)
             for ordinal, seed in enumerate(cuda_seeds):
@@ -237,7 +246,7 @@ class TorchRngAdapter:
         if device_count == 0:
             warnings = ("accelerator_unavailable",)
         return FrameworkSeedResult(
-            derived_seeds=(cpu_seed, *cuda_seeds),
+            derived_seeds=derived_seeds,
             warning_codes=warnings,
         )
 
@@ -299,6 +308,7 @@ class TorchRngAdapter:
             raise FrameworkAdapterError("framework_api_unavailable")
         cuda_devices = [state.device for state in states if state.device.startswith("cuda:")]
         cuda_tensors: list[Any] = []
+        set_all: Any | None = None
         if cuda_devices:
             cuda, _ = self._cuda_runtime()
             set_all = getattr(cuda, "set_rng_state_all", None)
