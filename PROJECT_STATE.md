@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #6 run identity completed.
+Last updated: Milestone 0 in progress; #7 provenance in review (not yet merged).
 
 ## Current milestone
 
@@ -41,28 +41,24 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#7 — M0.4 source provenance and execution environment** — next
-  dependency-ordered implementation action (see #3 graph). After #7, #9 (logging)
-  and #10 (artifacts) can proceed; #8 (seed/RNG) may proceed now in parallel.
-- **#13 — M0.10 test/CI harness** — may begin early in parallel to establish
-  the harness that subsystem tests plug into.
-- #3 umbrella and #8–#14 (other than #6) are open and dependency-ordered.
+- **#7 — M0.4 source provenance and execution environment — in review**
+  (PR #18, not yet merged). The next dependency-ordered action after #7 merges.
+- **#8 — M0.5 deterministic seed and RNG-state management** — may proceed in
+  parallel (depends only on #4/#5).
+- **#13 — M0.10 test/CI harness** — may begin early in parallel.
+- #3 umbrella and #9–#14 (other than #7) are open and dependency-ordered.
 - **#4 — M0.1 repository and Python package scaffold — completed.**
 - **#5 — M0.2 validated configuration resolution — completed.**
-- **#6 — M0.3 run identity and configuration fingerprints — completed.** The
-  identity subsystem (versioned specification-fingerprint envelope, run/attempt
-  IDs with 80-bit entropy + collision detection, resume lineage, frozen
-  identity records, exclusive deterministic sidecar write/read, emit
-  orchestrator) is on `main`.
+- **#6 — M0.3 run identity and configuration fingerprints — completed.**
 
 ## Open pull requests
 
-- None. The #6 run-identity PR merged.
+- PR #18 — #7 source provenance and execution environment (open, in review).
 
 ## Known blockers
 
-- None. After #5 (configuration) and #6 (run identity), the foundation layer is
-  complete and #7/#9 can proceed; #8 may proceed after #4 and #5.
+- PR #18 (#7) is under review; #9 (logging), #10 (artifacts) wait for #7 to
+  merge. #8 (seed/RNG) and #13 (CI) may proceed in parallel.
 
 ## Latest accepted experiment
 
@@ -73,13 +69,11 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#7 (source provenance and execution environment)** — next in the #3
-   dependency order. Provenance/environment capture can supply the immutable
-   inputs (dataset/tokenizer/source digests) that the v1 fingerprint envelope
-   leaves empty.
+1. Resolve PR #18 (#7 provenance) review — the binding contract gaps must be
+   fixed before #7 can merge.
 2. In parallel, **#8 (seed/RNG)** may proceed (depends only on #4/#5), and
    **#13 (test/CI harness)** may start early.
-3. After #7: #9 (logging), #10 (artifacts); #11 after #8; #12 after
+3. After #7 merges: #9 (logging), #10 (artifacts); #11 after #8; #12 after
    #5/#6/#7/#9/#10/#11; #14 last.
 4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
