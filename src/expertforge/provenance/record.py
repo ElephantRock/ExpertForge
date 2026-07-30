@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -28,11 +28,13 @@ __all__ = [
     "AcceleratorInfo",
     "CPUInfo",
     "CompletenessInfo",
+    "DependencyObservation",
     "DeviceInfo",
     "LockfileDigest",
     "MemoryInfo",
     "PlatformInfo",
     "ProvenanceRecord",
+    "PythonInfo",
     "SoftwareEnvironment",
     "TopologyInfo",
 ]
@@ -46,8 +48,12 @@ def _section_config() -> ConfigDict:
 
 
 # ---------------------------------------------------------------------------
-# Typed nested sections
+# Typed nested sections with Literal status domains + cross-field validators
 # ---------------------------------------------------------------------------
+
+# Shared status domains.
+ObservationStatus = Literal["available", "unavailable", "not_applicable", "error", "redacted"]
+CompletenessStatus = Literal["complete", "partial", "error"]
 
 
 class CompletenessInfo(BaseModel):
@@ -55,7 +61,7 @@ class CompletenessInfo(BaseModel):
 
     model_config = _section_config()
 
-    status: str = Field(default="complete")  # complete | partial | error
+    status: CompletenessStatus = Field(default="complete")
     warnings: tuple[str, ...] = Field(default_factory=tuple)
     limitations: tuple[str, ...] = Field(default_factory=tuple)
 
@@ -63,7 +69,7 @@ class CompletenessInfo(BaseModel):
 class CPUInfo(BaseModel):
     model_config = _section_config()
 
-    status: str = Field(default="available")
+    status: ObservationStatus = Field(default="available")
     count: int | None = Field(default=None, ge=1)
     architecture: str | None = Field(default=None)
 
@@ -71,14 +77,14 @@ class CPUInfo(BaseModel):
 class MemoryInfo(BaseModel):
     model_config = _section_config()
 
-    status: str = Field(default="available")
+    status: ObservationStatus = Field(default="available")
     total_bytes: int | None = Field(default=None, ge=0)
 
 
 class PlatformInfo(BaseModel):
     model_config = _section_config()
 
-    status: str = Field(default="available")
+    status: ObservationStatus = Field(default="available")
     system: str = Field(default="unknown")
     machine: str = Field(default="unknown")
     cpu: CPUInfo = Field(default_factory=CPUInfo)
@@ -88,19 +94,58 @@ class PlatformInfo(BaseModel):
 class LockfileDigest(BaseModel):
     model_config = _section_config()
 
-    status: str  # available | unavailable | not_applicable | error
+    status: ObservationStatus
     algorithm: str | None = Field(default=None)
     digest: str | None = Field(default=None)
     reason: str | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _check_available_has_digest(self) -> "LockfileDigest":
+        if self.status == "available" and not self.digest:
+            raise ValueError("LockfileDigest status='available' requires a digest.")
+        return self
+
+
+class PythonInfo(BaseModel):
+    """Typed Python environment info (frozen, not a mutable dict)."""
+
+    model_config = _section_config()
+
+    version: str = Field(..., min_length=1)
+    implementation: str = Field(..., min_length=1)
+    build: str | None = Field(default=None)
+
+
+class DependencyObservation(BaseModel):
+    """One installed distribution: normalized name → version."""
+
+    model_config = _section_config()
+
+    name: str = Field(..., min_length=1)  # PEP 503 normalized
+    version: str = Field(..., min_length=1)
 
 
 class SoftwareEnvironment(BaseModel):
     model_config = _section_config()
 
-    python: dict[str, str] = Field(default_factory=dict)
+    python: PythonInfo
     platform: PlatformInfo = Field(default_factory=PlatformInfo)
-    dependencies: dict[str, str] = Field(default_factory=dict)
+    dependencies: tuple[DependencyObservation, ...] = Field(default_factory=tuple)
     lockfile: LockfileDigest = Field(default_factory=lambda: LockfileDigest(status="unavailable"))
+
+    @field_validator("dependencies")
+    @classmethod
+    def _deps_sorted_unique(
+        cls, v: tuple[DependencyObservation, ...]
+    ) -> tuple[DependencyObservation, ...]:
+        names = [d.name for d in v]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"Duplicate dependency names: {sorted({n for n in names if names.count(n) > 1})}"
+            )
+        if names != sorted(names):
+            raise ValueError("Dependencies must be sorted by name.")
+        return v
 
 
 class DeviceInfo(BaseModel):
@@ -117,18 +162,34 @@ class DeviceInfo(BaseModel):
 class AcceleratorInfo(BaseModel):
     model_config = _section_config()
 
-    status: str  # available | unavailable | not_applicable | error | redacted
+    status: ObservationStatus
     framework: str | None = Field(default=None)
     framework_version: str | None = Field(default=None)
+    runtime_version: str | None = Field(default=None)
+    precision_status: ObservationStatus = Field(default="not_applicable")
     device_count: int | None = Field(default=None, ge=0)
     devices: tuple[DeviceInfo, ...] = Field(default_factory=tuple)
     reason: str | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "AcceleratorInfo":
+        if self.status == "available":
+            if self.device_count is None or self.device_count == 0:
+                raise ValueError("AcceleratorInfo status='available' requires device_count > 0.")
+            if len(self.devices) != self.device_count:
+                raise ValueError(
+                    f"device_count ({self.device_count}) != len(devices) ({len(self.devices)})."
+                )
+            ordinals = [d.ordinal for d in self.devices]
+            if len(set(ordinals)) != len(ordinals):
+                raise ValueError(f"Duplicate device ordinals: {ordinals}")
+        return self
 
 
 class TopologyInfo(BaseModel):
     model_config = _section_config()
 
-    status: str  # available | not_applicable | error
+    status: Literal["available", "not_applicable", "error"]
     rank: int | None = Field(default=None, ge=0)
     local_rank: int | None = Field(default=None, ge=0)
     world_size: int | None = Field(default=None, ge=1)
@@ -136,11 +197,14 @@ class TopologyInfo(BaseModel):
     backend: str | None = Field(default=None)
     reason: str | None = Field(default=None)
 
-
-# Alias for the source section — wraps the summary with evidence context.
-# ---------------------------------------------------------------------------
-# Top-level record
-# ---------------------------------------------------------------------------
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "TopologyInfo":
+        if self.status == "available":
+            if self.rank is None or self.world_size is None:
+                raise ValueError("TopologyInfo status='available' requires rank and world_size.")
+            if self.rank >= self.world_size:
+                raise ValueError("rank must be < world_size.")
+        return self
 
 
 class ProvenanceRecord(BaseModel):
