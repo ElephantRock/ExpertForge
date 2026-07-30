@@ -13,8 +13,9 @@ from expertforge.config.resolve import resolve_config
 from expertforge.rng.adapters import (
     DeterminismUnavailableError,
     FrameworkAdapterError,
+    FrameworkSeedResult,
 )
-from expertforge.rng.derivation import DerivedSeed, SeedContext
+from expertforge.rng.derivation import DerivedSeed, SeedContext, derive_substream_seed
 from expertforge.rng.manager import RngManager, RngManagerError
 from expertforge.rng.state import (
     DeterminismMode,
@@ -27,11 +28,32 @@ from expertforge.rng.state import (
 class FakeFrameworkAdapter:
     provider = "fake"
 
-    def __init__(self, *, deterministic_supported: bool = True, accelerator: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        deterministic_supported: bool = True,
+        accelerator: bool = False,
+        fail_seed: bool = False,
+        fail_next_restore: bool = False,
+    ) -> None:
         self.deterministic_supported = deterministic_supported
         self.accelerator = accelerator
+        self.fail_seed = fail_seed
+        self.fail_next_restore = fail_next_restore
         self.mode: DeterminismMode | None = None
         self._state = 0
+
+    @property
+    def state(self) -> int:
+        return self._state
+
+    def capture_configuration(self) -> object:
+        return self.mode
+
+    def restore_configuration(self, snapshot: object) -> None:
+        if snapshot is not None and snapshot not in {"reproducible", "performance"}:
+            raise FrameworkAdapterError("framework_state_invalid")
+        self.mode = cast(DeterminismMode | None, snapshot)
 
     def configure(
         self,
@@ -45,9 +67,18 @@ class FakeFrameworkAdapter:
             return ("framework_determinism_unavailable",)
         return ()
 
-    def seed(self, seed: DerivedSeed) -> tuple[RngWarningCode, ...]:
-        self._state = seed.seed_u64
-        return () if self.accelerator else ("accelerator_unavailable",)
+    def derive_seeds(self, root_seed: int, context: SeedContext) -> tuple[DerivedSeed, ...]:
+        return (derive_substream_seed(root_seed, context, "fake.cpu"),)
+
+    def seed(self, root_seed: int, context: SeedContext) -> FrameworkSeedResult:
+        derived_seeds = self.derive_seeds(root_seed, context)
+        self._state = derived_seeds[0].seed_u64
+        if self.fail_seed:
+            raise FrameworkAdapterError("framework_seed_failed")
+        warnings: tuple[RngWarningCode, ...] = ()
+        if not self.accelerator:
+            warnings = ("accelerator_unavailable",)
+        return FrameworkSeedResult(derived_seeds=derived_seeds, warning_codes=warnings)
 
     def sample(self) -> int:
         self._state = (6364136223846793005 * self._state + 1442695040888963407) % 2**64
@@ -71,6 +102,10 @@ class FakeFrameworkAdapter:
     def restore(self, states: Sequence[FrameworkRngState]) -> None:
         self.validate_restore(states)
         self._state = int.from_bytes(states[0].payload_bytes(), "big")
+        if self.fail_next_restore:
+            self.fail_next_restore = False
+            self._state ^= 1
+            raise FrameworkAdapterError("framework_restore_failed")
 
 
 def _samples(manager: RngManager, count: int = 4) -> tuple[object, ...]:
@@ -79,6 +114,16 @@ def _samples(manager: RngManager, count: int = 4) -> tuple[object, ...]:
         tuple(float(value) for value in np.random.random(count)),
         tuple(float(value) for value in manager.generator.random(count)),
     )
+
+
+def _numpy_state() -> tuple[Any, ...]:
+    return cast(tuple[Any, ...], np.random.get_state(legacy=True))
+
+
+def _assert_numpy_state_equal(left: tuple[Any, ...], right: tuple[Any, ...]) -> None:
+    assert left[0] == right[0]
+    assert np.array_equal(left[1], right[1])
+    assert left[2:] == right[2:]
 
 
 def test_same_seed_and_context_reproduce_python_and_numpy_outputs() -> None:
@@ -117,6 +162,15 @@ def test_worker_rank_and_component_separate_streams() -> None:
         outputs.append(_samples(manager, count=1))
 
     assert len(set(outputs)) == len(contexts)
+
+
+def test_long_valid_component_remains_usable() -> None:
+    manager = RngManager(root_seed=7, context=SeedContext(component="a" * 128))
+
+    initialization = manager.initialize()
+
+    assert len(initialization.derived_seeds) == 3
+    assert all(len(seed.context.component) <= 128 for seed in initialization.derived_seeds)
 
 
 def test_capture_restore_resumes_exact_next_samples() -> None:
@@ -165,17 +219,14 @@ def test_restore_rejects_contract_mismatch_before_mutating_globals() -> None:
     bundle = source.capture_state()
 
     random_before = random.getstate()
-    numpy_before = cast(tuple[Any, ...], np.random.get_state(legacy=True))
+    numpy_before = _numpy_state()
     target = RngManager(root_seed=8, context=SeedContext(component="run"))
 
     with pytest.raises(RngManagerError, match="state_contract_mismatch"):
         target.restore_state(bundle)
 
     assert random.getstate() == random_before
-    numpy_after = cast(tuple[Any, ...], np.random.get_state(legacy=True))
-    assert numpy_after[0] == numpy_before[0]
-    assert np.array_equal(numpy_after[1], numpy_before[1])
-    assert numpy_after[2:] == numpy_before[2:]
+    _assert_numpy_state_equal(_numpy_state(), numpy_before)
 
 
 def test_restore_rejects_framework_provider_set_mismatch() -> None:
@@ -191,6 +242,67 @@ def test_restore_rejects_framework_provider_set_mismatch() -> None:
     target = RngManager(root_seed=7, context=SeedContext(component="run"))
     with pytest.raises(RngManagerError, match="framework_provider_set_mismatch"):
         target.restore_state(bundle)
+
+
+def test_failed_adapter_seed_rolls_back_all_process_and_provider_state() -> None:
+    random.seed(101)
+    np.random.seed(202)
+    random_before = random.getstate()
+    numpy_before = _numpy_state()
+    adapter = FakeFrameworkAdapter(fail_seed=True)
+    adapter_before = adapter.state
+    mode_before = adapter.mode
+    manager = RngManager(
+        root_seed=7,
+        context=SeedContext(component="run"),
+        adapters=(adapter,),
+    )
+
+    with pytest.raises(FrameworkAdapterError, match="framework_seed_failed"):
+        manager.initialize()
+
+    assert random.getstate() == random_before
+    _assert_numpy_state_equal(_numpy_state(), numpy_before)
+    assert adapter.state == adapter_before
+    assert adapter.mode == mode_before
+    with pytest.raises(RngManagerError, match="not_initialized"):
+        _ = manager.generator
+
+
+def test_failed_adapter_restore_rolls_back_all_process_and_provider_state() -> None:
+    source_adapter = FakeFrameworkAdapter()
+    source = RngManager(
+        root_seed=7,
+        context=SeedContext(component="run"),
+        adapters=(source_adapter,),
+    )
+    source.initialize()
+    source_adapter.sample()
+    bundle = source.capture_state()
+
+    random.seed(303)
+    np.random.seed(404)
+    random_before = random.getstate()
+    numpy_before = _numpy_state()
+    target_adapter = FakeFrameworkAdapter(fail_next_restore=True)
+    target_adapter._state = 12345
+    adapter_before = target_adapter.state
+    mode_before = target_adapter.mode
+    target = RngManager(
+        root_seed=7,
+        context=SeedContext(component="run"),
+        adapters=(target_adapter,),
+    )
+
+    with pytest.raises(FrameworkAdapterError, match="framework_restore_failed"):
+        target.restore_state(bundle)
+
+    assert random.getstate() == random_before
+    _assert_numpy_state_equal(_numpy_state(), numpy_before)
+    assert target_adapter.state == adapter_before
+    assert target_adapter.mode == mode_before
+    with pytest.raises(RngManagerError, match="not_initialized"):
+        _ = target.generator
 
 
 def test_manager_requires_explicit_initialization() -> None:
@@ -231,11 +343,14 @@ def test_unsupported_determinism_error_policy_fails_before_seeding() -> None:
         adapters=(adapter,),
     )
     random_before = random.getstate()
+    numpy_before = _numpy_state()
 
     with pytest.raises(DeterminismUnavailableError, match="framework_determinism_unavailable"):
         manager.initialize()
 
     assert random.getstate() == random_before
+    _assert_numpy_state_equal(_numpy_state(), numpy_before)
+    assert adapter.mode is None
 
 
 def test_unsupported_determinism_warn_policy_is_durable() -> None:
