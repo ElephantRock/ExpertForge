@@ -19,12 +19,14 @@ __all__ = [
     "DerivedSeed",
     "SeedContext",
     "derive_seed",
+    "derive_substream_seed",
     "seed_derivation_bytes",
 ]
 
 SEED_DERIVATION_SCHEMA = "expertforge.seed-derivation"
 SEED_DERIVATION_VERSION = 1
 _COMPONENT_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
+_SUFFIX_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_INDEX = 2**32 - 1
 
@@ -45,7 +47,8 @@ class SeedContext(BaseModel):
     def _validate_component(cls, value: str) -> str:
         if not _COMPONENT_PATTERN.fullmatch(value):
             raise ValueError(
-                "component must be a lowercase stable identifier matching [a-z][a-z0-9._-]{0,127}"
+                "component must be a lowercase stable identifier matching "
+                "[a-z][a-z0-9._-]{0,127}"
             )
         return value
 
@@ -113,7 +116,14 @@ class DerivedSeed(BaseModel):
             raise ValueError(
                 f"Unsupported derivation_version {version!r}; expected {SEED_DERIVATION_VERSION}."
             )
-        return cls.model_validate(data, strict=False)
+        payload = json.dumps(
+            data,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        return cls.model_validate_json(payload, strict=True)
 
 
 def _envelope(root_seed: int, context: SeedContext) -> dict[str, object]:
@@ -155,4 +165,40 @@ def derive_seed(root_seed: int, context: SeedContext) -> DerivedSeed:
         digest=digest,
         seed_u64=int.from_bytes(digest_bytes[:8], "big", signed=False),
         seed_u32=int.from_bytes(digest_bytes[8:12], "big", signed=False),
+    )
+
+
+def derive_substream_seed(
+    root_seed: int,
+    parent: SeedContext,
+    suffix: str,
+    *,
+    device: int | None = None,
+    stream: int | None = None,
+) -> DerivedSeed:
+    """Derive a child stream without invalidating long valid parent names.
+
+    Readable ``<parent>.<suffix>`` names are used when they fit the canonical
+    component domain. Otherwise the complete parent/suffix pair is represented by
+    a full SHA-256 namespace. The fallback therefore remains collision-resistant
+    rather than truncating either name.
+    """
+
+    if not _SUFFIX_PATTERN.fullmatch(suffix):
+        raise ValueError("suffix must be a lowercase stable identifier")
+    candidate = f"{parent.component}.{suffix}"
+    if _COMPONENT_PATTERN.fullmatch(candidate):
+        component = candidate
+    else:
+        namespace = hashlib.sha256(
+            f"{parent.component}\0{suffix}".encode("utf-8")
+        ).hexdigest()
+        component = f"stream-{namespace}"
+    return derive_seed(
+        root_seed,
+        parent.child(
+            component=component,
+            device=parent.device if device is None else device,
+            stream=parent.stream if stream is None else stream,
+        ),
     )
