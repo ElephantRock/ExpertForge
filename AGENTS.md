@@ -182,7 +182,7 @@ uv run --locked pytest -m "not integration and not smoke and not accelerator"
 Portable CPU integration tier:
 
 ```bash
-uv run --locked pytest -m "integration and not accelerator"
+uv run --locked pytest -m "integration and not smoke and not accelerator"
 ```
 
 Markers are strict. Tests requiring accelerators use `accelerator` and skip with
