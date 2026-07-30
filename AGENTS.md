@@ -67,6 +67,7 @@ scripts/         Operational and reproduction scripts
 .github/
   pull_request_template.md
   ISSUE_TEMPLATE/   implementation / experiment / research / decision
+  workflows/        read-only repository-native validation
 ```
 
 Core model logic must not live only in notebooks. Canonical behavior is
@@ -84,10 +85,8 @@ Minimum validation for a doctrine/documentation change:
 ```text
 1. Working tree is in the intended state:        git status --porcelain
 2. The staged file set matches the plan:         git diff --cached --name-only
-3. No secrets are staged:                         git diff --cached | secret-pattern check
+3. Repository policy checks pass:                uv run --locked python scripts/validate_repository.py all
 4. The local commit is what was pushed:          git rev-parse HEAD vs origin
-5. YAML frontmatter in templates parses:         see CONTRIBUTING.md §Validation
-6. No ExpertOS source/content copied:            git diff --cached path audit
 ```
 
 Implementation/training changes must additionally state the exact commands used
@@ -151,7 +150,7 @@ provenance is not a canonical project result (collaboration §14).
 
 Environment and toolchain are managed by **uv** (Python ≥3.11,<3.14, baseline
 3.11). The repository owns its own `.venv` and a committed `uv.lock`; never
-reuse another project's environment (e.g. `C:\ExpertOS\.venv`).
+reuse another project's environment (for example an ExpertOS environment).
 
 Bootstrap (first checkout / CI):
 
@@ -160,23 +159,44 @@ uv python install 3.11
 uv sync --locked
 ```
 
-Canonical checks (re-state verbatim in every implementation PR, run from a clean
-`uv sync --locked` environment):
+Canonical full validation (run from a clean `uv sync --locked` environment):
 
 ```bash
 uv sync --locked
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy src tests
-uv run pytest
-uv run python -c "import expertforge"
+uv run --locked ruff format --check .
+uv run --locked ruff check .
+uv run --locked mypy src tests
+uv run --locked pytest
+uv run --locked python -c "import expertforge"
+uv run --locked expertforge-config configs/smoke.yaml > /dev/null
+uv run --locked python scripts/validate_repository.py all
+uv lock --check
 ```
+
+Fast CPU test tier for routine development:
+
+```bash
+uv run --locked pytest -m "not integration and not smoke and not accelerator"
+```
+
+Portable CPU integration tier:
+
+```bash
+uv run --locked pytest -m "integration and not smoke and not accelerator"
+```
+
+Markers are strict. Tests requiring accelerators use `accelerator` and skip with
+an explicit reason when their hardware/runtime is unavailable. End-to-end
+training/recovery tests use `smoke`; Issue #14 owns the final smoke-and-recovery
+gate. The permanent `.github/workflows/ci.yml` workflow runs the quality/fast
+and CPU integration tiers on pull requests and pushes to `main` with read-only
+repository permissions.
 
 Developer fix commands:
 
 ```bash
-uv run ruff check --fix .
-uv run ruff format .
+uv run --locked ruff check --fix .
+uv run --locked ruff format .
 ```
 
 Dependency changes must update **both** `pyproject.toml` and `uv.lock`, and

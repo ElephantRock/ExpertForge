@@ -47,12 +47,17 @@ dev = [
     "types-pyyaml>=6.0",
 ]
 
+# Pin the uv executable used locally and by setup-uv so CI does not silently
+# change toolchain behavior when a new uv release is published.
+[tool.uv]
+required-version = "0.11.16"
+
 # ---------------------------------------------------------------------------
 # Ruff: formatter + linter + import organizer (single style engine)
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "scripts"]
 extend-exclude = ["doctrine", "reports", "experiments"]
 
 [tool.ruff.lint]
@@ -64,7 +69,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["expertforge"]
+known-first-party = ["expertforge", "scripts"]
 
 [tool.ruff.format]
 # Defaults are the canonical style; no overrides.
@@ -96,5 +101,10 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = "-ra"
-pythonpath = ["src"]
+addopts = "-ra --strict-markers"
+pythonpath = ["src", "."]
+markers = [
+    "integration: portable cross-component or subprocess/filesystem integration tests",
+    "smoke: end-to-end training or recovery smoke tests (Issue #14 owns the final gate)",
+    "accelerator: optional tests requiring accelerator hardware or its runtime",
+]
