@@ -124,7 +124,7 @@ class TestDirtySourceSnapshot:
         (tmp_path / "new.txt").write_text("new\n", encoding="utf-8")
         snap = capture_source_snapshot(tmp_path, allow_dirty=True)
         assert snap.evidence is not None
-        assert snap.evidence.counts["untracked"] >= 1
+        assert snap.evidence.counts.untracked >= 1
         assert snap.evidence.completeness == "complete"
 
     def test_dirty_digest_deterministic_for_same_changes(self, tmp_path: Path) -> None:

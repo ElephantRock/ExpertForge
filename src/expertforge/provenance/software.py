@@ -80,14 +80,18 @@ def _capture_cpu() -> CPUInfo:
 
 
 def _capture_memory() -> MemoryInfo:
+    """Capture host physical memory. Uses no process-specific rlimit values.
+
+    On platforms without a reliable stdlib mechanism, degrades to unavailable
+    rather than reporting a misleading process address-space limit.
+    """
     total: int | None = None
     try:
-        import resource
+        # psutil is not a dependency; degrade gracefully if absent.
+        import psutil  # type: ignore[import-not-found]
 
-        total = resource.getrlimit(resource.RLIMIT_AS)[0]  # type: ignore[attr-defined]
-        if total == resource.RLIM_INFINITY:  # type: ignore[attr-defined]
-            total = None
-    except (ImportError, OSError):
+        total = psutil.virtual_memory().total
+    except ImportError:
         pass
     return MemoryInfo(
         status="available" if total else "unavailable",
@@ -106,17 +110,22 @@ def _capture_platform() -> PlatformInfo:
 
 
 def _capture_dependencies() -> dict[str, str]:
+    """Installed distributions: normalized name → version, sorted, deduplicated."""
     deps: dict[str, str] = {}
     path_like = re.compile(r"(file://|/Users/|/home/|[A-Za-z]:\\\\)")
     for dist in metadata.distributions():
-        name = (dist.metadata["Name"] or "").strip()
-        version = (dist.version or "").strip()
-        if not name:
+        raw_name = (dist.metadata["Name"] or "").strip()
+        if not raw_name:
             continue
+        # Normalize: PEP 503 canonical form (lowercase, runs of -_. → single -).
+        normalized = re.sub(r"[-_.]+", "-", raw_name).lower()
+        version = (dist.version or "").strip()
         if version and path_like.search(version):
             continue
-        deps[name] = version
-    return deps
+        # Last-write-wins on exact normalized duplicates (same name+version).
+        deps[normalized] = version
+    # Return sorted by name for deterministic output.
+    return dict(sorted(deps.items()))
 
 
 def _capture_lockfile(repo_root: Path | None) -> LockfileDigest:

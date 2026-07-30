@@ -171,11 +171,27 @@ def capture_topology(
     if resolved_rank is None and resolved_world is None and not env:
         return TopologyInfo(status=FieldStatus.NOT_APPLICABLE.value)
 
+    # rank and world_size must both be present or both absent.
     if (resolved_rank is not None) != (resolved_world is not None):
         return TopologyInfo(
             status=FieldStatus.ERROR.value,
             reason="rank_and_world_size_required_together",
         )
+
+    # If only partial env data (LOCAL_RANK etc.) without RANK/WORLD_SIZE → error.
+    if resolved_rank is None and resolved_world is None and env:
+        return TopologyInfo(
+            status=FieldStatus.ERROR.value,
+            reason="partial_topology_env_without_rank_world_size",
+        )
+
+    # Cross-field validation: rank < world_size.
+    if resolved_rank is not None and resolved_world is not None:
+        if resolved_rank >= resolved_world:
+            return TopologyInfo(
+                status=FieldStatus.ERROR.value,
+                reason="rank_must_be_less_than_world_size",
+            )
 
     return TopologyInfo(
         status=FieldStatus.AVAILABLE.value,

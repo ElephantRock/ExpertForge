@@ -33,7 +33,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 if TYPE_CHECKING:
     from expertforge.identity.fingerprint import ImmutableInput
@@ -120,14 +120,32 @@ def _branch_ref(repo: Path) -> str:
     return ref if ref else "HEAD"
 
 
-def _remote_url(repo: Path) -> str | None:
-    """Best-effort ``origin`` remote URL (unsanitized; sanitization is the
-    caller's responsibility — the provenance record applies it)."""
+def _remote_url(repo: Path) -> tuple[str | None, tuple[str, ...]]:
+    """Capture the ``origin`` remote URL, **sanitized at capture time**.
+
+    Returns ``(sanitized_url, warnings)``. If the raw URL contained credentials,
+    query parameters, fragments, or was a local path, the sanitized value may
+    be ``None`` and typed warnings are emitted. The raw URL is never exposed.
+    """
     try:
-        url = _git_text(repo, ["config", "--get", "remote.origin.url"])
+        raw = _git_text(repo, ["config", "--get", "remote.origin.url"])
     except SourceUnavailableError:
-        return None
-    return url if url else None
+        return None, ()
+    if not raw:
+        return None, ()
+    warnings: list[str] = []
+    # Detect credential-bearing URLs before sanitizing.
+    if "@" in raw.split("://")[-1] if "://" in raw else "@" in raw:
+        warnings.append("remote_credentials_removed")
+    if "?" in raw or "#" in raw:
+        warnings.append("remote_query_fragment_removed")
+    # Apply structural sanitization.
+    from expertforge.provenance.software import sanitize_repository_url
+
+    sanitized = sanitize_repository_url(raw)
+    if sanitized is None and raw:
+        warnings.append("remote_local_or_unsupported_removed")
+    return sanitized, tuple(warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -183,35 +201,30 @@ def _parse_porcelain_z(raw: bytes) -> list[tuple[str, str, str | None]]:
     return entries
 
 
-def _file_kind_and_digest(repo: Path, rel_path: str) -> dict[str, Any]:
+def _file_kind_and_digest(repo: Path, rel_path: str) -> UntrackedEntry:
     """Record kind/mode/digest for a working-tree path WITHOUT following symlinks.
 
-    - Regular file: ``kind="file"``, content digest via ``os.open(O_NOFOLLOW)``.
-    - Symlink: ``kind="symlink"``, digest of the link target string (readlink).
-    - Missing/other: ``kind="unknown"``, no digest.
+    Returns a typed ``UntrackedEntry``. ``digest`` is ``None`` when the file is
+    unreadable — the caller uses that to derive honest ``partial`` completeness.
     """
     abs_path = repo / rel_path
-    # Use lstat to NOT follow symlinks.
     try:
         st = os.lstat(abs_path)
     except OSError:
-        return {"path": rel_path, "kind": "unknown", "mode": None, "digest": None}
+        return UntrackedEntry(path=rel_path, kind="unknown", mode=None, digest=None)
 
     import stat as stat_mod
 
     mode = stat_mod.S_IMODE(st.st_mode)
+    mode_str = oct(mode)
     if stat_mod.S_ISLNK(st.st_mode):
-        # Symlink: record the target digest, never follow.
         try:
             target = os.readlink(abs_path)
             digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
         except OSError:
             digest = None
-        return {"path": rel_path, "kind": "symlink", "mode": oct(mode), "digest": digest}
+        return UntrackedEntry(path=rel_path, kind="symlink", mode=mode_str, digest=digest)
     if stat_mod.S_ISREG(st.st_mode):
-        # Regular file: open with O_NOFOLLOW to prevent following a swapped-in
-        # symlink. O_NOFOLLOW is POSIX-only; on Windows symlinks require elevated
-        # privileges and are not a practical attack surface here.
         open_flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             open_flags |= os.O_NOFOLLOW
@@ -226,22 +239,18 @@ def _file_kind_and_digest(repo: Path, rel_path: str) -> dict[str, Any]:
                     h.update(chunk)
             finally:
                 os.close(fd)
-            return {"path": rel_path, "kind": "file", "mode": oct(mode), "digest": h.hexdigest()}
+            return UntrackedEntry(path=rel_path, kind="file", mode=mode_str, digest=h.hexdigest())
         except OSError:
-            return {"path": rel_path, "kind": "file", "mode": oct(mode), "digest": None}
-    # Directory or other (shouldn't happen with --untracked-files=all).
-    return {"path": rel_path, "kind": "other", "mode": oct(mode), "digest": None}
+            return UntrackedEntry(path=rel_path, kind="file", mode=mode_str, digest=None)
+    return UntrackedEntry(path=rel_path, kind="other", mode=mode_str, digest=None)
 
 
 def _build_dirty_evidence(repo: Path) -> SourceEvidence:
-    """Build the structured dirty evidence record.
+    """Build the structured dirty evidence record with honest completeness.
 
-    Includes:
-    - separate staged and unstaged deterministic diff hashes;
-    - sorted untracked-file manifest with path/kind/mode/digest;
-    - symlink targets (not followed);
-    - submodule status;
-    - counts and completeness/limitations.
+    Unreadable files, failed submodule inspection, and external/ignored files
+    produce typed limitations and ``partial`` completeness — never silently
+    ``complete``.
     """
     status_raw = _run_git(repo, ["status", "--porcelain", "-z", "--untracked-files=all"])
     entries = _parse_porcelain_z(status_raw)
@@ -249,17 +258,19 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     staged_digest = _staged_diff_digest(repo)
     unstaged_digest = _unstaged_diff_digest(repo)
 
-    # Partition entries by status.
-    untracked: list[dict[str, Any]] = []
+    untracked: list[UntrackedEntry] = []
     staged_count = 0
     unstaged_count = 0
     renamed_count = 0
     deleted_count = 0
+    unreadable_count = 0
     for xy, path, _orig_path in entries:
         x, y = xy[0], xy[1]
         if x == "?" and y == "?":
-            info = _file_kind_and_digest(repo, path)
-            untracked.append(info)
+            entry = _file_kind_and_digest(repo, path)
+            untracked.append(entry)
+            if entry.digest is None:
+                unreadable_count += 1
         if x not in ("?", " ", "!", "_"):
             staged_count += 1
         if y not in ("?", " ", "!", "_"):
@@ -269,39 +280,68 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
         if "D" in xy:
             deleted_count += 1
 
-    # Sort untracked manifest by path for determinism.
-    untracked.sort(key=lambda e: e["path"])
+    untracked.sort(key=lambda e: e.path)
 
-    # Submodule status (best-effort).
-    submodule_status: list[dict[str, str]] = []
+    # Submodule status — preserve full SHA + state prefix, record failures.
+    submodule_entries: list[SubmoduleEntry] = []
+    submodule_failed = False
     try:
         sub_raw = _run_git(repo, ["submodule", "status"])
         for line in sub_raw.decode("utf-8", errors="replace").splitlines():
             line = line.strip()
-            if line:
-                parts = line.split()
-                if len(parts) >= 2:
-                    sha = parts[0].strip().lstrip("-+~")  # status prefix
-                    name = parts[1]
-                    submodule_status.append({"name": name, "commit": sha[:12]})
+            if not line:
+                continue
+            prefix = line[0] if line[0] in "-+~ " else " "
+            sha_full = line[1:41].strip() if len(line) > 40 else ""
+            rest = line[42:].strip() if len(line) > 42 else ""
+            name = rest.split()[0] if rest else "unknown"
+            state_map = {
+                " ": "initialized",
+                "-": "uninitialized",
+                "+": "changed",
+                "~": "conflicted",
+            }
+            submodule_entries.append(
+                SubmoduleEntry(
+                    name=name,
+                    commit=sha_full if sha_full else "unknown",
+                    state=state_map.get(prefix, "initialized"),
+                )
+            )
     except SourceUnavailableError:
-        pass  # submodules unavailable — not an error
+        submodule_failed = True
+
+    # Derive honest completeness + limitations.
+    limitations: list[str] = []
+    warnings: list[str] = []
+    if unreadable_count > 0:
+        limitations.append(f"unreadable_untracked_files:{unreadable_count}")
+        warnings.append("unreadable_untracked_content")
+    if submodule_failed:
+        limitations.append("submodule_inspection_failed")
+        warnings.append("submodule_inspection_failed")
+
+    # Always note that ignored files are not included.
+    limitations.append("ignored_files_not_included")
+
+    completeness = "complete" if not unreadable_count and not submodule_failed else "partial"
 
     return SourceEvidence(
         staged_digest=staged_digest,
         unstaged_digest=unstaged_digest,
         untracked=tuple(untracked),
-        submodule_status=tuple(f"{s['name']}:{s['commit']}" for s in submodule_status),
-        counts={
-            "staged": staged_count,
-            "unstaged": unstaged_count,
-            "untracked": len(untracked),
-            "renamed_or_copied": renamed_count,
-            "deleted": deleted_count,
-            "submodules": len(submodule_status),
-        },
-        completeness="complete",
-        limitations=tuple(),
+        submodule_status=tuple(submodule_entries),
+        counts=SourceCounts(
+            staged=staged_count,
+            unstaged=unstaged_count,
+            untracked=len(untracked),
+            renamed_or_copied=renamed_count,
+            deleted=deleted_count,
+            submodules=len(submodule_entries),
+        ),
+        completeness=completeness,
+        limitations=tuple(limitations),
+        warnings=tuple(warnings),
     )
 
 
@@ -310,18 +350,67 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
 # ---------------------------------------------------------------------------
 
 
+class UntrackedEntry(BaseModel):
+    """One untracked working-tree file with kind/mode/digest (no symlink following)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
+
+    path: str = Field(..., min_length=1)
+    kind: str  # file | symlink | unknown | other
+    mode: str | None = Field(default=None)
+    digest: str | None = Field(default=None)  # None when unreadable
+
+
+class SubmoduleEntry(BaseModel):
+    """One submodule's status with full commit SHA and state prefix preserved."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
+
+    name: str = Field(..., min_length=1)
+    commit: str = Field(..., min_length=1)  # full SHA, not truncated
+    state: str  # initialized | uninitialized | changed | conflicted (from prefix)
+
+
+class SourceCounts(BaseModel):
+    """Typed dirty-evidence counts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
+
+    staged: int = Field(default=0, ge=0)
+    unstaged: int = Field(default=0, ge=0)
+    untracked: int = Field(default=0, ge=0)
+    renamed_or_copied: int = Field(default=0, ge=0)
+    deleted: int = Field(default=0, ge=0)
+    submodules: int = Field(default=0, ge=0)
+
+
 class SourceEvidence(BaseModel):
-    """Structured dirty-source evidence (staged/unstaged/untracked/submodule)."""
+    """Structured dirty-source evidence (staged/unstaged/untracked/submodule).
+
+    All containers are tuples of frozen models — deeply immutable.
+    Completeness is honestly derived: ``partial`` when any file was unreadable
+    or submodule inspection failed, with typed limitations/warnings.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
 
     staged_digest: str = Field(..., min_length=1)
     unstaged_digest: str = Field(..., min_length=1)
-    untracked: tuple[dict[str, Any], ...] = Field(default_factory=tuple)
-    submodule_status: tuple[str, ...] = Field(default_factory=tuple)
-    counts: dict[str, int] = Field(default_factory=dict)
-    completeness: str = Field(default="complete")
+    untracked: tuple[UntrackedEntry, ...] = Field(default_factory=tuple)
+    submodule_status: tuple[SubmoduleEntry, ...] = Field(default_factory=tuple)
+    counts: SourceCounts = Field(default_factory=SourceCounts)
+    completeness: str = Field(default="complete")  # complete | partial | error
     limitations: tuple[str, ...] = Field(default_factory=tuple)
+    warnings: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class RemoteWarning(BaseModel):
+    """Typed warning about remote URL sanitization."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
+
+    code: str  # e.g. remote_credentials_removed, remote_local_or_unsupported_removed
+    message: str = Field(default="")
 
 
 class SourceSnapshot(BaseModel):
@@ -329,6 +418,7 @@ class SourceSnapshot(BaseModel):
 
     The ``input_digest`` is the SHA-256 of the versioned canonical envelope —
     this is the value that enters the #6 ``ImmutableInput("source.snapshot")``.
+    The ``remote_url`` is sanitized at capture time; the raw URL is never exposed.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
@@ -336,7 +426,8 @@ class SourceSnapshot(BaseModel):
     snapshot_version: int = Field(default=SOURCE_SNAPSHOT_VERSION)
     commit_sha: str = Field(..., min_length=1)
     branch: str = Field(default="HEAD")
-    remote_url: str | None = Field(default=None)
+    remote_url: str | None = Field(default=None)  # already sanitized at capture time
+    remote_warnings: tuple[RemoteWarning, ...] = Field(default_factory=tuple)
     is_clean: bool
     is_canonical: bool
     # SHA-256 of the committed tree (from git ls-tree).
@@ -355,6 +446,18 @@ class SourceSnapshot(BaseModel):
                 f"supports {SOURCE_SNAPSHOT_VERSION}."
             )
         return v
+
+    @model_validator(mode="after")
+    def _verify_input_digest(self) -> SourceSnapshot:
+        """Recompute the envelope digest from the stored fields and verify it
+        matches ``input_digest``. Detects tampering of any envelope component."""
+        recomputed = _envelope_digest(self.tree_digest, self.evidence)
+        if recomputed != self.input_digest:
+            raise ValueError(
+                f"input_digest {self.input_digest!r} does not match recomputed "
+                f"envelope digest {recomputed!r}."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -405,13 +508,14 @@ def capture_source_snapshot(repo: Path | str, *, allow_dirty: bool = False) -> S
     tree_digest = _clean_tree_digest(repo_path)
     commit_sha = _head_sha(repo_path)
     branch = _branch_ref(repo_path)
-    remote_url = _remote_url(repo_path)
+    sanitized_url, remote_warns = _remote_url(repo_path)
     evidence = _build_dirty_evidence(repo_path) if dirty else None
     input_digest = _envelope_digest(tree_digest, evidence)
     return SourceSnapshot(
         commit_sha=commit_sha,
         branch=branch,
-        remote_url=remote_url,
+        remote_url=sanitized_url,  # already sanitized at capture time
+        remote_warnings=tuple(RemoteWarning(code=w) for w in remote_warns),
         is_clean=not dirty,
         is_canonical=not dirty,
         tree_digest=tree_digest,
