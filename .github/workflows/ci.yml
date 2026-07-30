@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  quality:
+    name: Quality and fast tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Sync locked environment
+        run: uv sync --locked
+
+      - name: Check formatting
+        run: uv run --locked ruff format --check .
+
+      - name: Run Ruff
+        run: uv run --locked ruff check .
+
+      - name: Run mypy
+        run: uv run --locked mypy src tests
+
+      - name: Run fast CPU suite
+        run: uv run --locked pytest -m "not integration and not smoke and not accelerator"
+
+      - name: Check package import
+        run: uv run --locked python -c "import expertforge"
+
+      - name: Check configuration CLI fixture
+        run: uv run --locked expertforge-config configs/smoke.yaml > /dev/null
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Validate repository policy
+        run: uv run --locked python scripts/validate_repository.py all
+
+  integration:
+    name: CPU integration tests
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Sync locked environment
+        run: uv sync --locked
+
+      - name: Run portable CPU integration suite
+        run: uv run --locked pytest -m "integration and not accelerator"
