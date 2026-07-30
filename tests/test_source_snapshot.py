@@ -959,28 +959,23 @@ class TestSourceSnapshotAcceptsSanitizedRemotes:
         assert snap.remote_url == "https://github.com/org/repo.git"
         assert {w.code for w in snap.remote_warnings} == {"remote_query_fragment_removed"}
 
-    def test_none_url_with_warnings_accepted_by_model(self) -> None:
-        # The model no longer correlates: a None URL with warnings is accepted
-        # at the model level. (The capture path would never produce this
-        # combination, but a tampered/edited sidecar is not rejected by the
-        # model — the codes are still Literal-validated.)
+    def test_none_url_with_credentials_warning_requires_local_removal(self) -> None:
         from expertforge.provenance.source_snapshot import (
             RemoteWarning,
             SourceSnapshot,
         )
 
         tree = "c" * 64
-        snap = SourceSnapshot(
-            commit_sha="1" * 40,
-            is_clean=True,
-            is_canonical=True,
-            remote_url=None,
-            remote_warnings=(RemoteWarning(code="remote_credentials_removed"),),
-            tree_digest=tree,
-            input_digest=_envelope_digest_for(tree, None),
-        )
-        assert snap.remote_url is None
-        assert {w.code for w in snap.remote_warnings} == {"remote_credentials_removed"}
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                remote_url=None,
+                remote_warnings=(RemoteWarning(code="remote_credentials_removed"),),
+                tree_digest=tree,
+                input_digest=_envelope_digest_for(tree, None),
+            )
 
     def test_scp_style_remote_preserved_verbatim(self) -> None:
         from expertforge.provenance.source_snapshot import SourceSnapshot

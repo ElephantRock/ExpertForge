@@ -11,8 +11,9 @@ import pytest
 from pydantic import ValidationError
 
 from expertforge.config.resolve import resolve_config
+from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.orchestrate import prepare_run
-from expertforge.provenance.record import AcceleratorInfo, LockfileDigest
+from expertforge.provenance.record import AcceleratorInfo, LockfileDigest, ProvenanceRecord
 from expertforge.provenance.sidecar import ProvenanceSidecarError, load_provenance_sidecar
 from expertforge.provenance.source_snapshot import (
     RemoteWarning,
@@ -60,7 +61,9 @@ def _init_repo(repo: Path) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
 
 
-def _prepared_run(tmp_path: Path, *, dirty: bool = False):
+def _prepared_run(
+    tmp_path: Path, *, dirty: bool = False
+) -> tuple[AttemptIdentityRecord, ProvenanceRecord, Path]:
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_repo(repo)
@@ -87,7 +90,9 @@ class TestEvidenceFactsRequireDurableExplanation:
                 ),
                 counts=SourceCounts(untracked=1),
                 completeness="partial",
-                limitations=tuple(sorted((*_standard_limitations(), "submodule_inspection_failed"))),
+                limitations=tuple(
+                    sorted((*_standard_limitations(), "submodule_inspection_failed"))
+                ),
                 warnings=("submodule_inspection_failed",),
             )
 
@@ -101,7 +106,9 @@ class TestEvidenceFactsRequireDurableExplanation:
                 ),
                 counts=SourceCounts(submodules=1),
                 completeness="partial",
-                limitations=tuple(sorted((*_standard_limitations(), "submodule_inspection_failed"))),
+                limitations=tuple(
+                    sorted((*_standard_limitations(), "submodule_inspection_failed"))
+                ),
                 warnings=("submodule_inspection_failed",),
             )
 

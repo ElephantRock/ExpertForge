@@ -37,7 +37,7 @@ class FieldStatus(StrEnum):
 
 def _stable_reason(
     exc: BaseException,
-) -> Literal["io_error", "timeout", "decode_error", "duplicate_device_ordinals", "not_found"]:
+) -> Literal["io_error", "timeout", "decode_error", "duplicate_device_ordinals"]:
     """Map a capture exception to a stable accelerator error-reason code.
 
     The result MUST be one of the closed Literal domain codes on
@@ -45,8 +45,6 @@ def _stable_reason(
     ``"io_error"`` (a generic capture-failure code) rather than emitting a
     free-text code that would be rejected by the Literal-validated field.
     """
-    if isinstance(exc, FileNotFoundError):
-        return "not_found"
     if isinstance(exc, subprocess.TimeoutExpired):
         return "timeout"
     return "io_error"

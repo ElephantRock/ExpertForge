@@ -58,7 +58,6 @@ _ACCELERATOR_REASON = Literal[
     "timeout",
     "decode_error",
     "duplicate_device_ordinals",
-    "not_found",
 ]
 # Stable topology error-reason domain.
 _TOPOLOGY_REASON = Literal[
@@ -203,7 +202,7 @@ class LockfileDigest(BaseModel):
     # status. ``None`` for available / unavailable / not_applicable / redacted.
     # ``status="error"`` REQUIRES a reason (an error with no explanation is
     # under-constrained); every other status FORBIDS a reason.
-    reason: Literal["io_error", "not_found"] | None = Field(default=None)
+    reason: Literal["io_error"] | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_available_has_digest(self) -> LockfileDigest:
@@ -245,8 +244,7 @@ class LockfileDigest(BaseModel):
                 # An error REQUIRES a stable reason — no reason is under-constrained.
                 if self.reason is None:
                     raise ValueError(
-                        "LockfileDigest status='error' requires a reason "
-                        "('io_error' or 'not_found'); got None."
+                        "LockfileDigest status='error' requires a reason 'io_error'; got None."
                     )
             else:
                 # unavailable / not_applicable / redacted forbid a reason.

@@ -947,9 +947,13 @@ class SourceEvidence(BaseModel):
             raise ValueError(f"warnings must be sorted; got {list(self.warnings)!r}.")
         if len(set(self.warnings)) != len(self.warnings):
             raise ValueError(f"warnings must be unique; got {list(self.warnings)!r}.")
-        # Limitations: sorted.
+        # Limitations: sorted + unique. Duplicate limitations would make the
+        # behavioral envelope non-canonical even if their set of meanings were
+        # unchanged.
         if list(self.limitations) != sorted(self.limitations):
             raise ValueError(f"limitations must be sorted; got {list(self.limitations)!r}.")
+        if len(set(self.limitations)) != len(self.limitations):
+            raise ValueError(f"limitations must be unique; got {list(self.limitations)!r}.")
         # Count-bearing limitations reject a zero count (a zero count is not a
         # real limitation). The field_validator already enforced the prefix + a
         # positive integer; this is a defensive re-check that also produces a
@@ -1078,6 +1082,47 @@ class SourceEvidence(BaseModel):
                     f"got warnings={list(self.warnings)!r}, "
                     f"limitations={list(self.limitations)!r}."
                 )
+        # Represented incomplete facts MUST carry their exact durable
+        # explanation. Existing warning↔limitation pairing and count checks are
+        # insufficient when an unrelated warning is used to mask a missing pair.
+        unreadable_limits = [
+            lim for lim in self.limitations if lim.startswith("unreadable_untracked_files:")
+        ]
+        has_unreadable_warning = "unreadable_untracked_content" in self.warnings
+        if unreadable_actual > 0:
+            expected = f"unreadable_untracked_files:{unreadable_actual}"
+            if unreadable_limits != [expected] or not has_unreadable_warning:
+                raise ValueError(
+                    "unreadable untracked entries require both "
+                    "unreadable_untracked_content and exactly "
+                    f"{expected!r}; got warnings={list(self.warnings)!r}, "
+                    f"limitations={list(self.limitations)!r}."
+                )
+        elif unreadable_limits or has_unreadable_warning:
+            raise ValueError(
+                "unreadable_untracked_content and unreadable_untracked_files:N "
+                "are forbidden when no untracked entry has digest=None."
+            )
+
+        dirty_limits = [
+            lim for lim in self.limitations if lim.startswith("dirty_submodules_not_snapshotted:")
+        ]
+        has_dirty_warning = "dirty_submodule_content_not_captured" in self.warnings
+        if dirty_actual > 0:
+            expected = f"dirty_submodules_not_snapshotted:{dirty_actual}"
+            if dirty_limits != [expected] or not has_dirty_warning:
+                raise ValueError(
+                    "changed/conflicted submodule entries require both "
+                    "dirty_submodule_content_not_captured and exactly "
+                    f"{expected!r}; got warnings={list(self.warnings)!r}, "
+                    f"limitations={list(self.limitations)!r}."
+                )
+        elif dirty_limits or has_dirty_warning:
+            raise ValueError(
+                "dirty_submodule_content_not_captured and "
+                "dirty_submodules_not_snapshotted:N are forbidden when no "
+                "submodule entry is changed/conflicted."
+            )
         return self
 
 
@@ -1266,6 +1311,26 @@ class SourceSnapshot(BaseModel):
             raise ValueError(
                 "source evidence completeness must be 'complete' or 'partial', "
                 "never 'error' (an error-state capture aborts instead of recording)."
+            )
+        # Enforce the remote-warning relationships that remain observable after
+        # sanitization. Historical credential/query redactions may accompany a
+        # non-null sanitized locator. Local/unsupported redaction necessarily
+        # omits the locator, and an omitted locator carrying other redaction
+        # observations must also explain that omission.
+        remote_codes = {warning.code for warning in self.remote_warnings}
+        has_local_removed = "remote_local_or_unsupported_removed" in remote_codes
+        has_supported_redaction = bool(
+            remote_codes & {"remote_credentials_removed", "remote_query_fragment_removed"}
+        )
+        if self.remote_url is not None and has_local_removed:
+            raise ValueError(
+                "remote_local_or_unsupported_removed requires remote_url=None; "
+                "a non-null sanitized locator cannot carry that observation."
+            )
+        if self.remote_url is None and has_supported_redaction and not has_local_removed:
+            raise ValueError(
+                "credential/query warnings with remote_url=None require "
+                "remote_local_or_unsupported_removed to explain the omitted locator."
             )
         return self
 

@@ -558,11 +558,9 @@ class TestLockfileDigestReasonDomain:
         lock = LockfileDigest(status="error", reason="io_error")
         assert lock.reason == "io_error"
 
-    def test_not_found_reason_accepted(self) -> None:
-        # ``not_found`` is a stable error reason; it is only valid on
-        # status='error' (unavailable forbids a reason).
-        lock = LockfileDigest(status="error", reason="not_found")
-        assert lock.reason == "not_found"
+    def test_not_found_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            LockfileDigest(status="error", reason="not_found")  # type: ignore[arg-type]
 
     def test_unknown_reason_rejected(self) -> None:
         bad_reason: str = "disk_full"
@@ -596,9 +594,9 @@ class TestAcceleratorInfoReasonDomain:
     with a non-available status is rejected."""
 
     def test_known_reasons_accepted(self) -> None:
-        for r in ("io_error", "timeout", "decode_error", "not_found"):
-            accel = AcceleratorInfo(status="error", reason=r)
-            assert accel.reason == r
+        assert AcceleratorInfo(status="error", reason="io_error").reason == "io_error"
+        assert AcceleratorInfo(status="error", reason="timeout").reason == "timeout"
+        assert AcceleratorInfo(status="error", reason="decode_error").reason == "decode_error"
 
     def test_duplicate_device_ordinals_reason_accepted(self) -> None:
         accel = AcceleratorInfo(status="error", reason="duplicate_device_ordinals")
@@ -676,13 +674,15 @@ class TestReasonStatusBinding:
             LockfileDigest(status="error", reason=None)
 
     def test_lockfile_error_with_reason_accepted(self) -> None:
-        for r in ("io_error", "not_found"):
-            lock = LockfileDigest(status="error", reason=r)
-            assert lock.reason == r
+        lock = LockfileDigest(status="error", reason="io_error")
+        assert lock.reason == "io_error"
 
     def test_lockfile_unavailable_with_reason_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            LockfileDigest(status="unavailable", reason="not_found")
+            LockfileDigest(
+                status="unavailable",
+                reason="not_found",  # type: ignore[arg-type]
+            )
 
     def test_lockfile_not_applicable_with_reason_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -699,9 +699,13 @@ class TestReasonStatusBinding:
             AcceleratorInfo(status="error", reason=None)
 
     def test_accelerator_error_with_reason_accepted(self) -> None:
-        for r in ("io_error", "timeout", "decode_error", "duplicate_device_ordinals", "not_found"):
-            accel = AcceleratorInfo(status="error", reason=r)
-            assert accel.reason == r
+        assert AcceleratorInfo(status="error", reason="io_error").reason == "io_error"
+        assert AcceleratorInfo(status="error", reason="timeout").reason == "timeout"
+        assert AcceleratorInfo(status="error", reason="decode_error").reason == "decode_error"
+        assert (
+            AcceleratorInfo(status="error", reason="duplicate_device_ordinals").reason
+            == "duplicate_device_ordinals"
+        )
 
     def test_accelerator_unavailable_with_reason_rejected(self) -> None:
         with pytest.raises(ValidationError):
