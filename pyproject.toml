@@ -11,11 +11,11 @@ requires-python = ">=3.11,<3.14"
 license = { text = "Proprietary" }
 authors = [{ name = "ExpertForge contributors" }]
 keywords = ["llm", "moe", "training", "research"]
-# Runtime dependencies. Pydantic and PyYAML are required by the validated
-# configuration system (Issue #5): pydantic for typed/frozen validation, PyYAML
-# for the restricted authoring-format loader. These are runtime infrastructure
-# every run needs, not dev-only tools.
+# Runtime infrastructure required by every resolved run: Pydantic for frozen
+# typed records, PyYAML for restricted configuration authoring, and NumPy for
+# the explicit process-global and owned-generator RNG contract (Issue #8).
 dependencies = [
+    "numpy>=2,<3",
     "pydantic>=2.13,<3",
     "pyyaml>=6.0.3,<7",
 ]
