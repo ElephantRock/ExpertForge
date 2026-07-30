@@ -15,23 +15,26 @@ from scripts.validate_repository import (
 )
 
 
-def _init_tracked_repository(root: Path, files: dict[str, str]) -> None:
+def _init_tracked_repository(root: Path, files: dict[str, str | bytes]) -> None:
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     for relative, content in files.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
 
 
-def test_secret_scan_detects_high_confidence_token(tmp_path: Path) -> None:
+def test_secret_scan_detects_token_in_tracked_documentation(tmp_path: Path) -> None:
     token = "AKIA" + ("A" * 16)
-    _init_tracked_repository(tmp_path, {"src/example.py": f'VALUE = "{token}"\n'})
+    _init_tracked_repository(tmp_path, {"README.md": f'credential = "{token}"\n'})
 
     findings = find_secret_findings(tmp_path)
 
     assert [(finding.path, finding.rule) for finding in findings] == [
-        ("src/example.py", "aws-access-key")
+        ("README.md", "aws-access-key")
     ]
 
 
@@ -42,6 +45,15 @@ def test_secret_scan_accepts_benign_security_vocabulary(tmp_path: Path) -> None:
     )
 
     assert find_secret_findings(tmp_path) == ()
+
+
+def test_secret_scan_error_uses_repository_relative_path(tmp_path: Path) -> None:
+    _init_tracked_repository(tmp_path, {"README.md": b"\xff"})
+
+    with pytest.raises(RepositoryValidationError) as exc_info:
+        find_secret_findings(tmp_path)
+
+    assert str(exc_info.value) == "tracked_text_invalid_utf8:README.md"
 
 
 def test_expertos_boundary_detects_import_and_machine_path(tmp_path: Path) -> None:
