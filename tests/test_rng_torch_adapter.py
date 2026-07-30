@@ -128,9 +128,7 @@ def test_missing_deterministic_api_obeys_error_and_warn_policy() -> None:
     with pytest.raises(DeterminismUnavailableError, match="framework_determinism_unavailable"):
         adapter.configure("reproducible", "error")
 
-    assert adapter.configure("reproducible", "warn") == (
-        "framework_determinism_unavailable",
-    )
+    assert adapter.configure("reproducible", "warn") == ("framework_determinism_unavailable",)
 
 
 def test_seed_covers_cpu_and_all_available_cuda_devices() -> None:

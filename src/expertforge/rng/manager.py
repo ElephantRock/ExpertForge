@@ -11,15 +11,15 @@ from typing import Literal
 import numpy as np
 
 from expertforge.config.models import ConfigRoot
-from expertforge.rng.adapters import FrameworkAdapterError, FrameworkRngAdapter
+from expertforge.rng.adapters import FrameworkRngAdapter
 from expertforge.rng.derivation import DerivedSeed, SeedContext, derive_seed
 from expertforge.rng.state import (
+    RNG_STATE_SCHEMA_VERSION,
     DeterminismMode,
     FrameworkRngState,
     NumpyGeneratorState,
     NumpyLegacyState,
     PythonRandomState,
-    RNG_STATE_SCHEMA_VERSION,
     RngStateBundle,
     RngWarningCode,
     UnsupportedDeterminismPolicy,
@@ -141,9 +141,7 @@ class RngManager:
         if self.determinism_mode == "performance":
             warnings.add("performance_mode_enabled")
         for adapter, _ in adapter_seeds:
-            warnings.update(
-                adapter.configure(self.determinism_mode, self.unsupported_determinism)
-            )
+            warnings.update(adapter.configure(self.determinism_mode, self.unsupported_determinism))
 
         random.seed(python_seed.seed_u64, version=2)
         np.random.seed(numpy_legacy_seed.seed_u32)
@@ -156,7 +154,12 @@ class RngManager:
 
         derived = tuple(
             sorted(
-                (python_seed, numpy_legacy_seed, numpy_generator_seed, *(seed for _, seed in adapter_seeds)),
+                (
+                    python_seed,
+                    numpy_legacy_seed,
+                    numpy_generator_seed,
+                    *(seed for _, seed in adapter_seeds),
+                ),
                 key=lambda item: item.context.component,
             )
         )

@@ -34,20 +34,23 @@ def test_seed_derivation_canonical_envelope() -> None:
 
     payload = seed_derivation_bytes(9, context)
 
-    assert payload == json.dumps(
-        {
-            "component": "data.shuffle",
-            "device": 3,
-            "rank": 2,
-            "root_seed": "9",
-            "schema": SEED_DERIVATION_SCHEMA,
-            "stream": 4,
-            "version": SEED_DERIVATION_VERSION,
-            "worker": 1,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    assert (
+        payload
+        == json.dumps(
+            {
+                "component": "data.shuffle",
+                "device": 3,
+                "rank": 2,
+                "root_seed": "9",
+                "schema": SEED_DERIVATION_SCHEMA,
+                "stream": 4,
+                "version": SEED_DERIVATION_VERSION,
+                "worker": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
 
 
 @pytest.mark.parametrize("field", ["worker", "rank", "device", "stream"])
@@ -56,9 +59,9 @@ def test_each_coordinate_changes_stream(field: str) -> None:
     changed = dict(base)
     changed[field] = 1
 
-    assert derive_seed(7, SeedContext(**base)).digest != derive_seed(
-        7, SeedContext(**changed)
-    ).digest
+    assert (
+        derive_seed(7, SeedContext(**base)).digest != derive_seed(7, SeedContext(**changed)).digest
+    )
 
 
 def test_component_and_root_seed_change_stream() -> None:

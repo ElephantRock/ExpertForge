@@ -195,9 +195,15 @@ class RngStateBundle(_FrozenModel):
             raise ValueError("warning_codes must be sorted")
         if len(set(self.warning_codes)) != len(self.warning_codes):
             raise ValueError("warning_codes must be unique")
-        if self.determinism_mode == "performance" and "performance_mode_enabled" not in self.warning_codes:
+        if (
+            self.determinism_mode == "performance"
+            and "performance_mode_enabled" not in self.warning_codes
+        ):
             raise ValueError("performance mode must record performance_mode_enabled")
-        if self.determinism_mode == "reproducible" and "performance_mode_enabled" in self.warning_codes:
+        if (
+            self.determinism_mode == "reproducible"
+            and "performance_mode_enabled" in self.warning_codes
+        ):
             raise ValueError("reproducible mode cannot record performance_mode_enabled")
         return self
 

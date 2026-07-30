@@ -45,8 +45,7 @@ class SeedContext(BaseModel):
     def _validate_component(cls, value: str) -> str:
         if not _COMPONENT_PATTERN.fullmatch(value):
             raise ValueError(
-                "component must be a lowercase stable identifier matching "
-                "[a-z][a-z0-9._-]{0,127}"
+                "component must be a lowercase stable identifier matching [a-z][a-z0-9._-]{0,127}"
             )
         return value
 
@@ -112,8 +111,7 @@ class DerivedSeed(BaseModel):
         version = data.get("derivation_version")
         if version != SEED_DERIVATION_VERSION:
             raise ValueError(
-                f"Unsupported derivation_version {version!r}; expected "
-                f"{SEED_DERIVATION_VERSION}."
+                f"Unsupported derivation_version {version!r}; expected {SEED_DERIVATION_VERSION}."
             )
         return cls.model_validate(data, strict=False)
 

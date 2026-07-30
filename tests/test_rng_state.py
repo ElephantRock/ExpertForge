@@ -116,11 +116,14 @@ def test_state_bundle_deterministic_json_round_trip() -> None:
 
     assert loaded == bundle
     assert payload == loaded.to_deterministic_json()
-    assert payload == json.dumps(
-        bundle.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    assert (
+        payload
+        == json.dumps(
+            bundle.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
 
 
 def test_state_bundle_is_deeply_immutable() -> None:
@@ -163,9 +166,12 @@ def test_performance_mode_requires_warning() -> None:
     with pytest.raises(ValidationError, match="performance_mode_enabled"):
         _bundle(determinism_mode="performance")
 
-    assert _bundle(
-        determinism_mode="performance", warning_codes=("performance_mode_enabled",)
-    ).determinism_mode == "performance"
+    assert (
+        _bundle(
+            determinism_mode="performance", warning_codes=("performance_mode_enabled",)
+        ).determinism_mode
+        == "performance"
+    )
 
 
 def test_reproducible_mode_forbids_performance_warning() -> None:
@@ -175,9 +181,7 @@ def test_reproducible_mode_forbids_performance_warning() -> None:
 
 def test_warning_codes_must_be_sorted_unique() -> None:
     with pytest.raises(ValidationError, match="sorted"):
-        _bundle(
-            warning_codes=("framework_determinism_unavailable", "accelerator_unavailable")
-        )
+        _bundle(warning_codes=("framework_determinism_unavailable", "accelerator_unavailable"))
     with pytest.raises(ValidationError, match="unique"):
         _bundle(warning_codes=("accelerator_unavailable", "accelerator_unavailable"))
 

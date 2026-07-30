@@ -190,7 +190,10 @@ class TorchRngAdapter:
                 if not callable(set_all):
                     raise FrameworkAdapterError("framework_api_unavailable")
                 set_all(
-                    [self._bytes_to_tensor(by_device[device].payload_bytes()) for device in cuda_devices]
+                    [
+                        self._bytes_to_tensor(by_device[device].payload_bytes())
+                        for device in cuda_devices
+                    ]
                 )
         except FrameworkAdapterError:
             raise
