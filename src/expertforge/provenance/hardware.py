@@ -1,19 +1,20 @@
 """Optional hardware/topology providers with typed models (Issue #7 review item 4).
 
 Returns frozen typed models (``AcceleratorInfo``, ``TopologyInfo``,
-``DeviceInfo``). Device ordinals are stable; memory is typed numeric.
-Accelerator-framework package versions are identified. No serials/MAC/UUIDs/IPs.
+``DeviceInfo``, ``HardwareAggregate``). Device ordinals are stable; memory is
+typed numeric. Accelerator-framework package versions are identified. No
+serials/MAC/UUIDs/IPs.
 """
 
 from __future__ import annotations
 
 import subprocess
 from enum import StrEnum
-from typing import Any
 
 from expertforge.provenance.record import (
     AcceleratorInfo,
     DeviceInfo,
+    HardwareAggregate,
     TopologyInfo,
 )
 
@@ -106,25 +107,28 @@ def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0)
 
     devices: list[DeviceInfo] = []
     for line in lines:
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 4:
-            continue
+        # Parse each line independently. A single malformed nvidia-smi row
+        # (truncated output, non-numeric index/memory, etc.) must not abort
+        # the whole capture — skip it and continue with the valid rows.
         try:
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                continue
             ordinal = int(parts[0])
-        except ValueError:
-            continue
-        try:
-            mem = int(parts[2])
-        except ValueError:
-            mem = None
-        devices.append(
-            DeviceInfo(
-                ordinal=ordinal,
-                model=parts[1],
-                memory_total_mib=mem,
-                driver_version=parts[3],
+            try:
+                mem = int(parts[2])
+            except ValueError:
+                mem = None
+            devices.append(
+                DeviceInfo(
+                    ordinal=ordinal,
+                    model=parts[1],
+                    memory_total_mib=mem,
+                    driver_version=parts[3],
+                )
             )
-        )
+        except (ValueError, IndexError):
+            continue
     if not devices:
         return AcceleratorInfo(status=FieldStatus.UNAVAILABLE.value)
 
@@ -134,9 +138,13 @@ def capture_accelerator(*, nvidia_smi: str = "nvidia-smi", timeout: float = 5.0)
     return AcceleratorInfo(
         status=FieldStatus.AVAILABLE.value,
         framework="cuda",
-        framework_version=runtime_version,
+        # CUDA is not a deep-learning framework (Torch/JAX/TF are); only the
+        # runtime distribution version is recorded under runtime_version.
+        framework_version=None,
         runtime_version=runtime_version,
-        precision_status=FieldStatus.NOT_APPLICABLE.value,
+        # The binding decision says unavailable capabilities must be recorded
+        # as 'unavailable', not 'not_applicable' — we did not probe precision.
+        precision_status=FieldStatus.UNAVAILABLE.value,
         device_count=len(devices),
         devices=tuple(devices),
     )
@@ -154,19 +162,26 @@ _TOPO_ENV_ALLOWLIST = {
 }
 
 
-def _detect_topology_from_env() -> dict[str, int]:
-    """Read a narrow allowlist of topology env vars (no coordinator addresses)."""
-    detected: dict[str, int] = {}
+def _detect_topology_from_env() -> tuple[dict[str, int], tuple[str, ...]]:
+    """Read a narrow allowlist of topology env vars (no coordinator addresses).
+
+    Returns ``(detected, warnings)``. Values that are present but cannot be
+    parsed as the expected integer type are NOT silently discarded — they are
+    recorded as typed warnings so a misconfigured launcher is visible rather
+    than silently dropping the rank/world_size.
+    """
     import os
 
+    detected: dict[str, int] = {}
+    warnings: list[str] = []
     for key, caster in _TOPO_ENV_ALLOWLIST.items():
         val = os.environ.get(key)
         if val is not None:
             try:
                 detected[key] = caster(val)
             except ValueError:
-                pass
-    return detected
+                warnings.append(f"invalid_topology_env_value:{key}")
+    return detected, tuple(sorted(set(warnings)))
 
 
 def capture_topology(
@@ -181,8 +196,14 @@ def capture_topology(
 
     Explicit input takes precedence; then the narrow environment allowlist is
     consulted. No coordinator addresses or IPs are recorded.
+
+    Note: invalid numeric topology env values are surfaced via
+    :func:`capture_hardware` (as ``topology_warnings``) rather than here, since
+    a frozen ``TopologyInfo`` cannot carry ad-hoc warning text without a new
+    field. ``capture_hardware`` is the recommended aggregator when env-warning
+    visibility is required.
     """
-    env = _detect_topology_from_env()
+    env, _warnings = _detect_topology_from_env()
 
     resolved_rank = rank if rank is not None else env.get("RANK")
     resolved_world = world_size if world_size is not None else env.get("WORLD_SIZE")
@@ -240,15 +261,22 @@ def capture_hardware(
     node_count: int | None = None,
     backend: str | None = None,
     nvidia_smi: str = "nvidia-smi",
-) -> dict[str, Any]:
-    """Aggregate hardware + topology capture."""
-    return {
-        "accelerator": capture_accelerator(nvidia_smi=nvidia_smi),
-        "topology": capture_topology(
+) -> HardwareAggregate:
+    """Aggregate hardware + topology capture as a typed frozen model.
+
+    Returns a :class:`HardwareAggregate` (not a bare dict) so the combined
+    result is validated and round-trips through JSON. ``topology_warnings``
+    surfaces invalid numeric topology env values observed but not parseable.
+    """
+    _env, topology_warnings = _detect_topology_from_env()
+    return HardwareAggregate(
+        accelerator=capture_accelerator(nvidia_smi=nvidia_smi),
+        topology=capture_topology(
             rank=rank,
             world_size=world_size,
             local_rank=local_rank,
             node_count=node_count,
             backend=backend,
         ),
-    }
+        topology_warnings=topology_warnings,
+    )

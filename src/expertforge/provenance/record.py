@@ -30,6 +30,7 @@ __all__ = [
     "CompletenessInfo",
     "DependencyObservation",
     "DeviceInfo",
+    "HardwareAggregate",
     "LockfileDigest",
     "MemoryInfo",
     "PlatformInfo",
@@ -131,6 +132,10 @@ class SoftwareEnvironment(BaseModel):
     python: PythonInfo
     platform: PlatformInfo = Field(default_factory=PlatformInfo)
     dependencies: tuple[DependencyObservation, ...] = Field(default_factory=tuple)
+    # Recorded when the SAME normalized dependency name is observed at
+    # DIFFERENT versions across distributions. First observation wins; the
+    # conflict is surfaced here rather than silently lost.
+    dependency_conflicts: tuple[str, ...] = Field(default_factory=tuple)
     lockfile: LockfileDigest = Field(default_factory=lambda: LockfileDigest(status="unavailable"))
 
     @field_validator("dependencies")
@@ -145,6 +150,17 @@ class SoftwareEnvironment(BaseModel):
             )
         if names != sorted(names):
             raise ValueError("Dependencies must be sorted by name.")
+        return v
+
+    @field_validator("dependency_conflicts")
+    @classmethod
+    def _conflicts_sorted_unique(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(v)) != len(v):
+            raise ValueError(
+                f"Duplicate dependency_conflicts: {sorted({c for c in v if v.count(c) > 1})}"
+            )
+        if list(v) != sorted(v):
+            raise ValueError("dependency_conflicts must be sorted.")
         return v
 
 
@@ -204,7 +220,34 @@ class TopologyInfo(BaseModel):
                 raise ValueError("TopologyInfo status='available' requires rank and world_size.")
             if self.rank >= self.world_size:
                 raise ValueError("rank must be < world_size.")
+        else:
+            # error or not_applicable: rank and world_size must be absent. A
+            # record that claims error/not_applicable yet carries concrete
+            # rank/world_size values is internally inconsistent (and a likely
+            # sign of tampering or a logic bug at capture time).
+            if self.rank is not None or self.world_size is not None:
+                raise ValueError(
+                    f"TopologyInfo status={self.status!r} requires rank and "
+                    "world_size to be None; concrete values are only valid when "
+                    "status is 'available'."
+                )
         return self
+
+
+class HardwareAggregate(BaseModel):
+    """Frozen aggregate of accelerator + topology capture.
+
+    ``capture_hardware()`` returns this typed model (not a bare dict) so the
+    combined result is validated, frozen, and round-trips through JSON.
+    ``topology_warnings`` records invalid numeric topology env values that were
+    observed but could not be parsed (rather than silently discarding them).
+    """
+
+    model_config = _section_config()
+
+    accelerator: AcceleratorInfo
+    topology: TopologyInfo
+    topology_warnings: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class ProvenanceRecord(BaseModel):
@@ -290,43 +333,77 @@ class ProvenanceRecord(BaseModel):
             )
         return self
 
-    def _derive_completeness(self) -> tuple[str, tuple[str, ...]]:
+    @model_validator(mode="after")
+    def _validate_completeness_consistency(self) -> ProvenanceRecord:
+        """Verify ``self.completeness`` matches the derived whole-record value.
+
+        Catches tampered sidecars (a record whose stored ``completeness`` does
+        not reflect the actual section states) and explicit overrides supplied
+        to :meth:`from_identity` that disagree with the captured sections. The
+        stored status must equal the recomputed status, and the stored warning
+        set must equal the recomputed warning set.
+        """
+        derived_status, derived_warnings = ProvenanceRecord._derive_completeness(
+            self.source, self.software, self.hardware, self.topology
+        )
+        if self.completeness.status != derived_status:
+            raise ValueError(
+                f"Stored completeness status {self.completeness.status!r} does not "
+                f"match the derived whole-record status {derived_status!r}. "
+                "Completeness is derived from all mandatory sections; do not "
+                "supply a manual override that disagrees with them."
+            )
+        if self.completeness.warnings != derived_warnings:
+            raise ValueError(
+                f"Stored completeness warnings {self.completeness.warnings!r} do "
+                f"not match the derived whole-record warnings {derived_warnings!r}."
+            )
+        return self
+
+    @staticmethod
+    def _derive_completeness(
+        source: SourceSnapshot,
+        software: SoftwareEnvironment,
+        hardware: AcceleratorInfo,
+        topology: TopologyInfo,
+    ) -> tuple[str, tuple[str, ...]]:
         """Derive top-level completeness + warnings from all mandatory sections.
 
         Returns ``(status, warnings)``. ``error``/``partial`` states in any
-        section propagate to the top-level status with typed warnings.
+        section propagate to the top-level status with typed warnings. Pure
+        static derivation so it can run before the frozen record is constructed.
         """
         warnings: list[str] = []
         has_partial = False
         has_error = False
 
         # Source evidence.
-        if self.source.evidence is not None:
-            if self.source.evidence.completeness == "partial":
+        if source.evidence is not None:
+            if source.evidence.completeness == "partial":
                 has_partial = True
-                warnings.extend(self.source.evidence.warnings)
-            elif self.source.evidence.completeness == "error":
+                warnings.extend(source.evidence.warnings)
+            elif source.evidence.completeness == "error":
                 has_error = True
-                warnings.extend(self.source.evidence.warnings)
-        if not self.source.is_clean:
+                warnings.extend(source.evidence.warnings)
+        if not source.is_clean:
             warnings.append("non_canonical_dirty_source")
-        warnings.extend(w.code for w in self.source.remote_warnings)
+        warnings.extend(w.code for w in source.remote_warnings)
 
         # Software lockfile.
-        if self.software.lockfile.status == "error":
+        if software.lockfile.status == "error":
             has_error = True
             warnings.append("lockfile_error")
 
         # Hardware.
-        if self.hardware.status == "error":
+        if hardware.status == "error":
             has_error = True
             warnings.append("accelerator_error")
-        elif self.hardware.status == "redacted":
+        elif hardware.status == "redacted":
             has_partial = True
             warnings.append("accelerator_redacted")
 
         # Topology.
-        if self.topology.status == "error":
+        if topology.status == "error":
             has_error = True
             warnings.append("topology_error")
 
@@ -350,7 +427,7 @@ class ProvenanceRecord(BaseModel):
         ``source`` (the complete typed SourceSnapshot) is mandatory.
         Software/hardware/topology default to typed unavailable values when
         not supplied. Completeness is derived from all sections unless
-        explicitly overridden.
+        explicitly overridden (and the override must match the derived value).
         """
         resolved_software = software or SoftwareEnvironment(
             python=PythonInfo(version="unknown", implementation="unknown"),
@@ -363,8 +440,22 @@ class ProvenanceRecord(BaseModel):
         resolved_hw = hardware or AcceleratorInfo(status="unavailable")
         resolved_topo = topology or TopologyInfo(status="not_applicable")
 
-        # Build the record first (without completeness), then derive it.
-        record = cls(
+        # Derive completeness BEFORE constructing the frozen record so the
+        # completeness-consistency model_validator sees a matching value on the
+        # first pass. An explicit override must itself match the derived value
+        # (the validator rejects overrides that disagree with the sections).
+        if completeness is None:
+            derived_status, derived_warnings = cls._derive_completeness(
+                source, resolved_software, resolved_hw, resolved_topo
+            )
+            resolved_completeness = CompletenessInfo(
+                status=cast("CompletenessStatus", derived_status),
+                warnings=derived_warnings,
+            )
+        else:
+            resolved_completeness = completeness
+
+        return cls(
             run_id=identity.run_id,
             attempt_id=identity.attempt_id,
             specification_fingerprint=identity.specification_fingerprint,
@@ -374,20 +465,8 @@ class ProvenanceRecord(BaseModel):
             software=resolved_software,
             hardware=resolved_hw,
             topology=resolved_topo,
-            completeness=completeness or CompletenessInfo(),
+            completeness=resolved_completeness,
         )
-        if completeness is None:
-            derived_status, derived_warnings = record._derive_completeness()
-            # Reconstruct with derived completeness (frozen model).
-            return record.model_copy(
-                update={
-                    "completeness": CompletenessInfo(
-                        status=cast("CompletenessStatus", derived_status),
-                        warnings=derived_warnings,
-                    )
-                }
-            )
-        return record
 
     def to_deterministic_json(self) -> bytes:
         """Compact, sorted-key, UTF-8, non-finite-prohibiting JSON."""

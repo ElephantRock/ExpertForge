@@ -28,7 +28,6 @@ from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.hardware import capture_accelerator, capture_topology
 from expertforge.provenance.record import (
     AcceleratorInfo,
-    CompletenessInfo,
     ProvenanceRecord,
     SoftwareEnvironment,
     TopologyInfo,
@@ -111,24 +110,16 @@ def prepare_run(
     resolved_hardware = hardware or capture_accelerator()
     resolved_topology = topology or capture_topology()
 
-    # Derive honest top-level completeness from the source snapshot.
-    source_warnings: list[str] = []
-    if not snap.is_clean:
-        source_warnings.append("non_canonical_dirty_source")
-    if snap.evidence is not None:
-        source_warnings.extend(snap.evidence.warnings)
-    source_warnings.extend(w.code for w in snap.remote_warnings)
-
+    # Top-level completeness is derived from ALL sections by from_identity()
+    # (completeness=None is the default). Do NOT supply a source-only override —
+    # that bypasses whole-record completeness derivation and could mask a
+    # hardware/software/topology error as "complete".
     provenance = ProvenanceRecord.from_identity(
         identity,
         source=snap,
         software=resolved_software,
         hardware=resolved_hardware,
         topology=resolved_topology,
-        completeness=CompletenessInfo(
-            status="partial" if source_warnings else "complete",
-            warnings=tuple(source_warnings),
-        ),
     )
 
     # 5. Write run-provenance.json before training can begin.

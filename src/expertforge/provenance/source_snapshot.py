@@ -29,9 +29,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -51,12 +52,25 @@ __all__ = [
 SOURCE_SNAPSHOT_VERSION: int = 1
 _SNAPSHOT_SCHEMA = "expertforge.source-snapshot"
 _GIT_TIMEOUT: float = 10.0
+# 64 lowercase hexadecimal characters (SHA-256). Used to validate all digest
+# fields on the source-snapshot models so a tampered sidecar cannot smuggle in
+# a malformed digest.
+_DIGEST_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # Deterministic locale environment for git subprocess calls. Strip GIT_*
 # environment variables that could alter diff behavior (external diff drivers,
 # aliases, config overrides) — only carry safe locale settings.
 _GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 _GIT_ENV["LC_ALL"] = "C"
 _GIT_ENV["LANG"] = "C"
+
+
+def _validate_optional_digest(v: str | None) -> str | None:
+    """Allow None (nullable) or an exact 64-lowercase-hex SHA-256 digest."""
+    if v is None:
+        return None
+    if not _DIGEST_HEX_PATTERN.fullmatch(v):
+        raise ValueError(f"digest must be 64 lowercase hex chars (sha256); got {v!r}.")
+    return v
 
 
 class DirtySourceError(Exception):
@@ -124,7 +138,14 @@ def _branch_ref(repo: Path) -> str:
     return ref if ref else "HEAD"
 
 
-def _remote_url(repo: Path) -> tuple[str | None, tuple[str, ...]]:
+_RemoteWarningCode = Literal[
+    "remote_credentials_removed",
+    "remote_query_fragment_removed",
+    "remote_local_or_unsupported_removed",
+]
+
+
+def _remote_url(repo: Path) -> tuple[str | None, tuple[_RemoteWarningCode, ...]]:
     """Capture the ``origin`` remote URL, **sanitized at capture time**.
 
     Returns ``(sanitized_url, warnings)``. If the raw URL contained credentials,
@@ -137,7 +158,7 @@ def _remote_url(repo: Path) -> tuple[str | None, tuple[str, ...]]:
         return None, ()
     if not raw:
         return None, ()
-    warnings: list[str] = []
+    warnings: list[_RemoteWarningCode] = []
     # Detect credential-bearing URLs before sanitizing.
     if "@" in raw.split("://")[-1] if "://" in raw else "@" in raw:
         warnings.append("remote_credentials_removed")
@@ -268,6 +289,12 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
     renamed_count = 0
     deleted_count = 0
     unreadable_count = 0
+    # Count submodule changes detected via porcelain status in addition to the
+    # `git submodule status` commit-state prefixes (which miss some changes).
+    # A submodule appears in porcelain status as a path ending in ``/`` (git
+    # marks directories with a trailing slash); a non-trivial XY on such a path
+    # indicates a submodule worktree or index change.
+    porcelain_submodule_changes = 0
     for xy, path, _orig_path in entries:
         x, y = xy[0], xy[1]
         if x == "?" and y == "?":
@@ -283,35 +310,58 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
             renamed_count += 1
         if "D" in xy:
             deleted_count += 1
+        # Submodule-path change: trailing slash + non-trivial XY on either side.
+        if (
+            path
+            and (path.endswith("/") or path.endswith("\\"))
+            and (x not in (" ", "?", "!", "_") or y not in (" ", "?", "!", "_"))
+        ):
+            porcelain_submodule_changes += 1
 
     untracked.sort(key=lambda e: e.path)
 
     # Submodule status — preserve full SHA + state prefix, record failures.
+    # Do NOT strip the raw line before reading the prefix: the prefix is the
+    # FIRST character of the raw line (space, -, +, ~) and stripping removes
+    # leading spaces, misreading an initialized (space-prefixed) submodule.
     submodule_entries: list[SubmoduleEntry] = []
     submodule_failed = False
     try:
         sub_raw = _run_git(repo, ["submodule", "status"])
         for line in sub_raw.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
+            # Skip only truly empty raw lines. Read the prefix from the raw
+            # (unstripped) line so leading spaces are preserved.
             if not line:
                 continue
-            prefix = line[0] if line[0] in "-+~ " else " "
-            sha_full = line[1:41].strip() if len(line) > 40 else ""
-            rest = line[42:].strip() if len(line) > 42 else ""
-            name = rest.split()[0] if rest else "unknown"
-            state_map = {
-                " ": "initialized",
-                "-": "uninitialized",
-                "+": "changed",
-                "~": "conflicted",
-            }
-            submodule_entries.append(
-                SubmoduleEntry(
-                    name=name,
-                    commit=sha_full if sha_full else "unknown",
-                    state=state_map.get(prefix, "initialized"),
+            try:
+                prefix = line[0]
+                # Valid prefixes are space, -, +, ~. Anything else is a
+                # malformed line — skip it rather than producing a bogus entry.
+                if prefix not in " -+~":
+                    continue
+                # The 40-char SHA follows the single prefix char.
+                sha_full = line[1:41].strip()
+                # The submodule name/path follows after column 42.
+                rest = line[42:].strip()
+                name = rest.split()[0] if rest else "unknown"
+                state_map: dict[
+                    str, Literal["initialized", "uninitialized", "changed", "conflicted"]
+                ] = {
+                    " ": "initialized",
+                    "-": "uninitialized",
+                    "+": "changed",
+                    "~": "conflicted",
+                }
+                submodule_entries.append(
+                    SubmoduleEntry(
+                        name=name,
+                        commit=sha_full if sha_full else "unknown",
+                        state=state_map[prefix],
+                    )
                 )
-            )
+            except (IndexError, ValueError):
+                # Malformed single line — skip it, do not abort the whole parse.
+                continue
     except SourceUnavailableError:
         submodule_failed = True
 
@@ -325,19 +375,25 @@ def _build_dirty_evidence(repo: Path) -> SourceEvidence:
         limitations.append("submodule_inspection_failed")
         warnings.append("submodule_inspection_failed")
     # Dirty/changed submodules are not content-snapshotted by `git submodule
-    # status` — mark evidence partial.
+    # status` — mark evidence partial. Count both the commit-state prefixes
+    # AND porcelain-detected submodule changes so a submodule that porcelain
+    # flags as modified but `git submodule status` reports as initialized is
+    # still observed as changed.
     dirty_submodules = [s for s in submodule_entries if s.state in ("changed", "conflicted")]
-    if dirty_submodules:
-        limitations.append(f"dirty_submodules_not_snapshotted:{len(dirty_submodules)}")
+    dirty_count = len(dirty_submodules)
+    if porcelain_submodule_changes > dirty_count:
+        dirty_count = porcelain_submodule_changes
+    if dirty_count:
+        limitations.append(f"dirty_submodules_not_snapshotted:{dirty_count}")
         warnings.append("dirty_submodule_content_not_captured")
 
     # Always note that ignored files and external symlink targets are not included.
     limitations.append("ignored_files_not_included")
     limitations.append("external_symlink_targets_not_followed")
 
-    completeness = (
+    completeness: Literal["complete", "partial"] = (
         "complete"
-        if not unreadable_count and not submodule_failed and not dirty_submodules
+        if not unreadable_count and not submodule_failed and not dirty_count
         else "partial"
     )
 
@@ -371,9 +427,36 @@ class UntrackedEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
 
     path: str = Field(..., min_length=1)
-    kind: str  # file | symlink | unknown | other
+    kind: Literal["file", "symlink", "unknown", "other"]
     mode: str | None = Field(default=None)
     digest: str | None = Field(default=None)  # None when unreadable
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        """Reject absolute paths and path traversal.
+
+        ``path`` is a repo-relative path; it must not be absolute (POSIX or
+        Windows drive form), contain a path separator (the porcelain output is
+        single-segment per entry except for sub-directories which use ``/``),
+        or climb out of the repo via ``..``.
+        """
+        # Reject POSIX absolute and any separator.
+        if v.startswith("/") or v.startswith("\\"):
+            raise ValueError(f"untracked path {v!r} must be repo-relative, not absolute.")
+        # Reject Windows drive-letter absolute form (C:\ or C:/).
+        if re.match(r"^[A-Za-z]:[\\/]", v):
+            raise ValueError(f"untracked path {v!r} must be repo-relative, not absolute.")
+        # Reject any traversal component anywhere in the path.
+        parts = re.split(r"[\\/]", v)
+        if any(part == ".." for part in parts):
+            raise ValueError(f"untracked path {v!r} contains a '..' traversal component.")
+        return v
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, v: str | None) -> str | None:
+        return _validate_optional_digest(v)
 
 
 class SubmoduleEntry(BaseModel):
@@ -383,7 +466,7 @@ class SubmoduleEntry(BaseModel):
 
     name: str = Field(..., min_length=1)
     commit: str = Field(..., min_length=1)  # full SHA, not truncated
-    state: str  # initialized | uninitialized | changed | conflicted (from prefix)
+    state: Literal["initialized", "uninitialized", "changed", "conflicted"]
 
 
 class SourceCounts(BaseModel):
@@ -414,18 +497,28 @@ class SourceEvidence(BaseModel):
     untracked: tuple[UntrackedEntry, ...] = Field(default_factory=tuple)
     submodule_status: tuple[SubmoduleEntry, ...] = Field(default_factory=tuple)
     counts: SourceCounts = Field(default_factory=SourceCounts)
-    completeness: str = Field(default="complete")  # complete | partial | error
+    completeness: Literal["complete", "partial", "error"] = Field(default="complete")
     limitations: tuple[str, ...] = Field(default_factory=tuple)
     warnings: tuple[str, ...] = Field(default_factory=tuple)
 
+    @field_validator("staged_digest", "unstaged_digest")
+    @classmethod
+    def _validate_digest(cls, v: str) -> str:
+        if not _DIGEST_HEX_PATTERN.fullmatch(v):
+            raise ValueError(f"digest must be 64 lowercase hex chars (sha256); got {v!r}.")
+        return v
+
 
 class RemoteWarning(BaseModel):
-    """Typed warning about remote URL sanitization."""
+    """Typed warning about remote URL sanitization (code-only; no free text)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
 
-    code: str  # e.g. remote_credentials_removed, remote_local_or_unsupported_removed
-    message: str = Field(default="")
+    code: Literal[
+        "remote_credentials_removed",
+        "remote_query_fragment_removed",
+        "remote_local_or_unsupported_removed",
+    ]
 
 
 class SourceSnapshot(BaseModel):
@@ -461,6 +554,73 @@ class SourceSnapshot(BaseModel):
                 f"supports {SOURCE_SNAPSHOT_VERSION}."
             )
         return v
+
+    @field_validator("tree_digest", "input_digest")
+    @classmethod
+    def _validate_digest(cls, v: str) -> str:
+        if not _DIGEST_HEX_PATTERN.fullmatch(v):
+            raise ValueError(f"digest must be 64 lowercase hex chars (sha256); got {v!r}.")
+        return v
+
+    @field_validator("remote_url")
+    @classmethod
+    def _validate_remote_url(cls, v: str | None) -> str | None:
+        """Model-level URL sanitization (defense in depth, even on load).
+
+        Applies :func:`sanitize_repository_url` so a tampered sidecar cannot
+        re-introduce a raw credential-bearing or local-path URL after capture.
+        Raw credentials in the URL are rejected outright.
+        """
+        if v is None:
+            return None
+        # Late import to avoid a circular dependency at module load time.
+        from expertforge.provenance.software import sanitize_repository_url
+
+        # Reject raw credentials before sanitizing: a URL that still carries
+        # userinfo (``user:secret@host``) was not sanitized at capture time.
+        # ``git@host:path`` is the SCP-like git form and is NOT a credential.
+        userinfo_check = v
+        if "://" in userinfo_check:
+            after_scheme = userinfo_check.split("://", 1)[1]
+            if "@" in after_scheme and not after_scheme.startswith("git@"):
+                raise ValueError(
+                    "remote_url contains raw credentials; refuse to store an "
+                    "unsanitized credential-bearing URL."
+                )
+        sanitized = sanitize_repository_url(v)
+        return sanitized
+
+    @model_validator(mode="after")
+    def _verify_source_invariants(self) -> SourceSnapshot:
+        """Enforce clean/dirty evidence invariants.
+
+        - ``is_clean == (evidence is None)``: a clean tree has no evidence and
+          vice-versa. A tampered sidecar cannot claim ``is_clean`` with
+          evidence present, nor ``not is_clean`` with no evidence.
+        - ``is_clean`` implies ``is_canonical``: a clean tree is canonical.
+        - ``not is_clean`` implies ``not is_canonical``: a dirty tree is
+          non-canonical.
+        - when ``evidence`` is present its ``completeness`` must be ``complete``
+          or ``partial`` (never ``error``); error-status evidence would have
+          aborted capture rather than recording a snapshot.
+        """
+        if self.is_clean != (self.evidence is None):
+            raise ValueError(
+                "is_clean must equal (evidence is None): a clean tree carries no "
+                "evidence and a dirty tree always carries evidence."
+            )
+        if self.is_clean and not self.is_canonical:
+            raise ValueError("is_clean implies is_canonical (a clean tree is canonical).")
+        if not self.is_clean and self.is_canonical:
+            raise ValueError(
+                "not is_clean implies not is_canonical (a dirty tree is non-canonical)."
+            )
+        if self.evidence is not None and self.evidence.completeness == "error":
+            raise ValueError(
+                "source evidence completeness must be 'complete' or 'partial', "
+                "never 'error' (an error-state capture aborts instead of recording)."
+            )
+        return self
 
     @model_validator(mode="after")
     def _verify_input_digest(self) -> SourceSnapshot:

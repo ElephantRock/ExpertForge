@@ -215,6 +215,195 @@ class TestSourceSnapshotInvariants:
             SourceSnapshot.model_validate(bad)
 
 
+# --- contradictory source-flag / evidence invariants (review item 2) -------
+
+
+class TestSourceFlagContradictions:
+    """A tampered sidecar cannot claim clean/dirty states that contradict the
+    evidence (or lack thereof)."""
+
+    @staticmethod
+    def _envelope(tree: str, evidence: object) -> str:
+        from expertforge.provenance.source_snapshot import _envelope_digest
+
+        return _envelope_digest(tree, evidence)  # type: ignore[arg-type]
+
+    def test_is_clean_true_with_evidence_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SourceEvidence,
+        )
+
+        evidence = SourceEvidence(
+            staged_digest="a" * 64,
+            unstaged_digest="b" * 64,
+            counts=SourceCounts(staged=1),
+            completeness="complete",
+        )
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,  # contradiction: clean but evidence present
+                is_canonical=True,
+                tree_digest="c" * 64,
+                input_digest=self._envelope("c" * 64, evidence),
+                evidence=evidence,
+            )
+
+    def test_is_clean_false_without_evidence_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=False,  # contradiction: dirty but no evidence
+                is_canonical=False,
+                tree_digest="c" * 64,
+                input_digest=self._envelope("c" * 64, None),
+                evidence=None,
+            )
+
+    def test_clean_but_non_canonical_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=False,  # contradiction: clean implies canonical
+                tree_digest="c" * 64,
+                input_digest=self._envelope("c" * 64, None),
+            )
+
+    def test_dirty_but_canonical_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SourceEvidence,
+        )
+
+        evidence = SourceEvidence(
+            staged_digest="a" * 64,
+            unstaged_digest="b" * 64,
+            counts=SourceCounts(staged=1),
+            completeness="complete",
+        )
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=False,
+                is_canonical=True,  # contradiction: dirty implies non-canonical
+                tree_digest="c" * 64,
+                input_digest=self._envelope("c" * 64, evidence),
+                evidence=evidence,
+            )
+
+    def test_evidence_completeness_error_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SourceEvidence,
+        )
+
+        evidence = SourceEvidence(
+            staged_digest="a" * 64,
+            unstaged_digest="b" * 64,
+            counts=SourceCounts(staged=1),
+            completeness="error",  # an error-state capture aborts, not records
+        )
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=False,
+                is_canonical=False,
+                tree_digest="c" * 64,
+                input_digest=self._envelope("c" * 64, evidence),
+                evidence=evidence,
+            )
+
+    def test_remote_url_with_raw_credentials_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                remote_url="https://user:token@github.com/org/repo.git",
+                tree_digest="c" * 64,
+                input_digest=self._envelope("c" * 64, None),
+            )
+
+
+# --- malformed digest fields rejected (review item 2) ----------------------
+
+
+class TestMalformedDigests:
+    def test_tree_digest_not_hex_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                tree_digest="g" * 64,  # not hex
+                input_digest="0" * 64,
+            )
+
+    def test_tree_digest_wrong_length_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                tree_digest="a" * 63,  # too short
+                input_digest="0" * 64,
+            )
+
+    def test_tree_digest_uppercase_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SourceSnapshot(
+                commit_sha="1" * 40,
+                is_clean=True,
+                is_canonical=True,
+                tree_digest="A" * 64,  # must be lowercase
+                input_digest="0" * 64,
+            )
+
+    def test_source_evidence_staged_digest_malformed_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import (
+            SourceCounts,
+            SourceEvidence,
+        )
+
+        with pytest.raises(ValidationError):
+            SourceEvidence(
+                staged_digest="not-hex",  # malformed
+                unstaged_digest="b" * 64,
+                counts=SourceCounts(),
+                completeness="complete",
+            )
+
+
+# --- unsafe untracked paths rejected (review item 2) -----------------------
+
+
+class TestUnsafeUntrackedPaths:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/etc/passwd",  # POSIX absolute
+            "\\windows\\secret",  # backslash-absolute
+            "C:/Users/secret",  # Windows drive absolute
+            "C:\\Users\\secret",  # Windows drive absolute (backslash)
+            "../escape",  # traversal
+            "sub/../escape",  # traversal in middle
+        ],
+    )
+    def test_unsafe_path_rejected(self, path: str) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            UntrackedEntry(path=path, kind="file", digest="a" * 64)
+
+    def test_safe_relative_path_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        entry = UntrackedEntry(path="sub/dir/file.txt", kind="file", digest="a" * 64)
+        assert entry.path == "sub/dir/file.txt"
+
+
 # --- completeness propagation ----------------------------------------------
 
 
@@ -254,6 +443,45 @@ class TestCompletenessPropagation:
             hardware=AcceleratorInfo(status="error", reason="io_error"),
         )
         assert "accelerator_error" in rec.completeness.warnings
+
+    def test_tampered_completeness_rejected(self, tmp_path: Path) -> None:
+        # A record whose stored completeness claims 'complete' but whose sections
+        # contain an error (here: accelerator error) must be rejected by the
+        # completeness-consistency model_validator. This catches tampered
+        # sidecars that misrepresent their own section states.
+        ident, snap = _identity_and_snap(tmp_path)
+        rec = ProvenanceRecord.from_identity(
+            ident,
+            source=snap,
+            hardware=AcceleratorInfo(status="error", reason="io_error"),
+        )
+        tampered = rec.model_dump()
+        tampered["completeness"] = {"status": "complete", "warnings": [], "limitations": []}
+        with pytest.raises(ValidationError):
+            ProvenanceRecord.model_validate(tampered)
+
+    def test_explicit_completeness_override_must_match_sections(self, tmp_path: Path) -> None:
+        # An explicit completeness override that disagrees with the derived
+        # whole-record value is rejected (prevents callers from papering over
+        # section errors with a manual 'complete' override).
+        ident, snap = _identity_and_snap(tmp_path)
+        with pytest.raises(ValidationError):
+            ProvenanceRecord.from_identity(
+                ident,
+                source=snap,
+                hardware=AcceleratorInfo(status="error", reason="io_error"),
+                completeness=CompletenessInfo(status="complete"),
+            )
+
+    def test_explicit_completeness_override_that_matches_accepted(self, tmp_path: Path) -> None:
+        # An explicit override that matches the derived value is accepted.
+        ident, snap = _identity_and_snap(tmp_path)
+        rec = ProvenanceRecord.from_identity(
+            ident,
+            source=snap,
+            completeness=CompletenessInfo(status="complete"),
+        )
+        assert rec.completeness.status == "complete"
 
 
 # --- topology partial input → error ----------------------------------------

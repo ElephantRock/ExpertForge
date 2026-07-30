@@ -27,15 +27,9 @@ from expertforge.provenance.record import (
 
 __all__ = [
     "capture_software_environment",
-    "dependency_notes",
     "redact_token_patterns",
     "sanitize_repository_url",
 ]
-
-
-def dependency_notes() -> tuple[str, ...]:
-    """Return any dependency-capture notes (e.g. version conflicts, first wins)."""
-    return tuple(_dependency_notes)
 
 
 _TOKEN_PATTERNS = [
@@ -44,11 +38,6 @@ _TOKEN_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----"),
 ]
-
-# Notes populated by :func:`_capture_dependencies` when the SAME normalized
-# dependency name is observed at DIFFERENT versions. First observation wins;
-# the conflict is recorded here rather than silently overwriting.
-_dependency_notes: list[str] = []
 
 
 def redact_token_patterns(value: str) -> str:
@@ -100,16 +89,21 @@ def _capture_memory() -> MemoryInfo:
     """Capture host physical memory. Uses no process-specific rlimit values.
 
     On platforms without a reliable stdlib mechanism, degrades to unavailable
-    rather than reporting a misleading process address-space limit.
+    rather than reporting a misleading process address-space limit. ANY failure
+    of the optional psutil probe (import error, runtime error, permission
+    error, etc.) degrades to ``unavailable`` — capture never crashes on memory.
     """
     total: int | None = None
     try:
-        # psutil is not a dependency; degrade gracefully if absent.
+        # psutil is not a dependency; degrade gracefully on any failure.
         import psutil  # type: ignore[import-untyped]
 
         total = psutil.virtual_memory().total
-    except ImportError:
-        pass
+    except Exception:
+        # Broad on purpose: any psutil failure (ImportError, RuntimeError,
+        # PermissionError, platform NotImplementedError, ...) degrades to
+        # unavailable rather than aborting software capture.
+        total = None
     return MemoryInfo(
         status="available" if total else "unavailable",
         total_bytes=total,
@@ -126,17 +120,19 @@ def _capture_platform() -> PlatformInfo:
     )
 
 
-def _capture_dependencies() -> tuple[DependencyObservation, ...]:
+def _capture_dependencies() -> tuple[tuple[DependencyObservation, ...], tuple[str, ...]]:
     """Installed distributions as sorted, deduplicated typed observations.
 
     Names are PEP 503 normalized. When the SAME normalized name appears with
     DIFFERENT versions, the FIRST observation wins (no silent last-write-wins)
-    and a note is recorded via the module-level :data:`_dependency_notes`.
+    and the conflict is recorded as a typed string returned alongside the
+    observations (stored on ``SoftwareEnvironment.dependency_conflicts``).
+    Returns ``(observations, conflicts_sorted)``.
     """
     path_like = re.compile(r"(file://|/Users/|/home/|[A-Za-z]:\\\\)")
     first_version: dict[str, str] = {}
     order: list[str] = []
-    conflicts: list[str] = []
+    conflicts: set[str] = set()
     for dist in metadata.distributions():
         raw_name = (dist.metadata["Name"] or "").strip()
         if not raw_name:
@@ -149,20 +145,18 @@ def _capture_dependencies() -> tuple[DependencyObservation, ...]:
         if normalized in first_version:
             if version != first_version[normalized] and version:
                 # Same normalized name, different version: keep the first
-                # (do NOT silently last-write-wins) and note the conflict.
-                conflicts.append(
+                # (do NOT silently last-write-wins) and record the conflict.
+                conflicts.add(
                     f"dependency_version_conflict:{normalized}:"
                     f"{first_version[normalized]}!={version}"
                 )
             continue
         first_version[normalized] = version
         order.append(normalized)
-    _dependency_notes.clear()
-    _dependency_notes.extend(conflicts)
     observations = tuple(
         DependencyObservation(name=name, version=first_version[name]) for name in sorted(order)
     )
-    return observations
+    return observations, tuple(sorted(conflicts))
 
 
 def _capture_lockfile(repo_root: Path | None) -> LockfileDigest:
@@ -180,9 +174,11 @@ def _capture_lockfile(repo_root: Path | None) -> LockfileDigest:
 
 def capture_software_environment(*, repo_root: Path | None = None) -> SoftwareEnvironment:
     """Capture the sanitized software environment as a typed frozen model."""
+    dependencies, conflicts = _capture_dependencies()
     return SoftwareEnvironment(
         python=_capture_python(),
         platform=_capture_platform(),
-        dependencies=_capture_dependencies(),
+        dependencies=dependencies,
+        dependency_conflicts=conflicts,
         lockfile=_capture_lockfile(repo_root),
     )

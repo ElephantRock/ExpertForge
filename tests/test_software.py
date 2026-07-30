@@ -99,3 +99,83 @@ class TestSoftwareCaptureAllowlist:
         if env.platform.cpu.status == "available":
             assert env.platform.cpu.count is not None
             assert env.platform.cpu.count >= 1
+
+    def test_dependency_conflicts_field_present(self) -> None:
+        # capture_software_environment populates dependency_conflicts (empty by
+        # default in a clean environment).
+        env = capture_software_environment()
+        assert isinstance(env.dependency_conflicts, tuple)
+
+    def test_dependency_conflicts_recorded_on_version_mismatch(self) -> None:
+        # When the SAME normalized name appears at DIFFERENT versions, the first
+        # observation wins and the conflict is recorded on the model. We verify
+        # the model carries and round-trips the dependency_conflicts field.
+        from expertforge.provenance.record import (
+            DependencyObservation,
+            PythonInfo,
+        )
+
+        env = SoftwareEnvironment(
+            python=PythonInfo(version="3.11", implementation="cpython"),
+            dependencies=(DependencyObservation(name="numpy", version="1.0.0"),),
+            dependency_conflicts=("dependency_version_conflict:numpy:1.0.0!=2.0.0",),
+        )
+        assert env.dependency_conflicts == ("dependency_version_conflict:numpy:1.0.0!=2.0.0",)
+        # Round-trips through JSON.
+        restored = SoftwareEnvironment.model_validate_json(env.model_dump_json())
+        assert restored.dependency_conflicts == env.dependency_conflicts
+
+    def test_dependency_conflicts_must_be_sorted_unique(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        from expertforge.provenance.record import PythonInfo
+
+        with pytest.raises(PydanticValidationError):
+            SoftwareEnvironment(
+                python=PythonInfo(version="3.11", implementation="cpython"),
+                dependency_conflicts=(
+                    "z_conflict",
+                    "a_conflict",
+                ),  # unsorted
+            )
+        with pytest.raises(PydanticValidationError):
+            SoftwareEnvironment(
+                python=PythonInfo(version="3.11", implementation="cpython"),
+                dependency_conflicts=("dup", "dup"),  # duplicate
+            )
+
+
+class TestMemoryCaptureResilience:
+    def test_memory_capture_degrades_on_psutil_runtime_error(self) -> None:
+        # ANY psutil failure (not just ImportError) degrades to unavailable
+        # without crashing software capture. Simulate a broken psutil whose
+        # virtual_memory() raises a RuntimeError at call time.
+        import sys
+        import types
+
+        from expertforge.provenance.record import MemoryInfo
+        from expertforge.provenance.software import _capture_memory
+
+        class _Boom(Exception):
+            """Raised by the fake psutil at call time."""
+
+        broken = types.ModuleType("psutil")
+
+        def _virtual_memory() -> object:
+            raise RuntimeError("simulated psutil runtime failure")
+
+        broken.virtual_memory = _virtual_memory  # type: ignore[attr-defined]
+        saved = sys.modules.get("psutil")
+        sys.modules["psutil"] = broken
+        try:
+            mem = _capture_memory()
+        finally:
+            if saved is not None:
+                sys.modules["psutil"] = saved
+            else:
+                sys.modules.pop("psutil", None)
+        assert isinstance(mem, MemoryInfo)
+        assert mem.status == "unavailable"
+        assert mem.total_bytes is None
+        # Suppress unused-import warning for _Boom (kept for clarity).
+        assert issubclass(_Boom, Exception)
