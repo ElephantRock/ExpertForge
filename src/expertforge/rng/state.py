@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -15,11 +15,15 @@ from expertforge.rng.derivation import SEED_DERIVATION_VERSION, SeedContext
 
 __all__ = [
     "RNG_STATE_SCHEMA_VERSION",
+    "DeterminismMode",
     "FrameworkRngState",
     "NumpyGeneratorState",
     "NumpyLegacyState",
     "PythonRandomState",
     "RngStateBundle",
+    "RngWarningCode",
+    "UnsupportedDeterminismPolicy",
+    "framework_state_sort_key",
 ]
 
 RNG_STATE_SCHEMA_VERSION = 1
@@ -82,6 +86,8 @@ class NumpyLegacyState(_FrozenModel):
             raise ValueError("NumPy legacy state keys must be unsigned 32-bit integers")
         if not math.isfinite(self.cached_gaussian):
             raise ValueError("NumPy legacy cached_gaussian must be finite")
+        if self.has_gauss == 0 and self.cached_gaussian != 0.0:
+            raise ValueError("NumPy legacy state without a Gaussian cache must store 0.0")
         return self
 
 
@@ -93,6 +99,14 @@ class NumpyGeneratorState(_FrozenModel):
     increment: int = Field(ge=0, lt=2**128)
     has_uint32: Literal[0, 1]
     uinteger: int = Field(ge=0, le=2**32 - 1)
+
+    @model_validator(mode="after")
+    def _validate_state(self) -> NumpyGeneratorState:
+        if self.increment % 2 != 1:
+            raise ValueError("NumPy PCG64 increment must be odd")
+        if self.has_uint32 == 0 and self.uinteger != 0:
+            raise ValueError("NumPy PCG64 state without a cached uint32 must store 0")
+        return self
 
 
 class FrameworkRngState(_FrozenModel):
@@ -116,6 +130,10 @@ class FrameworkRngState(_FrozenModel):
     def _validate_device(cls, value: str) -> str:
         if not _DEVICE_PATTERN.fullmatch(value):
             raise ValueError("device must be 'cpu' or a stable '<provider>:<ordinal>' identifier")
+        if value != "cpu":
+            _, ordinal_text = value.rsplit(":", 1)
+            if ordinal_text != str(int(ordinal_text)):
+                raise ValueError("device ordinal must use canonical base-10 encoding")
         return value
 
     @field_validator("payload_sha256")
@@ -131,6 +149,8 @@ class FrameworkRngState(_FrozenModel):
             decoded = base64.b64decode(self.payload.encode("ascii"), validate=True)
         except (UnicodeEncodeError, ValueError) as exc:
             raise ValueError("payload must be canonical ASCII base64") from exc
+        if not decoded:
+            raise ValueError("framework RNG payload must not be empty")
         if base64.b64encode(decoded).decode("ascii") != self.payload:
             raise ValueError("payload must use canonical padded base64 encoding")
         if hashlib.sha256(decoded).hexdigest() != self.payload_sha256:
@@ -148,6 +168,19 @@ class FrameworkRngState(_FrozenModel):
 
     def payload_bytes(self) -> bytes:
         return base64.b64decode(self.payload.encode("ascii"), validate=True)
+
+
+def framework_state_sort_key(state: FrameworkRngState) -> tuple[str, int, str, int]:
+    """Return the one canonical provider/device ordering key.
+
+    Provider namespaces sort first. Within a provider, CPU precedes accelerator
+    devices, and accelerator ordinals sort numerically rather than lexically.
+    """
+
+    if state.device == "cpu":
+        return (state.provider, 0, "", 0)
+    device_kind, ordinal_text = state.device.rsplit(":", 1)
+    return (state.provider, 1, device_kind, int(ordinal_text))
 
 
 class RngStateBundle(_FrozenModel):
@@ -187,8 +220,9 @@ class RngStateBundle(_FrozenModel):
     @model_validator(mode="after")
     def _validate_canonical_order(self) -> RngStateBundle:
         state_keys = tuple((state.provider, state.device) for state in self.framework_states)
-        if state_keys != tuple(sorted(state_keys)):
-            raise ValueError("framework_states must be sorted by provider and device")
+        expected_states = tuple(sorted(self.framework_states, key=framework_state_sort_key))
+        if self.framework_states != expected_states:
+            raise ValueError("framework_states must use canonical provider/device ordinal order")
         if len(set(state_keys)) != len(state_keys):
             raise ValueError("framework_states must not contain duplicate provider/device entries")
         if self.warning_codes != tuple(sorted(self.warning_codes)):
@@ -205,6 +239,12 @@ class RngStateBundle(_FrozenModel):
             and "performance_mode_enabled" in self.warning_codes
         ):
             raise ValueError("reproducible mode cannot record performance_mode_enabled")
+        framework_warning_codes = {
+            "framework_determinism_unavailable",
+            "accelerator_unavailable",
+        }
+        if not self.framework_states and framework_warning_codes.intersection(self.warning_codes):
+            raise ValueError("framework warning codes require persisted framework states")
         return self
 
     def to_deterministic_json(self) -> bytes:
@@ -230,15 +270,26 @@ class RngStateBundle(_FrozenModel):
                 f"Unsupported derivation_version {data.get('derivation_version')!r}; "
                 f"expected {SEED_DERIVATION_VERSION}."
             )
-        return cls.model_validate(data, strict=False)
+        payload = json.dumps(
+            data,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        return cls.model_validate_json(payload, strict=True)
 
     @classmethod
     def from_json_bytes(cls, payload: bytes) -> RngStateBundle:
         try:
             text = payload.decode("utf-8")
-            data = json.loads(text)
+            data = json.loads(text, parse_constant=_reject_json_constant)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("RNG state payload must be valid UTF-8 JSON") from exc
         if not isinstance(data, dict):
             raise ValueError("RNG state JSON root must be an object")
         return cls.from_mapping(data)
+
+
+def _reject_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
