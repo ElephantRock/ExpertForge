@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -382,7 +382,7 @@ class ProvenanceRecord(BaseModel):
             return record.model_copy(
                 update={
                     "completeness": CompletenessInfo(
-                        status=derived_status,
+                        status=cast("CompletenessStatus", derived_status),
                         warnings=derived_warnings,
                     )
                 }
