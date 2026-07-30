@@ -21,6 +21,7 @@ from expertforge.identity.fingerprint import (
 )
 from expertforge.identity.ids import validate_attempt_id, validate_run_id
 from expertforge.identity.record import AttemptIdentityRecord
+from expertforge.provenance.source_snapshot import SourceSnapshot
 
 __all__ = [
     "PROVENANCE_SCHEMA_VERSION",
@@ -33,8 +34,6 @@ __all__ = [
     "PlatformInfo",
     "ProvenanceRecord",
     "SoftwareEnvironment",
-    "SourceState",
-    "SourceStateSummary",
     "TopologyInfo",
 ]
 
@@ -59,20 +58,6 @@ class CompletenessInfo(BaseModel):
     status: str = Field(default="complete")  # complete | partial | error
     warnings: tuple[str, ...] = Field(default_factory=tuple)
     limitations: tuple[str, ...] = Field(default_factory=tuple)
-
-
-class SourceStateSummary(BaseModel):
-    """The provenance-only source-state facts (not behavioral identity)."""
-
-    model_config = _section_config()
-
-    commit_sha: str = Field(..., min_length=1)
-    branch: str = Field(default="HEAD")
-    remote_url: str | None = Field(default=None)  # sanitized
-    is_clean: bool
-    is_canonical: bool
-    tree_digest: str = Field(..., min_length=1)
-    input_digest: str = Field(..., min_length=1)  # == source.snapshot digest
 
 
 class CPUInfo(BaseModel):
@@ -153,13 +138,6 @@ class TopologyInfo(BaseModel):
 
 
 # Alias for the source section — wraps the summary with evidence context.
-class SourceState(BaseModel):
-    model_config = _section_config()
-
-    summary: SourceStateSummary
-    completeness: CompletenessInfo = Field(default_factory=CompletenessInfo)
-
-
 # ---------------------------------------------------------------------------
 # Top-level record
 # ---------------------------------------------------------------------------
@@ -182,10 +160,10 @@ class ProvenanceRecord(BaseModel):
     specification_fingerprint: SpecificationFingerprintRecord
     immutable_inputs: tuple[ImmutableInput, ...] = Field(default_factory=tuple)
     start_time_utc: datetime
-    source: SourceState | None = Field(default=None)
-    software: SoftwareEnvironment | None = Field(default=None)
-    hardware: AcceleratorInfo | None = Field(default=None)
-    topology: TopologyInfo | None = Field(default=None)
+    source: SourceSnapshot
+    software: SoftwareEnvironment
+    hardware: AcceleratorInfo
+    topology: TopologyInfo
     completeness: CompletenessInfo = Field(default_factory=CompletenessInfo)
 
     @field_validator("provenance_schema_version")
@@ -229,24 +207,23 @@ class ProvenanceRecord(BaseModel):
                 "immutable_inputs must match the specification fingerprint's "
                 "immutable_inputs; do not supply a duplicate list."
             )
-        # If source state is present, the source.snapshot input must exist and
-        # its digest must match the captured source input_digest.
-        if self.source is not None:
-            snap_input = next(
-                (ii for ii in self.immutable_inputs if ii.name == SOURCE_SNAPSHOT_INPUT_NAME),
-                None,
+        # source.snapshot input must exist and match the captured snapshot's
+        # input_digest. Source is mandatory, so this always runs.
+        snap_input = next(
+            (ii for ii in self.immutable_inputs if ii.name == SOURCE_SNAPSHOT_INPUT_NAME),
+            None,
+        )
+        if snap_input is None:
+            raise ValueError(
+                "No 'source.snapshot' immutable input exists in the specification "
+                "fingerprint; every provenance record requires source binding."
             )
-            if snap_input is None:
-                raise ValueError(
-                    "source state is present but no 'source.snapshot' immutable "
-                    "input exists in the specification fingerprint."
-                )
-            if snap_input.digest != self.source.summary.input_digest:
-                raise ValueError(
-                    f"source.snapshot input digest {snap_input.digest!r} does not "
-                    f"match captured source input_digest "
-                    f"{self.source.summary.input_digest!r}."
-                )
+        if snap_input.digest != self.source.input_digest:
+            raise ValueError(
+                f"source.snapshot input digest {snap_input.digest!r} does not "
+                f"match captured source input_digest "
+                f"{self.source.input_digest!r}."
+            )
         return self
 
     @classmethod
@@ -254,13 +231,18 @@ class ProvenanceRecord(BaseModel):
         cls,
         identity: AttemptIdentityRecord,
         *,
-        source: SourceState | None = None,
+        source: SourceSnapshot,
         software: SoftwareEnvironment | None = None,
         hardware: AcceleratorInfo | None = None,
         topology: TopologyInfo | None = None,
         completeness: CompletenessInfo | None = None,
     ) -> ProvenanceRecord:
-        """Build a provenance record bound to ``identity``."""
+        """Build a provenance record bound to ``identity``.
+
+        ``source`` (the complete typed SourceSnapshot) is mandatory.
+        Software/hardware/topology default to typed unavailable values when
+        not supplied.
+        """
         return cls(
             run_id=identity.run_id,
             attempt_id=identity.attempt_id,
@@ -268,9 +250,16 @@ class ProvenanceRecord(BaseModel):
             immutable_inputs=identity.specification_fingerprint.immutable_inputs,
             start_time_utc=identity.created_at_utc,
             source=source,
-            software=software,
-            hardware=hardware,
-            topology=topology,
+            software=software
+            or SoftwareEnvironment(
+                platform=PlatformInfo(
+                    cpu=CPUInfo(status="unavailable"),
+                    memory=MemoryInfo(status="unavailable"),
+                ),
+                lockfile=LockfileDigest(status="unavailable"),
+            ),
+            hardware=hardware or AcceleratorInfo(status="unavailable"),
+            topology=topology or TopologyInfo(status="not_applicable"),
             completeness=completeness or CompletenessInfo(),
         )
 

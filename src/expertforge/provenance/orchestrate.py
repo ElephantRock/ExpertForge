@@ -23,6 +23,7 @@ from expertforge.identity.fingerprint import (
     ImmutableInput,
 )
 from expertforge.identity.ids import ClockProvider, EntropyProvider, ExistsPredicate
+from expertforge.identity.lineage import ResumeLineage
 from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.hardware import capture_accelerator, capture_topology
 from expertforge.provenance.record import (
@@ -30,15 +31,10 @@ from expertforge.provenance.record import (
     CompletenessInfo,
     ProvenanceRecord,
     SoftwareEnvironment,
-    SourceState,
-    SourceStateSummary,
     TopologyInfo,
 )
 from expertforge.provenance.sidecar import ProvenanceSidecarError, write_provenance_sidecar
-from expertforge.provenance.software import (
-    capture_software_environment,
-    sanitize_repository_url,
-)
+from expertforge.provenance.software import capture_software_environment
 from expertforge.provenance.source_snapshot import (
     DirtySourceError,
     SourceUnavailableError,
@@ -59,6 +55,10 @@ def prepare_run(
     config_envelope: ResolutionEnvelope,
     repo: Path,
     allow_dirty: bool = False,
+    mode: AllocationMode = AllocationMode.INDEPENDENT,
+    lineage: ResumeLineage | None = None,
+    parent_specification_fingerprint: str | None = None,
+    retained_run_id: str | None = None,
     clock: ClockProvider | None = None,
     entropy: EntropyProvider | None = None,
     exists: ExistsPredicate | None = None,
@@ -89,12 +89,15 @@ def prepare_run(
     if extra_immutable_inputs:
         immutable_inputs.extend(extra_immutable_inputs)
 
-    # 3. Emit identity containing the source input (INDEPENDENT mode by default).
+    # 3. Emit identity containing the source input.
     try:
         identity, _identity_path = emit_attempt_identity(
             artifact_root=artifact_root,
             config_envelope=config_envelope,
-            mode=AllocationMode.INDEPENDENT,
+            mode=mode,
+            lineage=lineage,
+            parent_specification_fingerprint=parent_specification_fingerprint,
+            retained_run_id=retained_run_id,
             immutable_inputs=immutable_inputs,
             clock=clock,
             entropy=entropy,
@@ -108,30 +111,24 @@ def prepare_run(
     resolved_hardware = hardware or capture_accelerator()
     resolved_topology = topology or capture_topology()
 
-    # Build the source state from the snapshot.
-    sanitized_url = sanitize_repository_url(snap.remote_url) if snap.remote_url else None
-    source_state = SourceState(
-        summary=SourceStateSummary(
-            commit_sha=snap.commit_sha,
-            branch=snap.branch,
-            remote_url=sanitized_url,
-            is_clean=snap.is_clean,
-            is_canonical=snap.is_canonical,
-            tree_digest=snap.tree_digest,
-            input_digest=snap.input_digest,
-        ),
-        completeness=CompletenessInfo(
-            status="complete",
-            warnings=tuple() if snap.is_clean else ("non_canonical_dirty_source",),
-        ),
-    )
+    # Derive honest top-level completeness from the source snapshot.
+    source_warnings: list[str] = []
+    if not snap.is_clean:
+        source_warnings.append("non_canonical_dirty_source")
+    if snap.evidence is not None:
+        source_warnings.extend(snap.evidence.warnings)
+    source_warnings.extend(w.code for w in snap.remote_warnings)
 
     provenance = ProvenanceRecord.from_identity(
         identity,
-        source=source_state,
+        source=snap,
         software=resolved_software,
         hardware=resolved_hardware,
         topology=resolved_topology,
+        completeness=CompletenessInfo(
+            status="partial" if source_warnings else "complete",
+            warnings=tuple(source_warnings),
+        ),
     )
 
     # 5. Write run-provenance.json before training can begin.
