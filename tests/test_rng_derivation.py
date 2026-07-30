@@ -108,7 +108,7 @@ def test_derived_seed_rejects_tampering(field: str) -> None:
     else:
         data[field] = int(data[field]) ^ 1
 
-    with pytest.raises(ValidationError, match="does not match"):
+    with pytest.raises(ValidationError, match=r"do(?:es)? not match"):
         DerivedSeed.model_validate(data, strict=False)
 
 
