@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 
@@ -182,7 +182,7 @@ class RngManager:
 
         initialization = self.initialization
         python_state = random.getstate()
-        numpy_legacy = np.random.get_state()
+        numpy_legacy = np.random.get_state(legacy=True)
         generator_state = self.generator.bit_generator.state
 
         framework_states = tuple(
@@ -317,39 +317,39 @@ class RngManager:
         )
 
     @staticmethod
-    def _numpy_legacy_from_runtime(state: tuple[object, ...]) -> NumpyLegacyState:
-        if len(state) != 5:
+    def _numpy_legacy_from_runtime(state: object) -> NumpyLegacyState:
+        if not isinstance(state, tuple) or len(state) != 5:
             raise RngManagerError("numpy_state_invalid")
         algorithm, keys, position, has_gauss, cached_gaussian = state
         if algorithm != "MT19937" or has_gauss not in {0, 1}:
             raise RngManagerError("numpy_state_invalid")
         try:
             key_tuple = tuple(int(value) for value in np.asarray(keys, dtype=np.uint32).tolist())
-            normalized_position = int(position)
-            normalized_cached = float(cached_gaussian)
+            normalized_position = int(cast(Any, position))
+            normalized_cached = float(cast(Any, cached_gaussian))
         except (TypeError, ValueError, OverflowError) as exc:
             raise RngManagerError("numpy_state_invalid") from exc
         return NumpyLegacyState(
             algorithm="MT19937",
             keys=key_tuple,
             position=normalized_position,
-            has_gauss=cast(Literal[0, 1], has_gauss),
+            has_gauss=has_gauss,
             cached_gaussian=normalized_cached,
         )
 
     @staticmethod
-    def _numpy_generator_from_runtime(state: dict[str, object]) -> NumpyGeneratorState:
+    def _numpy_generator_from_runtime(state: Mapping[str, Any]) -> NumpyGeneratorState:
         try:
             bit_generator = state["bit_generator"]
             nested = state["state"]
             has_uint32 = state["has_uint32"]
-            if bit_generator != "PCG64" or not isinstance(nested, dict) or has_uint32 not in {0, 1}:
+            if bit_generator != "PCG64" or not isinstance(nested, Mapping) or has_uint32 not in {0, 1}:
                 raise TypeError
             return NumpyGeneratorState(
                 bit_generator="PCG64",
                 state=int(nested["state"]),
                 increment=int(nested["inc"]),
-                has_uint32=cast(Literal[0, 1], has_uint32),
+                has_uint32=has_uint32,
                 uinteger=int(state["uinteger"]),
             )
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
