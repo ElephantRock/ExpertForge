@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -55,13 +56,12 @@ def test_seed_derivation_canonical_envelope() -> None:
 
 @pytest.mark.parametrize("field", ["worker", "rank", "device", "stream"])
 def test_each_coordinate_changes_stream(field: str) -> None:
-    base = {"component": "sampling", "worker": 0, "rank": 0, "device": 0, "stream": 0}
-    changed = dict(base)
-    changed[field] = 1
+    base_context = SeedContext(component="sampling")
+    changed_data = base_context.model_dump()
+    changed_data[field] = 1
+    changed_context = SeedContext.model_validate(changed_data)
 
-    assert (
-        derive_seed(7, SeedContext(**base)).digest != derive_seed(7, SeedContext(**changed)).digest
-    )
+    assert derive_seed(7, base_context).digest != derive_seed(7, changed_context).digest
 
 
 def test_component_and_root_seed_change_stream() -> None:
@@ -140,6 +140,6 @@ def test_root_seed_rejects_bool_and_coercion() -> None:
     context = SeedContext(component="run")
 
     with pytest.raises(TypeError, match="root_seed"):
-        derive_seed(True, context)  # type: ignore[arg-type]
+        derive_seed(cast(int, True), context)
     with pytest.raises(TypeError, match="root_seed"):
-        derive_seed("7", context)  # type: ignore[arg-type]
+        derive_seed(cast(int, "7"), context)
