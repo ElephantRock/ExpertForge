@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Sequence
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -15,7 +16,12 @@ from expertforge.rng.adapters import (
 )
 from expertforge.rng.derivation import DerivedSeed, SeedContext
 from expertforge.rng.manager import RngManager, RngManagerError
-from expertforge.rng.state import FrameworkRngState
+from expertforge.rng.state import (
+    DeterminismMode,
+    FrameworkRngState,
+    RngWarningCode,
+    UnsupportedDeterminismPolicy,
+)
 
 
 class FakeFrameworkAdapter:
@@ -24,10 +30,14 @@ class FakeFrameworkAdapter:
     def __init__(self, *, deterministic_supported: bool = True, accelerator: bool = False) -> None:
         self.deterministic_supported = deterministic_supported
         self.accelerator = accelerator
-        self.mode: str | None = None
+        self.mode: DeterminismMode | None = None
         self._state = 0
 
-    def configure(self, mode: str, unsupported_policy: str) -> tuple[str, ...]:
+    def configure(
+        self,
+        mode: DeterminismMode,
+        unsupported_policy: UnsupportedDeterminismPolicy,
+    ) -> tuple[RngWarningCode, ...]:
         self.mode = mode
         if mode == "reproducible" and not self.deterministic_supported:
             if unsupported_policy == "error":
@@ -35,7 +45,7 @@ class FakeFrameworkAdapter:
             return ("framework_determinism_unavailable",)
         return ()
 
-    def seed(self, seed: DerivedSeed) -> tuple[str, ...]:
+    def seed(self, seed: DerivedSeed) -> tuple[RngWarningCode, ...]:
         self._state = seed.seed_u64
         return () if self.accelerator else ("accelerator_unavailable",)
 
@@ -155,14 +165,14 @@ def test_restore_rejects_contract_mismatch_before_mutating_globals() -> None:
     bundle = source.capture_state()
 
     random_before = random.getstate()
-    numpy_before = np.random.get_state()
+    numpy_before = cast(tuple[Any, ...], np.random.get_state(legacy=True))
     target = RngManager(root_seed=8, context=SeedContext(component="run"))
 
     with pytest.raises(RngManagerError, match="state_contract_mismatch"):
         target.restore_state(bundle)
 
     assert random.getstate() == random_before
-    numpy_after = np.random.get_state()
+    numpy_after = cast(tuple[Any, ...], np.random.get_state(legacy=True))
     assert numpy_after[0] == numpy_before[0]
     assert np.array_equal(numpy_after[1], numpy_before[1])
     assert numpy_after[2:] == numpy_before[2:]
@@ -272,4 +282,4 @@ def test_manager_from_resolved_config_uses_root_policy() -> None:
 
 def test_root_seed_rejects_bool() -> None:
     with pytest.raises(TypeError, match="root_seed"):
-        RngManager(root_seed=True, context=SeedContext(component="run"))  # type: ignore[arg-type]
+        RngManager(root_seed=True, context=SeedContext(component="run"))
