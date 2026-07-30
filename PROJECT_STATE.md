@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #7 provenance/environment completed on `main`.
+Last updated: Milestone 0 in progress; #7 complete and #13 Phase A CI foundation active.
 
 ## Current milestone
 
@@ -29,7 +29,7 @@ order (see #3 for the full graph):
 - **Persistence & evidence** — #10 artifacts · #11 checkpoints · #12 manifests
 - **Verification & integration** — #13 test/CI harness · #14 smoke-and-recovery gate
 
-#13 may begin early; #14 is strictly last.
+#13 integrates tests throughout Milestone 0; #14 is strictly last.
 
 ## Active baseline
 
@@ -45,7 +45,11 @@ order (see #3 for the full graph):
   depends only on #4/#5.
 - **#9 — M0.6 structured logging and metrics** — available next now that #7 is
   complete; #10 follows #9.
-- **#13 — M0.10 test/CI harness** — may proceed early in parallel.
+- **#13 — M0.10 test/CI harness — in progress.** Phase A merged via PR #21,
+  squash commit `aaa31187d5d6b63671ee96df14a85a75b125f068`: permanent read-only CI,
+  strict fast/integration/smoke/accelerator tiers, pinned toolchain, and
+  repository-native policy checks are active. #13 remains open until the full
+  Milestone 0 component and integration suite is present.
 - **#10 — artifact management** follows #9; **#11 — checkpoints** follows #8;
   **#12 — experiment manifests** follows #5/#6/#7/#9/#10/#11; **#14 — smoke and
   recovery gate** remains last.
@@ -62,7 +66,10 @@ order (see #3 for the full graph):
 
 ## Known blockers
 
-- #8, #9, and #13 have no remaining dependency blocker and may proceed.
+- #8 and #9 have no remaining dependency blocker and may proceed. Their PRs must
+  extend the permanent #13 fast/integration tiers with component coverage.
+- #13 remains open as a cross-cutting integration responsibility, not a blocker
+  to beginning #8 or #9.
 - #10 waits for #9; #11 waits for #8; #12 waits for #9/#10/#11; #14 waits for
   the complete Milestone 0 substrate.
 
@@ -75,13 +82,15 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#8 (seed/RNG)** and **#9 (logging/metrics)**; **#13 (test/CI harness)**
-   may proceed in parallel.
-2. After #9, implement **#10 (artifacts)**; after #8, implement **#11
+1. Begin **#8 (seed/RNG)** and **#9 (logging/metrics)**. Each implementation PR
+   must add its unit and portable integration coverage to the permanent CI tiers.
+2. Continue **#13** incrementally as #8–#12 land; do not close it until the full
+   Milestone 0 suite, schema checks, and exact commands satisfy its issue contract.
+3. After #9, implement **#10 (artifacts)**; after #8, implement **#11
    (checkpoints)**.
-3. Implement **#12 (manifests)** after #9/#10/#11, then complete **#14
+4. Implement **#12 (manifests)** after #9/#10/#11, then complete **#14
    (smoke-and-recovery gate)** last.
-4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
+5. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
 ## Relationship to ExpertOS
