@@ -20,7 +20,7 @@ from typing import Final
 import yaml
 
 _REPOSITORY_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
-_SCAN_SCOPES: Final[tuple[str, ...]] = (
+_BOUNDARY_SCOPES: Final[tuple[str, ...]] = (
     ".github",
     "configs",
     "schemas",
@@ -95,11 +95,14 @@ def _git_environment() -> dict[str, str]:
     return env
 
 
-def _tracked_files(root: Path, scopes: Sequence[str] = _SCAN_SCOPES) -> tuple[Path, ...]:
-    """Return sorted tracked files under ``scopes`` without following symlinks."""
+def _tracked_files(root: Path, scopes: Sequence[str] | None = None) -> tuple[Path, ...]:
+    """Return sorted tracked files, optionally restricted to repository scopes."""
 
+    command = ["git", "ls-files", "-z"]
+    if scopes is not None:
+        command.extend(("--", *scopes))
     result = subprocess.run(
-        ["git", "ls-files", "-z", "--", *scopes],
+        command,
         cwd=root,
         env=_git_environment(),
         capture_output=True,
@@ -115,7 +118,7 @@ def _tracked_files(root: Path, scopes: Sequence[str] = _SCAN_SCOPES) -> tuple[Pa
     return tuple(root / name for name in sorted(name for name in names if name))
 
 
-def _read_text_without_following(path: Path) -> str | None:
+def _read_text_without_following(path: Path, *, relative_path: str) -> str | None:
     """Read tracked text safely; return ``None`` for binary content."""
 
     try:
@@ -123,13 +126,13 @@ def _read_text_without_following(path: Path) -> str | None:
             return os.readlink(path)
         data = path.read_bytes()
     except OSError as exc:
-        raise RepositoryValidationError(f"tracked_file_unreadable:{path.as_posix()}") from exc
+        raise RepositoryValidationError(f"tracked_file_unreadable:{relative_path}") from exc
     if b"\0" in data:
         return None
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise RepositoryValidationError(f"tracked_text_invalid_utf8:{path.as_posix()}") from exc
+        raise RepositoryValidationError(f"tracked_text_invalid_utf8:{relative_path}") from exc
 
 
 def _find_patterns(
@@ -139,14 +142,14 @@ def _find_patterns(
 
 
 def find_secret_findings(root: Path) -> tuple[Finding, ...]:
-    """Scan tracked implementation/configuration content for high-confidence secrets."""
+    """Scan every tracked text file for high-confidence secret material."""
 
     findings: list[Finding] = []
     for path in _tracked_files(root):
-        text = _read_text_without_following(path)
+        relative = path.relative_to(root).as_posix()
+        text = _read_text_without_following(path, relative_path=relative)
         if text is None:
             continue
-        relative = path.relative_to(root).as_posix()
         findings.extend(
             _find_patterns(relative_path=relative, text=text, patterns=_SECRET_PATTERNS)
         )
@@ -157,11 +160,11 @@ def find_expertos_boundary_findings(root: Path) -> tuple[Finding, ...]:
     """Reject direct ExpertOS source/runtime coupling in executable repository content."""
 
     findings: list[Finding] = []
-    for path in _tracked_files(root):
+    for path in _tracked_files(root, _BOUNDARY_SCOPES):
         relative = path.relative_to(root).as_posix()
         if any(part.casefold() == "expertos" for part in Path(relative).parts):
             findings.append(Finding(relative, "expertos-path-component"))
-        text = _read_text_without_following(path)
+        text = _read_text_without_following(path, relative_path=relative)
         if text is None:
             continue
         findings.extend(
