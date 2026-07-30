@@ -154,9 +154,7 @@ class TorchRngAdapter:
                 else None
             )
             cudnn_benchmark = (
-                bool(cudnn.benchmark)
-                if cudnn is not None and hasattr(cudnn, "benchmark")
-                else None
+                bool(cudnn.benchmark) if cudnn is not None and hasattr(cudnn, "benchmark") else None
             )
             return _TorchConfigurationSnapshot(
                 deterministic_algorithms=enabled,

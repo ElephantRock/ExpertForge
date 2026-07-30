@@ -261,12 +261,9 @@ class RngStateBundle(_FrozenModel):
         if not self.framework_states and framework_warning_codes.intersection(self.warning_codes):
             raise ValueError("framework warning codes require persisted framework states")
         if "framework_determinism_unavailable" in self.warning_codes and (
-            self.determinism_mode != "reproducible"
-            or self.unsupported_determinism != "warn"
+            self.determinism_mode != "reproducible" or self.unsupported_determinism != "warn"
         ):
-            raise ValueError(
-                "framework_determinism_unavailable requires reproducible/warn policy"
-            )
+            raise ValueError("framework_determinism_unavailable requires reproducible/warn policy")
         if "accelerator_unavailable" in self.warning_codes:
             devices_by_provider: dict[str, set[str]] = {}
             for state in self.framework_states:
@@ -276,9 +273,7 @@ class RngStateBundle(_FrozenModel):
                 for devices in devices_by_provider.values()
             )
             if not cpu_only_provider_exists:
-                raise ValueError(
-                    "accelerator_unavailable requires at least one CPU-only provider"
-                )
+                raise ValueError("accelerator_unavailable requires at least one CPU-only provider")
         return self
 
     def to_deterministic_json(self) -> bytes:
