@@ -134,9 +134,7 @@ def _read_text_without_following(path: Path) -> str | None:
 def _find_patterns(
     *, relative_path: str, text: str, patterns: Iterable[tuple[str, re.Pattern[str]]]
 ) -> tuple[Finding, ...]:
-    return tuple(
-        Finding(relative_path, rule) for rule, pattern in patterns if pattern.search(text)
-    )
+    return tuple(Finding(relative_path, rule) for rule, pattern in patterns if pattern.search(text))
 
 
 def find_secret_findings(root: Path) -> tuple[Finding, ...]:
