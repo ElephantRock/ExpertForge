@@ -78,6 +78,13 @@ class NumpyLegacyState(_FrozenModel):
     has_gauss: Literal[0, 1]
     cached_gaussian: float
 
+    @field_validator("has_gauss", mode="before")
+    @classmethod
+    def _reject_boolean_flag(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("has_gauss must be the integer 0 or 1, not a boolean")
+        return value
+
     @model_validator(mode="after")
     def _validate_state(self) -> NumpyLegacyState:
         if len(self.keys) != 624:
@@ -99,6 +106,13 @@ class NumpyGeneratorState(_FrozenModel):
     increment: int = Field(ge=0, lt=2**128)
     has_uint32: Literal[0, 1]
     uinteger: int = Field(ge=0, le=2**32 - 1)
+
+    @field_validator("has_uint32", mode="before")
+    @classmethod
+    def _reject_boolean_flag(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("has_uint32 must be the integer 0 or 1, not a boolean")
+        return value
 
     @model_validator(mode="after")
     def _validate_state(self) -> NumpyGeneratorState:

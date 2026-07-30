@@ -166,6 +166,7 @@ def test_state_bundle_rejects_unknown_versions(field: str) -> None:
         (("root_seed",), "7"),
         (("context", "worker"), "0"),
         (("numpy_generator", "has_uint32"), False),
+        (("numpy_legacy", "has_gauss"), True),
         (("python", "internal_state", 0), "1"),
     ],
 )
