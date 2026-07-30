@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 from enum import StrEnum
+from typing import Literal
 
 from expertforge.provenance.record import (
     AcceleratorInfo,
@@ -34,14 +35,21 @@ class FieldStatus(StrEnum):
     REDACTED = "redacted"
 
 
-def _stable_reason(exc: BaseException) -> str:
+def _stable_reason(
+    exc: BaseException,
+) -> Literal["io_error", "timeout", "decode_error", "duplicate_device_ordinals", "not_found"]:
+    """Map a capture exception to a stable accelerator error-reason code.
+
+    The result MUST be one of the closed Literal domain codes on
+    :class:`AcceleratorInfo.reason`. An unrecognized exception type degrades to
+    ``"io_error"`` (a generic capture-failure code) rather than emitting a
+    free-text code that would be rejected by the Literal-validated field.
+    """
     if isinstance(exc, FileNotFoundError):
         return "not_found"
     if isinstance(exc, subprocess.TimeoutExpired):
         return "timeout"
-    if isinstance(exc, (OSError, subprocess.SubprocessError)):
-        return "io_error"
-    return type(exc).__name__.lower()
+    return "io_error"
 
 
 # Common CUDA runtime distribution names published on PyPI. The first one
@@ -257,7 +265,7 @@ def capture_topology(
         if resolved_local_rank >= resolved_world:
             return TopologyInfo(
                 status=FieldStatus.ERROR.value,
-                reason="local_rank_must_be_less_than_world_size",
+                reason="invalid_local_rank",
             )
 
     # An explicitly-supplied node_count of 0 (or a parsed env NNODES=0) is

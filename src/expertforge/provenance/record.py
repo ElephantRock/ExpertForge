@@ -29,6 +29,7 @@ __all__ = [
     "AcceleratorInfo",
     "CPUInfo",
     "CompletenessInfo",
+    "DependencyConflict",
     "DependencyObservation",
     "DeviceInfo",
     "HardwareAggregate",
@@ -46,10 +47,66 @@ SOURCE_SNAPSHOT_INPUT_NAME = "source.snapshot"
 # 64 lowercase hexadecimal characters (SHA-256). Shared by the cross-field
 # validators so a tampered sidecar cannot smuggle in a malformed digest.
 _DIGEST_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+# PEP 503 canonical normalized project name: lowercase, runs of ``-_.``
+# collapsed to a single ``-``. Used by :class:`DependencyObservation.name`
+# and :class:`DependencyConflict.name` so a tampered sidecar cannot smuggle
+# in a non-normalized name.
+_NORMALIZED_NAME_PATTERN = re.compile(r"^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$", re.IGNORECASE)
+# Stable accelerator error-reason domain.
+_ACCELERATOR_REASON = Literal[
+    "io_error",
+    "timeout",
+    "decode_error",
+    "duplicate_device_ordinals",
+    "not_found",
+]
+# Stable topology error-reason domain.
+_TOPOLOGY_REASON = Literal[
+    "rank_and_world_size_required_together",
+    "partial_topology_env_without_rank_world_size",
+    "rank_must_be_less_than_world_size",
+    "partial_explicit_input_without_rank_world_size",
+    "node_count_must_be_positive",
+    "invalid_local_rank",
+]
+# Stable invalid-topology-env-value warning field vocabulary. Each entry must
+# be ``invalid_topology_env_value:<FIELD>`` where FIELD is one of the allowed
+# topology env var names.
+_TOPOLOGY_WARNING_FIELDS: frozenset[str] = frozenset(
+    {
+        "RANK",
+        "WORLD_SIZE",
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "NODE_RANK",
+        "NNODES",
+    }
+)
+_TOPOLOGY_WARNING_PATTERN = re.compile(
+    r"^invalid_topology_env_value:(" + "|".join(_TOPOLOGY_WARNING_FIELDS) + r")$"
+)
 
 
 def _section_config() -> ConfigDict:
     return ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
+
+
+def _normalize_dependency_name(v: str) -> str:
+    """PEP 503 canonical normalization: lowercase, runs of ``-_.`` → ``-``.
+
+    Rejects the empty string and any name with characters outside the PEP 503
+    allowed set (letters, digits, ``-``, ``_``, ``.``). A tampered sidecar
+    cannot smuggle in a non-normalized or malformed name.
+    """
+    if not v:
+        raise ValueError("dependency name must be non-empty.")
+    if not _NORMALIZED_NAME_PATTERN.fullmatch(v):
+        raise ValueError(
+            f"dependency name {v!r} is not a valid PEP 503 project name "
+            "(allowed: letters, digits, '-', '_', '.', not starting/ending "
+            "with a separator)."
+        )
+    return re.sub(r"[-_.]+", "-", v).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -142,16 +199,29 @@ class LockfileDigest(BaseModel):
     status: ObservationStatus
     algorithm: str | None = Field(default=None)
     digest: str | None = Field(default=None)
-    reason: str | None = Field(default=None)
+    # Stable reason domain: only emitted by the capture path on an error/unavailable
+    # status. ``None`` for available / not_applicable / redacted (a present
+    # lockfile needs no explanation; a not_applicable/redacted status is its own
+    # explanation).
+    reason: Literal["io_error", "not_found"] | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_available_has_digest(self) -> LockfileDigest:
-        """Exhaustive status↔(algorithm, digest) consistency.
+        """Exhaustive status↔(algorithm, digest, reason) consistency.
 
         - ``status="available"``: ``algorithm`` must be exactly ``"sha256"`` and
-          ``digest`` must be a valid 64-lowercase-hex SHA-256.
-        - any other status (``unavailable``/``error``/``not_applicable``/
-          ``redacted``): ``algorithm`` AND ``digest`` must both be ``None``.
+          ``digest`` must be a valid 64-lowercase-hex SHA-256. ``reason`` must
+          be ``None`` (an available lockfile carries no explanation).
+        - ``status="not_applicable"``: ``algorithm``, ``digest``, AND ``reason``
+          must all be ``None`` (a not_applicable status is its own explanation).
+        - ``status="unavailable"``: ``reason`` may be ``None`` (no lockfile
+          found) or ``"not_found"``; ``algorithm`` and ``digest`` must be
+          ``None``.
+        - ``status="error"``: ``reason`` must be a stable error code
+          (``"io_error"`` or ``"not_found"``); ``algorithm`` and ``digest``
+          must be ``None``.
+        - ``status="redacted"``: ``algorithm``, ``digest``, AND ``reason``
+          must all be ``None``.
         """
         if self.status == "available":
             if self.algorithm != "sha256":
@@ -164,11 +234,21 @@ class LockfileDigest(BaseModel):
                     "LockfileDigest status='available' requires a valid 64-lowercase-hex "
                     f"digest; got {self.digest!r}."
                 )
+            if self.reason is not None:
+                raise ValueError(
+                    f"LockfileDigest status='available' forbids a reason; got {self.reason!r}."
+                )
         else:
             if self.algorithm is not None or self.digest is not None:
                 raise ValueError(
                     f"LockfileDigest status={self.status!r} requires algorithm=None and "
                     f"digest=None; got algorithm={self.algorithm!r}, digest={self.digest!r}."
+                )
+            # reason is only meaningful on unavailable/error. not_applicable/
+            # redacted are their own explanation and forbid a reason.
+            if self.status in ("not_applicable", "redacted") and self.reason is not None:
+                raise ValueError(
+                    f"LockfileDigest status={self.status!r} forbids a reason; got {self.reason!r}."
                 )
         return self
 
@@ -191,6 +271,47 @@ class DependencyObservation(BaseModel):
     name: str = Field(..., min_length=1)  # PEP 503 normalized
     version: str = Field(..., min_length=1)
 
+    @field_validator("name")
+    @classmethod
+    def _normalize_name(cls, v: str) -> str:
+        return _normalize_dependency_name(v)
+
+
+class DependencyConflict(BaseModel):
+    """One dependency observed at DIFFERENT versions across distributions.
+
+    ``name`` is PEP 503 normalized; ``observed_versions`` is the sorted, unique
+    set of versions that were observed for that name (at least two distinct
+    versions — a single version is not a conflict). Stored durably so the
+    version-mismatch is visible on round-trip rather than silently dropped.
+    """
+
+    model_config = _section_config()
+
+    name: str = Field(..., min_length=1)  # PEP 503 normalized
+    observed_versions: tuple[str, ...] = Field(..., min_length=2)
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_name(cls, v: str) -> str:
+        return _normalize_dependency_name(v)
+
+    @field_validator("observed_versions")
+    @classmethod
+    def _versions_sorted_unique(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(v)) != len(v):
+            raise ValueError(
+                f"DependencyConflict.observed_versions must be unique; got {list(v)!r}."
+            )
+        if list(v) != sorted(v):
+            raise ValueError(
+                f"DependencyConflict.observed_versions must be sorted; got {list(v)!r}."
+            )
+        for ver in v:
+            if not ver:
+                raise ValueError("DependencyConflict.observed_versions must be non-empty strings.")
+        return v
+
 
 class SoftwareEnvironment(BaseModel):
     model_config = _section_config()
@@ -200,8 +321,11 @@ class SoftwareEnvironment(BaseModel):
     dependencies: tuple[DependencyObservation, ...] = Field(default_factory=tuple)
     # Recorded when the SAME normalized dependency name is observed at
     # DIFFERENT versions across distributions. First observation wins; the
-    # conflict is surfaced here rather than silently lost.
-    dependency_conflicts: tuple[str, ...] = Field(default_factory=tuple)
+    # conflict (name + the sorted unique set of observed versions) is surfaced
+    # here rather than silently lost. Each conflict is a typed frozen
+    # :class:`DependencyConflict` so a tampered sidecar cannot smuggle in
+    # free-text or a malformed conflict record.
+    dependency_conflicts: tuple[DependencyConflict, ...] = Field(default_factory=tuple)
     lockfile: LockfileDigest = Field(default_factory=lambda: LockfileDigest(status="unavailable"))
 
     @field_validator("dependencies")
@@ -220,13 +344,17 @@ class SoftwareEnvironment(BaseModel):
 
     @field_validator("dependency_conflicts")
     @classmethod
-    def _conflicts_sorted_unique(cls, v: tuple[str, ...]) -> tuple[str, ...]:
-        if len(set(v)) != len(v):
+    def _conflicts_sorted_unique(
+        cls, v: tuple[DependencyConflict, ...]
+    ) -> tuple[DependencyConflict, ...]:
+        names = [c.name for c in v]
+        if len(set(names)) != len(names):
             raise ValueError(
-                f"Duplicate dependency_conflicts: {sorted({c for c in v if v.count(c) > 1})}"
+                f"Duplicate dependency_conflicts names: "
+                f"{sorted({n for n in names if names.count(n) > 1})}"
             )
-        if list(v) != sorted(v):
-            raise ValueError("dependency_conflicts must be sorted.")
+        if names != sorted(names):
+            raise ValueError("dependency_conflicts must be sorted by name.")
         return v
 
 
@@ -251,18 +379,26 @@ class AcceleratorInfo(BaseModel):
     precision_status: ObservationStatus = Field(default="not_applicable")
     device_count: int | None = Field(default=None, ge=0)
     devices: tuple[DeviceInfo, ...] = Field(default_factory=tuple)
-    reason: str | None = Field(default=None)
+    # Stable reason domain: only meaningful on a non-available status to explain
+    # why accelerator capture failed / was not performed. ``None`` on an
+    # available status (devices were observed — no explanation needed).
+    reason: _ACCELERATOR_REASON | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_consistency(self) -> AcceleratorInfo:
-        """Exhaustive status↔(devices, device_count, framework/runtime) consistency.
+        """Exhaustive status↔(devices, device_count, framework/runtime, reason,
+        precision_status) consistency.
 
         - ``status="available"``: ``device_count`` > 0, ``len(devices) ==
-          device_count``, and device ordinals are unique.
+          device_count``, device ordinals are unique, and ``reason`` must be
+          ``None`` (an available accelerator needs no explanation).
         - any non-available status: ``devices`` must be empty,
-          ``device_count`` must be None or 0, and ``framework``,
+          ``device_count`` must be None or 0, ``framework``,
           ``framework_version``, and ``runtime_version`` must all be ``None``
           (descriptive metadata is only meaningful when devices were observed).
+        - ``precision_status="available"`` is only meaningful when devices were
+          observed — it is rejected on any non-available ``status`` (you cannot
+          have available precision info with no accelerator).
         """
         if self.status == "available":
             if self.device_count is None or self.device_count == 0:
@@ -274,6 +410,10 @@ class AcceleratorInfo(BaseModel):
             ordinals = [d.ordinal for d in self.devices]
             if len(set(ordinals)) != len(ordinals):
                 raise ValueError(f"Duplicate device ordinals: {ordinals}")
+            if self.reason is not None:
+                raise ValueError(
+                    f"AcceleratorInfo status='available' forbids a reason; got {self.reason!r}."
+                )
         else:
             if self.devices:
                 raise ValueError(
@@ -295,6 +435,14 @@ class AcceleratorInfo(BaseModel):
                     f"{self.framework!r}, framework_version={self.framework_version!r}, "
                     f"runtime_version={self.runtime_version!r}."
                 )
+        # precision_status="available" requires devices were observed — it is
+        # contradictory on any non-available status.
+        if self.precision_status == "available" and self.status != "available":
+            raise ValueError(
+                f"AcceleratorInfo precision_status='available' requires "
+                f"status='available'; got status={self.status!r} (cannot have "
+                "available precision info with no accelerator observed)."
+            )
         return self
 
 
@@ -307,20 +455,31 @@ class TopologyInfo(BaseModel):
     world_size: int | None = Field(default=None, ge=1)
     node_count: int | None = Field(default=None, ge=1)
     backend: str | None = Field(default=None)
-    reason: str | None = Field(default=None)
+    # Stable reason domain: only meaningful on status='error' to explain why
+    # topology capture failed. ``None`` on available / not_applicable.
+    reason: _TOPOLOGY_REASON | None = Field(default=None)
     # Invalid numeric topology env values observed at capture time (e.g.
     # ``RANK=not-an-int``) that could not be parsed. Stored durably so a
     # misconfigured launcher is visible on round-trip rather than silently
-    # discarded. Stable, sorted, unique codes.
+    # discarded. Stable, sorted, unique codes matching
+    # ``invalid_topology_env_value:<FIELD>`` where FIELD is one of the allowed
+    # topology env var names.
     topology_warnings: tuple[str, ...] = Field(default_factory=tuple)
 
-    @field_validator("topology_warnings")
+    @field_validator("topology_warnings", mode="after")
     @classmethod
-    def _topology_warnings_sorted_unique(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+    def _topology_warnings_pattern(cls, v: tuple[str, ...]) -> tuple[str, ...]:
         if list(v) != sorted(v):
             raise ValueError("topology_warnings must be sorted.")
         if len(set(v)) != len(v):
             raise ValueError("topology_warnings must be unique.")
+        for w in v:
+            if not _TOPOLOGY_WARNING_PATTERN.fullmatch(w):
+                raise ValueError(
+                    f"topology_warning {w!r} must match "
+                    f"'invalid_topology_env_value:<FIELD>' where FIELD is one of "
+                    f"{sorted(_TOPOLOGY_WARNING_FIELDS)}."
+                )
         return v
 
     @model_validator(mode="after")
@@ -328,14 +487,18 @@ class TopologyInfo(BaseModel):
         """Exhaustive status↔field consistency.
 
         - ``status="available"``: ``rank`` and ``world_size`` present,
-          ``rank < world_size``, and ``local_rank < world_size`` when present.
+          ``rank < world_size``, and ``local_rank < world_size`` when present,
+          AND ``reason`` must be ``None`` (an available topology needs no
+          explanation).
         - ``status="error"`` or ``"not_applicable"``: ALL of ``rank``,
           ``world_size``, ``local_rank``, ``node_count``, and ``backend`` must
           be ``None``. A record that claims error/not_applicable yet carries
           ANY concrete topology value is internally inconsistent (and a likely
           sign of tampering or a logic bug at capture time). ``node_count`` and
           ``backend`` are NOT allowed here — only meaningful alongside a real
-          distributed topology (status='available').
+          distributed topology (status='available'). ``reason`` is meaningful
+          only on status='error' (forbidden on not_applicable, which is its
+          own explanation).
         """
         if self.status == "available":
             if self.rank is None or self.world_size is None:
@@ -345,6 +508,10 @@ class TopologyInfo(BaseModel):
             # local_rank < world_size when both are present.
             if self.local_rank is not None and self.local_rank >= self.world_size:
                 raise ValueError("local_rank must be < world_size.")
+            if self.reason is not None:
+                raise ValueError(
+                    f"TopologyInfo status='available' forbids a reason; got {self.reason!r}."
+                )
         else:
             # error or not_applicable: rank, world_size, local_rank, node_count,
             # AND backend must ALL be absent.
@@ -364,6 +531,12 @@ class TopologyInfo(BaseModel):
                     f"TopologyInfo status={self.status!r} requires rank, world_size, "
                     "local_rank, node_count, and backend to ALL be None; got "
                     f"concrete values {sorted(present)!r}."
+                )
+            # reason is only meaningful on status='error' — not_applicable is
+            # its own explanation and forbids a reason.
+            if self.status == "not_applicable" and self.reason is not None:
+                raise ValueError(
+                    f"TopologyInfo status='not_applicable' forbids a reason; got {self.reason!r}."
                 )
         return self
 

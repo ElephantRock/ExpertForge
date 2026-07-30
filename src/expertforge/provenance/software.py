@@ -17,6 +17,7 @@ from platform import machine, python_compiler, system
 
 from expertforge.provenance.record import (
     CPUInfo,
+    DependencyConflict,
     DependencyObservation,
     LockfileDigest,
     MemoryInfo,
@@ -120,19 +121,26 @@ def _capture_platform() -> PlatformInfo:
     )
 
 
-def _capture_dependencies() -> tuple[tuple[DependencyObservation, ...], tuple[str, ...]]:
+def _capture_dependencies() -> tuple[
+    tuple[DependencyObservation, ...], tuple[DependencyConflict, ...]
+]:
     """Installed distributions as sorted, deduplicated typed observations.
 
-    Names are PEP 503 normalized. When the SAME normalized name appears with
+    Names are PEP 503 normalized. When the SAME normalized name appears at
     DIFFERENT versions, the FIRST observation wins (no silent last-write-wins)
-    and the conflict is recorded as a typed string returned alongside the
+    and the conflict (the sorted unique set of observed versions for that name)
+    is recorded as a typed :class:`DependencyConflict` returned alongside the
     observations (stored on ``SoftwareEnvironment.dependency_conflicts``).
-    Returns ``(observations, conflicts_sorted)``.
+    Returns ``(observations, conflicts_sorted_by_name)``.
     """
     path_like = re.compile(r"(file://|/Users/|/home/|[A-Za-z]:\\\\)")
     first_version: dict[str, str] = {}
     order: list[str] = []
-    conflicts: set[str] = set()
+    # Track ALL distinct observed versions per normalized name so a conflict
+    # can carry the full sorted unique set (>= 2 versions required for a real
+    # conflict; the first-observation-wins policy only governs which version
+    # is reported in ``dependencies``).
+    observed_versions: dict[str, set[str]] = {}
     for dist in metadata.distributions():
         raw_name = (dist.metadata["Name"] or "").strip()
         if not raw_name:
@@ -142,21 +150,21 @@ def _capture_dependencies() -> tuple[tuple[DependencyObservation, ...], tuple[st
         version = (dist.version or "").strip()
         if version and path_like.search(version):
             continue
+        if version:
+            observed_versions.setdefault(normalized, set()).add(version)
         if normalized in first_version:
-            if version != first_version[normalized] and version:
-                # Same normalized name, different version: keep the first
-                # (do NOT silently last-write-wins) and record the conflict.
-                conflicts.add(
-                    f"dependency_version_conflict:{normalized}:"
-                    f"{first_version[normalized]}!={version}"
-                )
             continue
         first_version[normalized] = version
         order.append(normalized)
     observations = tuple(
         DependencyObservation(name=name, version=first_version[name]) for name in sorted(order)
     )
-    return observations, tuple(sorted(conflicts))
+    conflicts = tuple(
+        DependencyConflict(name=name, observed_versions=tuple(sorted(versions)))
+        for name, versions in sorted(observed_versions.items())
+        if len(versions) >= 2
+    )
+    return observations, conflicts
 
 
 def _capture_lockfile(repo_root: Path | None) -> LockfileDigest:

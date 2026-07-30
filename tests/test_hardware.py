@@ -194,7 +194,7 @@ class TestHardwareDegradation:
     def test_local_rank_ge_world_size_is_error(self) -> None:
         topo = capture_topology(rank=0, world_size=4, local_rank=4)
         assert topo.status == "error"
-        assert topo.reason == "local_rank_must_be_less_than_world_size"
+        assert topo.reason == "invalid_local_rank"
 
     def test_capture_topology_does_not_default_node_count_to_one(self) -> None:
         # When neither explicit node_count nor env NNODES is supplied, the

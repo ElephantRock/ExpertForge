@@ -316,16 +316,42 @@ class TestSourceFlagContradictions:
                 evidence=evidence,
             )
 
-    def test_remote_url_with_raw_credentials_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                remote_url="https://user:token@github.com/org/repo.git",
-                tree_digest="c" * 64,
-                input_digest=self._envelope("c" * 64, None),
-            )
+    def test_remote_url_model_accepts_any_value(self) -> None:
+        # Review item 1: the SourceSnapshot model no longer correlates
+        # remote_url with remote_warnings (that correlation cannot survive a
+        # sidecar round-trip). The model accepts whatever URL/warnings are
+        # supplied; the CAPTURE PATH is the sole place where sanitization +
+        # warning correlation happens. A raw-credential URL is therefore
+        # accepted by the MODEL (it never sees the raw URL in practice —
+        # capture sanitizes first).
+        snap = SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            remote_url="https://user:token@github.com/org/repo.git",
+            tree_digest="c" * 64,
+            input_digest=self._envelope("c" * 64, None),
+        )
+        # The model stores whatever it was given — no sanitization at the
+        # model level.
+        assert snap.remote_url == "https://user:token@github.com/org/repo.git"
+
+    def test_capture_path_sanitizes_raw_credentials(self, tmp_path: Path) -> None:
+        # The CAPTURE PATH is where sanitization happens: it strips credentials
+        # and emits the matching remote_credentials_removed warning. The raw
+        # URL never reaches the stored snapshot.
+        from expertforge.provenance.source_snapshot import capture_source_snapshot
+
+        _init_repo(tmp_path)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://user:token@github.com/org/repo.git"],
+            cwd=tmp_path,
+            check=True,
+        )
+        snap = capture_source_snapshot(tmp_path)
+        assert snap.remote_url == "https://github.com/org/repo.git"
+        assert {w.code for w in snap.remote_warnings} == {"remote_credentials_removed"}
+        assert "token" not in snap.model_dump_json()
 
 
 # --- malformed digest fields rejected (review item 2) ----------------------

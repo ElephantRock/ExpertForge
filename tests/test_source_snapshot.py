@@ -592,8 +592,10 @@ class TestEvidenceCodeVocabularies:
                 limitations=("fabricated_limitation",),
             )
 
-    def test_limitation_count_suffix_must_be_non_negative_int(self) -> None:
-        # ``unreadable_untracked_files:N`` with a non-numeric suffix is rejected.
+    def test_limitation_count_suffix_must_be_positive_int(self) -> None:
+        # ``unreadable_untracked_files:N`` with a non-numeric or non-positive
+        # suffix is rejected. A zero count is nonsensical (zero unreadable files
+        # is not a real limitation).
         with pytest.raises(ValidationError):
             _make_evidence(
                 completeness="partial",
@@ -604,14 +606,16 @@ class TestEvidenceCodeVocabularies:
                 completeness="partial",
                 limitations=("dirty_submodules_not_snapshotted:-1",),
             )
-
-    def test_limitation_count_suffix_zero_accepted(self) -> None:
-        # A zero count is syntactically valid (prefix + non-negative integer).
-        evidence = _make_evidence(
-            completeness="partial",
-            limitations=("unreadable_untracked_files:0",),
-        )
-        assert evidence is not None
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                limitations=("unreadable_untracked_files:0",),
+            )
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                limitations=("dirty_submodules_not_snapshotted:0",),
+            )
 
     def test_warning_codes_are_unique_and_sorted_still_enforced(self) -> None:
         # The closed vocabulary does not relax the sorted/unique requirement.
@@ -795,113 +799,50 @@ def _envelope_digest_for(tree: str, evidence: object) -> str:
     return _envelope_digest(tree, evidence)  # type: ignore[arg-type]
 
 
-class TestRemoteUrlSanitizationCorrelation:
-    """URL sanitization lives in the SourceSnapshot model_validator and
-    correlates ``remote_url`` with ``remote_warnings``. Lossy sanitization
-    without the matching warning is rejected."""
+class TestRemoteUrlSanitizationClassifier:
+    """The classifier (:func:`_classify_remote_url_sanitization`) is the SOLE
+    place where URL↔warning correlation is performed — it sanitizes the raw URL
+    and derives the matching warning codes. The capture path
+    (:func:`capture_source_snapshot`) calls it and supplies BOTH the sanitized
+    URL and the codes to the :class:`SourceSnapshot` constructor. The model
+    itself does NOT correlate ``remote_url`` with ``remote_warnings``: that
+    correlation cannot survive a sidecar round-trip (the stored URL is already
+    sanitized, so re-deriving required warnings on load would reject the
+    retained warnings as fabricated)."""
 
-    def test_query_removal_requires_matching_warning(self) -> None:
+    def test_query_removal_emits_warning_and_sanitizes(self) -> None:
         from expertforge.provenance.source_snapshot import (
-            SourceSnapshot,
+            _classify_remote_url_sanitization,
         )
 
-        tree = "c" * 64
-        # A URL with a query but NO warning → rejected (silent information loss).
-        with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                remote_url="https://github.com/org/repo.git?signed=xyz",
-                tree_digest=tree,
-                input_digest=_envelope_digest_for(tree, None),
-            )
+        sanitized, codes = _classify_remote_url_sanitization(
+            "https://github.com/org/repo.git?signed=xyz"
+        )
+        assert sanitized == "https://github.com/org/repo.git"
+        assert codes == ("remote_query_fragment_removed",)
 
-    def test_query_removal_with_matching_warning_accepted_and_sanitized(self) -> None:
+    def test_fragment_removal_emits_warning_and_sanitizes(self) -> None:
         from expertforge.provenance.source_snapshot import (
-            RemoteWarning,
-            SourceSnapshot,
+            _classify_remote_url_sanitization,
         )
 
-        tree = "c" * 64
-        snap = SourceSnapshot(
-            commit_sha="1" * 40,
-            is_clean=True,
-            is_canonical=True,
-            remote_url="https://github.com/org/repo.git?signed=xyz",
-            remote_warnings=(RemoteWarning(code="remote_query_fragment_removed"),),
-            tree_digest=tree,
-            input_digest=_envelope_digest_for(tree, None),
-        )
-        # The stored URL is the sanitized form (no query/fragment).
-        assert snap.remote_url == "https://github.com/org/repo.git"
-        assert "?signed=" not in snap.model_dump_json()
+        sanitized, codes = _classify_remote_url_sanitization("https://github.com/org/repo.git#frag")
+        assert sanitized == "https://github.com/org/repo.git"
+        assert codes == ("remote_query_fragment_removed",)
 
-    def test_fragment_removal_requires_matching_warning(self) -> None:
-        from expertforge.provenance.source_snapshot import SourceSnapshot
-
-        tree = "c" * 64
-        with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                remote_url="https://github.com/org/repo.git#frag",
-                tree_digest=tree,
-                input_digest=_envelope_digest_for(tree, None),
-            )
-
-    def test_local_url_removal_requires_matching_warning(self) -> None:
+    def test_local_url_removal_emits_warning_and_returns_none(self) -> None:
         from expertforge.provenance.source_snapshot import (
-            RemoteWarning,
-            SourceSnapshot,
+            _classify_remote_url_sanitization,
         )
 
-        tree = "c" * 64
-        # A local-path URL sanitizes to None; without the warning → rejected.
-        with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                remote_url="/home/secret/repos/ExpertForge",
-                tree_digest=tree,
-                input_digest=_envelope_digest_for(tree, None),
-            )
-        # With the matching warning → accepted; remote_url becomes None.
-        snap = SourceSnapshot(
-            commit_sha="1" * 40,
-            is_clean=True,
-            is_canonical=True,
-            remote_url="/home/secret/repos/ExpertForge",
-            remote_warnings=(RemoteWarning(code="remote_local_or_unsupported_removed"),),
-            tree_digest=tree,
-            input_digest=_envelope_digest_for(tree, None),
-        )
-        assert snap.remote_url is None
+        sanitized, codes = _classify_remote_url_sanitization("/home/secret/repos/ExpertForge")
+        assert sanitized is None
+        assert codes == ("remote_local_or_unsupported_removed",)
 
     def test_scp_style_remote_not_flagged_as_credentials(self) -> None:
-        # SCP-style ``git@github.com:org/repo.git`` has no scheme; the ``git``
+        # SCP-style ``git@github.com:org/repo.git`` has NO scheme; the ``git``
         # part is a protocol user, NOT a credential. It must NOT trigger
         # ``remote_credentials_removed`` and must be preserved verbatim.
-        from expertforge.provenance.source_snapshot import SourceSnapshot
-
-        tree = "c" * 64
-        snap = SourceSnapshot(
-            commit_sha="1" * 40,
-            is_clean=True,
-            is_canonical=True,
-            remote_url="git@github.com:ElephantRock/ExpertForge.git",
-            remote_warnings=(),  # NO credentials warning expected
-            tree_digest=tree,
-            input_digest=_envelope_digest_for(tree, None),
-        )
-        assert snap.remote_url == "git@github.com:ElephantRock/ExpertForge.git"
-        codes = {w.code for w in snap.remote_warnings}
-        assert "remote_credentials_removed" not in codes
-
-    def test_classifier_does_not_flag_scp_style(self) -> None:
-        # Direct unit test of the classifier: SCP-style is preserved, no creds.
         from expertforge.provenance.source_snapshot import (
             _classify_remote_url_sanitization,
         )
@@ -924,49 +865,36 @@ class TestRemoteUrlSanitizationCorrelation:
         assert sanitized == "https://github.com/org/repo.git"
         assert "remote_credentials_removed" in codes
 
-
-class TestRemoteUrlWarningTwoWayCorrelation:
-    """Review item 3: remote warning correlation is TWO-WAY. The validator now
-    also rejects IMPOSSIBLE/extra warnings, and rejects warnings when
-    remote_url is None."""
-
-    def test_fabricated_warning_on_clean_url_rejected(self) -> None:
-        # A clean HTTPS URL with no credentials/query/fragment must NOT carry
-        # remote_credentials_removed — that would be a fabricated warning.
+    def test_https_git_at_host_flagged_as_credentials(self) -> None:
+        # Regression for the credential-classifier bug:
+        # ``https://git@host/repo.git`` has scheme + userinfo, so its ``@`` IS
+        # credential-bearing. The SCP-style exemption (``git@host:path``,
+        # scheme-less) must NOT apply when ``://`` is present.
         from expertforge.provenance.source_snapshot import (
-            RemoteWarning,
-            SourceSnapshot,
+            _classify_remote_url_sanitization,
         )
 
-        tree = "c" * 64
-        with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                remote_url="https://github.com/org/repo.git",
-                remote_warnings=(RemoteWarning(code="remote_credentials_removed"),),
-                tree_digest=tree,
-                input_digest=_envelope_digest_for(tree, None),
-            )
+        sanitized, codes = _classify_remote_url_sanitization("https://git@host/repo.git")
+        assert sanitized == "https://host/repo.git"
+        assert "remote_credentials_removed" in codes
 
-    def test_fabricated_query_warning_on_clean_url_rejected(self) -> None:
+    def test_empty_url_returns_none_and_no_warnings(self) -> None:
         from expertforge.provenance.source_snapshot import (
-            RemoteWarning,
-            SourceSnapshot,
+            _classify_remote_url_sanitization,
         )
 
-        tree = "c" * 64
-        with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                remote_url="https://github.com/org/repo.git",
-                remote_warnings=(RemoteWarning(code="remote_query_fragment_removed"),),
-                tree_digest=tree,
-                input_digest=_envelope_digest_for(tree, None),
-            )
+        sanitized, codes = _classify_remote_url_sanitization("")
+        assert sanitized is None
+        assert codes == ()
+
+
+class TestSourceSnapshotAcceptsSanitizedRemotes:
+    """Review item 1: the :class:`SourceSnapshot` model accepts whatever
+    ``remote_url`` and ``remote_warnings`` are supplied. The codes are
+    Literal-validated, so a tampered sidecar cannot smuggle in unknown warning
+    text — but the model does NOT re-derive redactions from the (already-
+    sanitized) URL on load. The capture path / classifier is the sole source
+    of truth for the correlation."""
 
     def test_clean_url_no_warnings_accepted(self) -> None:
         from expertforge.provenance.source_snapshot import SourceSnapshot
@@ -977,31 +905,12 @@ class TestRemoteUrlWarningTwoWayCorrelation:
             is_clean=True,
             is_canonical=True,
             remote_url="https://github.com/org/repo.git",
-            remote_warnings=(),  # clean URL → no warnings expected
+            remote_warnings=(),
             tree_digest=tree,
             input_digest=_envelope_digest_for(tree, None),
         )
         assert snap.remote_url == "https://github.com/org/repo.git"
         assert snap.remote_warnings == ()
-
-    def test_none_url_with_warnings_rejected(self) -> None:
-        # A None remote_url (no origin) carrying warnings is contradictory.
-        from expertforge.provenance.source_snapshot import (
-            RemoteWarning,
-            SourceSnapshot,
-        )
-
-        tree = "c" * 64
-        with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                remote_url=None,
-                remote_warnings=(RemoteWarning(code="remote_credentials_removed"),),
-                tree_digest=tree,
-                input_digest=_envelope_digest_for(tree, None),
-            )
 
     def test_none_url_no_warnings_accepted(self) -> None:
         from expertforge.provenance.source_snapshot import SourceSnapshot
@@ -1019,27 +928,286 @@ class TestRemoteUrlWarningTwoWayCorrelation:
         assert snap.remote_url is None
         assert snap.remote_warnings == ()
 
-    def test_extra_warning_alongside_required_rejected(self) -> None:
-        # A URL that legitimately requires ONE warning must not carry a SECOND,
-        # impossible warning alongside it.
+    def test_sanitized_url_with_matching_warning_accepted(self) -> None:
+        # The model accepts the sanitized URL + the retained warning code that
+        # the capture path produced. No re-derivation on load.
         from expertforge.provenance.source_snapshot import (
             RemoteWarning,
             SourceSnapshot,
         )
 
         tree = "c" * 64
+        snap = SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            remote_url="https://github.com/org/repo.git",
+            remote_warnings=(RemoteWarning(code="remote_query_fragment_removed"),),
+            tree_digest=tree,
+            input_digest=_envelope_digest_for(tree, None),
+        )
+        assert snap.remote_url == "https://github.com/org/repo.git"
+        assert {w.code for w in snap.remote_warnings} == {"remote_query_fragment_removed"}
+
+    def test_none_url_with_warnings_accepted_by_model(self) -> None:
+        # The model no longer correlates: a None URL with warnings is accepted
+        # at the model level. (The capture path would never produce this
+        # combination, but a tampered/edited sidecar is not rejected by the
+        # model — the codes are still Literal-validated.)
+        from expertforge.provenance.source_snapshot import (
+            RemoteWarning,
+            SourceSnapshot,
+        )
+
+        tree = "c" * 64
+        snap = SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            remote_url=None,
+            remote_warnings=(RemoteWarning(code="remote_credentials_removed"),),
+            tree_digest=tree,
+            input_digest=_envelope_digest_for(tree, None),
+        )
+        assert snap.remote_url is None
+        assert {w.code for w in snap.remote_warnings} == {"remote_credentials_removed"}
+
+    def test_scp_style_remote_preserved_verbatim(self) -> None:
+        from expertforge.provenance.source_snapshot import SourceSnapshot
+
+        tree = "c" * 64
+        snap = SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            remote_url="git@github.com:ElephantRock/ExpertForge.git",
+            remote_warnings=(),
+            tree_digest=tree,
+            input_digest=_envelope_digest_for(tree, None),
+        )
+        assert snap.remote_url == "git@github.com:ElephantRock/ExpertForge.git"
+        assert snap.remote_warnings == ()
+
+    def test_remote_warnings_round_trip_through_json(self) -> None:
+        # The codes are Literal-validated and durable: they survive a JSON
+        # round-trip on a snapshot whose URL is already sanitized.
+        from expertforge.provenance.source_snapshot import (
+            RemoteWarning,
+            SourceSnapshot,
+        )
+
+        tree = "c" * 64
+        snap = SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            remote_url="https://github.com/org/repo.git",
+            remote_warnings=(
+                RemoteWarning(code="remote_credentials_removed"),
+                RemoteWarning(code="remote_query_fragment_removed"),
+            ),
+            tree_digest=tree,
+            input_digest=_envelope_digest_for(tree, None),
+        )
+        restored = SourceSnapshot.model_validate_json(snap.model_dump_json())
+        assert restored.remote_url == "https://github.com/org/repo.git"
+        assert {w.code for w in restored.remote_warnings} == {
+            "remote_credentials_removed",
+            "remote_query_fragment_removed",
+        }
+
+
+# --- SourceEvidence tightened behavioral invariants (review item 2) ---------
+
+
+class TestEvidencePartialRequiresExplanation:
+    """Review item 2: ``completeness="partial"`` requires at least one warning
+    OR one non-standard limitation (beyond the two always-present standard
+    limitations). A partial record with neither is rejected — an explanation
+    is mandatory."""
+
+    def test_partial_with_warning_accepted(self) -> None:
+        evidence = _make_evidence(
+            completeness="partial",
+            warnings=("unreadable_untracked_content",),
+            limitations=("unreadable_untracked_files:1",),
+        )
+        assert evidence is not None
+
+    def test_partial_with_non_standard_limitation_accepted(self) -> None:
+        evidence = _make_evidence(
+            completeness="partial",
+            limitations=(
+                "dirty_submodules_not_snapshotted:1",
+                "external_symlink_targets_not_followed",
+                "ignored_files_not_included",
+            ),
+            warnings=("dirty_submodule_content_not_captured",),
+        )
+        assert evidence is not None
+
+    def test_partial_with_only_standard_limitations_rejected(self) -> None:
+        # The two standard limitations do NOT explain partial-ness by
+        # themselves — an explanation is mandatory.
         with pytest.raises(ValidationError):
-            SourceSnapshot(
-                commit_sha="1" * 40,
-                is_clean=True,
-                is_canonical=True,
-                # Query requires remote_query_fragment_removed; the credentials
-                # warning is fabricated (no userinfo in this URL).
-                remote_url="https://github.com/org/repo.git?signed=xyz",
-                remote_warnings=(
-                    RemoteWarning(code="remote_query_fragment_removed"),
-                    RemoteWarning(code="remote_credentials_removed"),
+            _make_evidence(
+                completeness="partial",
+                limitations=(
+                    "external_symlink_targets_not_followed",
+                    "ignored_files_not_included",
                 ),
-                tree_digest=tree,
-                input_digest=_envelope_digest_for(tree, None),
             )
+
+    def test_partial_with_no_warnings_no_limitations_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(completeness="partial")
+
+
+class TestEvidenceDirtySubmoduleCorrelation:
+    """Review item 2: the ``dirty_submodule_content_not_captured`` warning and
+    the ``dirty_submodules_not_snapshotted:N`` limitation describe the SAME
+    condition; one cannot appear without the other."""
+
+    def test_warning_without_limitation_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                warnings=("dirty_submodule_content_not_captured",),
+            )
+
+    def test_limitation_without_warning_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_evidence(
+                completeness="partial",
+                limitations=(
+                    "dirty_submodules_not_snapshotted:1",
+                    "external_symlink_targets_not_followed",
+                    "ignored_files_not_included",
+                ),
+            )
+
+    def test_warning_and_limitation_together_accepted(self) -> None:
+        evidence = _make_evidence(
+            completeness="partial",
+            warnings=("dirty_submodule_content_not_captured",),
+            limitations=(
+                "dirty_submodules_not_snapshotted:2",
+                "external_symlink_targets_not_followed",
+                "ignored_files_not_included",
+            ),
+        )
+        assert evidence is not None
+
+
+class TestUntrackedEntryModeValidator:
+    """Review item 2: ``UntrackedEntry.mode`` is validated as a canonical octal
+    mode string (``^0o[0-7]{3,4}$``), not an arbitrary string."""
+
+    def test_canonical_octal_mode_3_digits_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        entry = UntrackedEntry(path="a.txt", kind="file", mode="0o644", digest="0" * 64)
+        assert entry.mode == "0o644"
+
+    def test_canonical_octal_mode_4_digits_accepted(self) -> None:
+        # 4-digit octal mode covers the setuid/setgid/sticky bits + rwxrwxrwx
+        # (e.g. setuid 0o4755). The capture path emits oct(stat.S_IMODE(...))
+        # which masks off the file-type bits, leaving at most 4 octal digits.
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        entry = UntrackedEntry(path="a.txt", kind="file", mode="0o4755", digest="0" * 64)
+        assert entry.mode == "0o4755"
+
+    def test_decimal_mode_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            UntrackedEntry(path="a.txt", kind="file", mode="644", digest="0" * 64)
+
+    def test_non_octal_digit_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            UntrackedEntry(path="a.txt", kind="file", mode="0o844", digest="0" * 64)
+
+    def test_missing_0o_prefix_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            UntrackedEntry(path="a.txt", kind="file", mode="644", digest="0" * 64)
+
+    def test_too_many_digits_rejected(self) -> None:
+        # 5+ octal digits (e.g. the full st_mode with file-type bits) is
+        # rejected; only S_IMODE (3-4 octal digits) is canonical.
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            UntrackedEntry(path="a.txt", kind="file", mode="0o100644", digest="0" * 64)
+
+    def test_too_few_digits_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            UntrackedEntry(path="a.txt", kind="file", mode="0o64", digest="0" * 64)
+
+
+class TestUntrackedEntryOtherKindRejectsDigest:
+    """Review item 2: ``kind="other"`` (a special/non-regular/non-symlink entry)
+    must have ``digest=None`` (no content digest is meaningful for a non-file/
+    non-symlink kind)."""
+
+    def test_other_with_digest_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        with pytest.raises(ValidationError):
+            UntrackedEntry(path="a.fifo", kind="other", mode="0o444", digest="0" * 64)
+
+    def test_other_with_none_digest_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import UntrackedEntry
+
+        entry = UntrackedEntry(path="a.fifo", kind="other", mode="0o444", digest=None)
+        assert entry.kind == "other"
+        assert entry.digest is None
+
+
+class TestSubmoduleEntryCommitStateCorrelation:
+    """Review item 2: ``commit="unknown"`` is only valid with
+    ``state="uninitialized"``. For initialized/changed/conflicted, commit must
+    be a valid 40-hex SHA-1."""
+
+    def test_unknown_with_initialized_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import SubmoduleEntry
+
+        with pytest.raises(ValidationError):
+            SubmoduleEntry(name="vendor/sub", commit="unknown", state="initialized")
+
+    def test_unknown_with_changed_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import SubmoduleEntry
+
+        with pytest.raises(ValidationError):
+            SubmoduleEntry(name="vendor/sub", commit="unknown", state="changed")
+
+    def test_unknown_with_conflicted_rejected(self) -> None:
+        from expertforge.provenance.source_snapshot import SubmoduleEntry
+
+        with pytest.raises(ValidationError):
+            SubmoduleEntry(name="vendor/sub", commit="unknown", state="conflicted")
+
+    def test_unknown_with_uninitialized_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import SubmoduleEntry
+
+        entry = SubmoduleEntry(name="vendor/sub", commit="unknown", state="uninitialized")
+        assert entry.commit == "unknown"
+        assert entry.state == "uninitialized"
+
+    def test_sha1_with_initialized_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import SubmoduleEntry
+
+        entry = SubmoduleEntry(name="vendor/sub", commit="1" * 40, state="initialized")
+        assert entry.commit == "1" * 40
+
+    def test_sha1_with_changed_accepted(self) -> None:
+        from expertforge.provenance.source_snapshot import SubmoduleEntry
+
+        entry = SubmoduleEntry(name="vendor/sub", commit="1" * 40, state="changed")
+        assert entry.state == "changed"

@@ -26,6 +26,7 @@ from expertforge.provenance.orchestrate import (
     ProvenanceOrchestrationError,
     prepare_run,
 )
+from expertforge.provenance.record import ProvenanceRecord
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 _FIXED = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -410,3 +411,109 @@ class TestPrepareRunAllocationModes:
         assert legacy.lineage.parent_attempt_id is None
         assert legacy_prov.source.input_digest == first_prov.source.input_digest
         assert legacy_path.exists()
+
+
+# --- sanitized remote round-trip through sidecar (review item 1) -------------
+
+
+class TestSanitizedRemoteSidecarRoundTrip:
+    """Review item 1: a sanitized remote URL plus its retained warning codes
+    MUST survive a full ``capture_source_snapshot → prepare_run → sidecar
+    write → parse_provenance_sidecar`` round-trip. The previous design re-derived
+    required warnings from the already-sanitized URL on load, which rejected
+    the retained warnings as fabricated. The capture path now sanitizes the
+    raw URL and supplies BOTH the sanitized value and the warning codes to the
+    constructor; the model no longer correlates the two."""
+
+    @staticmethod
+    def _set_origin(repo: Path, url: str) -> None:
+        # Set (or replace) the origin remote URL on a repo.
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=repo, check=False)
+        subprocess.run(["git", "remote", "add", "origin", url], cwd=repo, check=True)
+
+    def _round_trip(
+        self, tmp_path: Path, remote_url: str
+    ) -> tuple[ProvenanceRecord, ProvenanceRecord]:
+        from expertforge.config.resolve import resolve_config
+        from expertforge.provenance.sidecar import parse_provenance_sidecar
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        if remote_url:  # empty string → leave no origin configured
+            self._set_origin(repo, remote_url)
+        _, provenance, path = prepare_run(
+            artifact_root=tmp_path / "runs",
+            config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+            repo=repo,
+            clock=lambda: _FIXED,
+            entropy=lambda n: bytes(n),
+        )
+        loaded = parse_provenance_sidecar(path)
+        return provenance, loaded
+
+    def test_credential_https_round_trips(self, tmp_path: Path) -> None:
+        provenance, loaded = self._round_trip(
+            tmp_path, "https://user:token@github.com/org/repo.git"
+        )
+        # The raw credentials are NEVER stored.
+        assert "token" not in provenance.source.model_dump_json()
+        assert provenance.source.remote_url == "https://github.com/org/repo.git"
+        codes = {w.code for w in provenance.source.remote_warnings}
+        assert codes == {"remote_credentials_removed"}
+        # The loaded record matches: the retained warning survives the round-trip.
+        assert loaded == provenance
+        assert {w.code for w in loaded.source.remote_warnings} == {"remote_credentials_removed"}
+        assert loaded.source.remote_url == "https://github.com/org/repo.git"
+
+    def test_git_at_host_https_round_trips(self, tmp_path: Path) -> None:
+        # Regression for the credential-classifier bug:
+        # ``https://git@host/repo.git`` has scheme + userinfo, so its ``@`` IS
+        # credential-bearing and is flagged + sanitized.
+        provenance, loaded = self._round_trip(tmp_path, "https://git@host/repo.git")
+        assert provenance.source.remote_url == "https://host/repo.git"
+        codes = {w.code for w in provenance.source.remote_warnings}
+        assert codes == {"remote_credentials_removed"}
+        assert loaded == provenance
+        assert loaded.source.remote_url == "https://host/repo.git"
+
+    def test_query_round_trips(self, tmp_path: Path) -> None:
+        provenance, loaded = self._round_trip(
+            tmp_path, "https://github.com/org/repo.git?signed=xyz"
+        )
+        assert provenance.source.remote_url == "https://github.com/org/repo.git"
+        codes = {w.code for w in provenance.source.remote_warnings}
+        assert codes == {"remote_query_fragment_removed"}
+        assert loaded == provenance
+
+    def test_fragment_round_trips(self, tmp_path: Path) -> None:
+        provenance, loaded = self._round_trip(tmp_path, "https://github.com/org/repo.git#frag")
+        assert provenance.source.remote_url == "https://github.com/org/repo.git"
+        codes = {w.code for w in provenance.source.remote_warnings}
+        assert codes == {"remote_query_fragment_removed"}
+        assert loaded == provenance
+
+    def test_local_file_round_trips(self, tmp_path: Path) -> None:
+        provenance, loaded = self._round_trip(tmp_path, "/home/secret/repos/ExpertForge")
+        # A local-path URL sanitizes to None; the warning is retained.
+        assert provenance.source.remote_url is None
+        codes = {w.code for w in provenance.source.remote_warnings}
+        assert codes == {"remote_local_or_unsupported_removed"}
+        assert loaded == provenance
+        assert loaded.source.remote_url is None
+
+    def test_no_origin_round_trips(self, tmp_path: Path) -> None:
+        provenance, loaded = self._round_trip(tmp_path, "")  # empty → no origin set
+        assert provenance.source.remote_url is None
+        assert provenance.source.remote_warnings == ()
+        assert loaded == provenance
+
+    def test_scp_style_round_trips(self, tmp_path: Path) -> None:
+        # SCP-style ``git@host:path`` has no scheme; the ``git`` is a protocol
+        # user, not a credential. It is preserved verbatim with NO warning.
+        provenance, loaded = self._round_trip(
+            tmp_path, "git@github.com:ElephantRock/ExpertForge.git"
+        )
+        assert provenance.source.remote_url == "git@github.com:ElephantRock/ExpertForge.git"
+        assert provenance.source.remote_warnings == ()
+        assert loaded == provenance

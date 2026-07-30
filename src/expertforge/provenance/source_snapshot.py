@@ -60,6 +60,11 @@ _DIGEST_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # SHA-1 object names; a tampered sidecar must not smuggle in a truncated or
 # malformed commit.
 _SHA1_HEX_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+# Canonical octal mode string for an untracked working-tree entry, e.g.
+# ``0o644`` (3 octal digits) or ``0o100644`` (4 octal digits covering the
+# setuid/setgid/sticky bits + rwxrwxrwx). The leading ``0o`` prefix matches
+# Python's ``oct()`` output, which is what the capture path emits.
+_UNTRACKED_MODE_PATTERN = re.compile(r"^0o[0-7]{3,4}$")
 
 
 def _normalize_canonical_rel_path(value: str, label: str) -> str:
@@ -183,10 +188,11 @@ _RemoteWarningCode = Literal[
 def _raw_remote_url(repo: Path) -> str:
     """Read the raw ``origin`` remote URL (NOT sanitized) from git config.
 
-    Returns the empty string if no origin is configured. The caller is
-    responsible for sanitizing — the raw value is intentionally exposed to the
-    SourceSnapshot model_validator which can correlate sanitization with
-    ``remote_warnings``.
+    Returns the empty string if no origin is configured. The caller
+    (:func:`capture_source_snapshot`) is responsible for sanitizing via
+    :func:`_classify_remote_url_sanitization` BEFORE constructing the
+    :class:`SourceSnapshot`. The raw value is intentionally exposed only to
+    the capture path; the model never sees the raw URL.
     """
     try:
         return _git_text(repo, ["config", "--get", "remote.origin.url"])
@@ -203,8 +209,8 @@ def _classify_remote_url_sanitization(
     sanitized and the appropriate stable warnings are emitted. SCP-style URLs
     like ``git@github.com:org/repo.git`` are NOT credential-bearing — the
     ``git`` part is a protocol user, not a credential. Only ``@`` inside a URL
-    that also has a ``://`` scheme (e.g. ``https://user:token@host``) is treated
-    as credentials.
+    that also has a ``://`` scheme (e.g. ``https://user:token@host`` or
+    ``https://git@host/repo.git``) is treated as credentials.
     """
     if not raw:
         return None, ()
@@ -213,9 +219,12 @@ def _classify_remote_url_sanitization(
     # appears inside a ``://``-scheme URL counts as credentials. The SCP-style
     # ``git@host:path`` form has no scheme; its ``git`` is a protocol user, not
     # a credential, and is preserved verbatim by sanitize_repository_url().
+    # The SCP-style exemption applies ONLY when there is NO ``://`` scheme:
+    # ``https://git@host/repo.git`` has a scheme + userinfo, so its ``@`` IS
+    # credential-bearing.
     if "://" in raw:
         after_scheme = raw.split("://", 1)[1]
-        if "@" in after_scheme and not after_scheme.startswith("git@"):
+        if "@" in after_scheme:
             warnings.append("remote_credentials_removed")
     if "?" in raw or "#" in raw:
         warnings.append("remote_query_fragment_removed")
@@ -585,6 +594,26 @@ class UntrackedEntry(BaseModel):
         """
         return _normalize_canonical_rel_path(v, "untracked path")
 
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v: str | None) -> str | None:
+        """Validate ``mode`` as a canonical octal mode string when present.
+
+        Accepts ``None`` (the only valid value for ``kind="unknown"`` /
+        ``kind="other"``). A present value MUST match ``^0o[0-7]{3,4}$`` so a
+        tampered sidecar cannot smuggle in a free-text or non-octal mode. The
+        capture path emits ``oct(stat.S_IMODE(...))`` which already produces
+        this canonical form.
+        """
+        if v is None:
+            return None
+        if not _UNTRACKED_MODE_PATTERN.fullmatch(v):
+            raise ValueError(
+                f"UntrackedEntry mode must be a canonical octal mode string "
+                f"matching {{:0o[0-7]{{3,4}}}} (e.g. '0o644'); got {v!r}."
+            )
+        return v
+
     @field_validator("digest")
     @classmethod
     def _validate_digest(cls, v: str | None) -> str | None:
@@ -601,6 +630,9 @@ class UntrackedEntry(BaseModel):
           ``mode`` is present.
         - ``kind="unknown"`` must have BOTH ``mode`` and ``digest`` set to None
           — an "unknown" kind with concrete mode/digest is contradictory.
+        - ``kind="other"`` (a special/non-regular/non-symlink entry, e.g. a
+          FIFO/socket/block/char device) must have ``digest=None`` (no content
+          digest is meaningful for a non-file/non-symlink kind).
         """
         if self.kind == "file" and self.mode is None:
             raise ValueError(f"UntrackedEntry kind='file' requires a mode (path={self.path!r}).")
@@ -610,6 +642,11 @@ class UntrackedEntry(BaseModel):
             raise ValueError(
                 f"UntrackedEntry kind='unknown' requires mode=None and digest=None "
                 f"(path={self.path!r})."
+            )
+        if self.kind == "other" and self.digest is not None:
+            raise ValueError(
+                f"UntrackedEntry kind='other' requires digest=None "
+                f"(no digest for non-file/non-symlink kinds; path={self.path!r})."
             )
         return self
 
@@ -648,6 +685,24 @@ class SubmoduleEntry(BaseModel):
                 f"submodule commit must be 40 lowercase hex chars (sha-1) or 'unknown'; got {v!r}."
             )
         return v
+
+    @model_validator(mode="after")
+    def _check_commit_state_consistency(self) -> SubmoduleEntry:
+        """``commit="unknown"`` is only valid with ``state="uninitialized"``.
+
+        For any other state (``initialized`` / ``changed`` / ``conflicted``),
+        ``commit`` must be a valid 40-hex SHA-1 (a real git object name), not
+        ``"unknown"``. ``git submodule status`` always emits a full SHA for an
+        initialized/changed/conflicted submodule; ``"unknown"`` is only ever
+        the capture-time encoding for an uninitialized submodule (no checkout).
+        """
+        if self.commit == "unknown" and self.state != "uninitialized":
+            raise ValueError(
+                f"SubmoduleEntry commit='unknown' is only valid with "
+                f"state='uninitialized'; got state={self.state!r} "
+                f"(name={self.name!r})."
+            )
+        return self
 
 
 class SourceCounts(BaseModel):
@@ -717,18 +772,20 @@ def _validate_evidence_limitation(v: str) -> str:
     """Reject any limitation code outside the closed vocabulary or its patterns.
 
     Exact codes must match a known literal. Count-bearing codes must look like
-    ``<known_prefix>:<non-negative-integer>``.
+    ``<known_prefix>:<positive-integer>`` — a zero count (e.g.
+    ``unreadable_untracked_files:0``) is nonsensical (it would describe zero
+    unreadable files, which is not a limitation at all) and is rejected.
     """
     if v in _EVIDENCE_LIMITATION_EXACT_CODES:
         return v
     for prefix in _EVIDENCE_LIMITATION_PREFIXES:
         if v.startswith(prefix):
             count_str = v[len(prefix) :]
-            if count_str.isdigit() and int(count_str) >= 0:
+            if count_str.isdigit() and int(count_str) >= 1:
                 return v
             raise ValueError(
                 f"evidence limitation {v!r} has a malformed count suffix "
-                f"(expected non-negative integer after {prefix!r})."
+                f"(expected a positive integer >= 1 after {prefix!r})."
             )
     raise ValueError(
         f"evidence limitation {v!r} is not a recognized code or pattern; "
@@ -797,6 +854,16 @@ class SourceEvidence(BaseModel):
           no warnings, and only the standard limitations may be present.
         - ``warnings`` are sorted, unique, and use stable codes only.
         - ``limitations`` are sorted and use stable codes/patterns only.
+        - count-bearing limitations reject a zero count suffix (a zero count is
+          not a real limitation — e.g. ``unreadable_untracked_files:0`` is
+          nonsensical).
+        - ``completeness="partial"`` requires at least one warning OR one
+          non-standard limitation (beyond the two always-present standard
+          limitations). A partial record with neither signals an explanation
+          is missing.
+        - the ``dirty_submodule_content_not_captured`` warning and the
+          ``dirty_submodules_not_snapshotted:N`` limitation are correlated: one
+          cannot appear without the other (and vice-versa).
         """
         # untracked: sorted by path + unique paths.
         untracked_paths = [e.path for e in self.untracked]
@@ -831,6 +898,19 @@ class SourceEvidence(BaseModel):
         # Limitations: sorted.
         if list(self.limitations) != sorted(self.limitations):
             raise ValueError(f"limitations must be sorted; got {list(self.limitations)!r}.")
+        # Count-bearing limitations reject a zero count (a zero count is not a
+        # real limitation). The field_validator already enforced the prefix + a
+        # positive integer; this is a defensive re-check that also produces a
+        # clear cross-field error.
+        for lim in self.limitations:
+            for prefix in _EVIDENCE_LIMITATION_PREFIXES:
+                if lim.startswith(prefix):
+                    count_str = lim[len(prefix) :]
+                    if count_str.isdigit() and int(count_str) < 1:
+                        raise ValueError(
+                            f"evidence limitation {lim!r} carries a zero count; a "
+                            "count-bearing limitation must describe at least one item."
+                        )
         # Completeness="complete" must mean no unreadable content and no
         # non-standard limitations and no warnings.
         if self.completeness == "complete":
@@ -854,11 +934,55 @@ class SourceEvidence(BaseModel):
                     f"completeness='complete' forbids non-standard limitations "
                     f"{sorted(set(non_standard))!r}."
                 )
+        # Completeness="partial" must be explained by at least one warning OR
+        # one non-standard limitation. The two always-present standard
+        # limitations (ignored files + external symlink targets) do NOT explain
+        # partial-ness by themselves — they are present on every record.
+        if self.completeness == "partial":
+            has_explanation = bool(self.warnings) or any(
+                lim not in self._STANDARD_LIMITATIONS for lim in self.limitations
+            )
+            if not has_explanation:
+                raise ValueError(
+                    "completeness='partial' requires at least one warning OR one "
+                    "non-standard limitation (beyond the standard "
+                    "ignored_files_not_included / "
+                    "external_symlink_targets_not_followed) to explain the "
+                    "partial-ness."
+                )
+        # Dirty-submodule warning ↔ limitation correlation. The warning
+        # ``dirty_submodule_content_not_captured`` and the limitation
+        # ``dirty_submodules_not_snapshotted:N`` (N >= 1) describe the SAME
+        # underlying condition from two angles; one cannot appear without the
+        # other.
+        has_dirty_submodule_warning = "dirty_submodule_content_not_captured" in self.warnings
+        has_dirty_submodule_limitation = any(
+            lim.startswith("dirty_submodules_not_snapshotted:") for lim in self.limitations
+        )
+        if has_dirty_submodule_warning != has_dirty_submodule_limitation:
+            raise ValueError(
+                "dirty_submodule_content_not_captured warning and the "
+                "dirty_submodules_not_snapshotted:N limitation must appear "
+                "together (one cannot be present without the other); got "
+                f"warnings={list(self.warnings)!r}, limitations={list(self.limitations)!r}."
+            )
         return self
 
 
 class RemoteWarning(BaseModel):
-    """Typed warning about remote URL sanitization (code-only; no free text)."""
+    """Typed warning about remote URL sanitization (code-only; no free text).
+
+    The codes are durable redaction OBSERVATIONS produced by the capture path
+    (:func:`_classify_remote_url_sanitization`) at the moment the raw URL is
+    sanitized. They are NOT re-derived from the (already-sanitized) stored URL
+    on load — the codes are Literal-validated, which is sufficient to make a
+    tampered sidecar unable to fabricate or smuggle in unknown warning text.
+    The capture path is the sole place where URL↔warning correlation is
+    performed; the :class:`SourceSnapshot` model accepts whatever codes are
+    supplied because that correlation cannot survive serialization (the stored
+    URL is already sanitized, so re-deriving required warnings on load would
+    incorrectly reject the retained warnings as fabricated).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
 
@@ -882,7 +1006,18 @@ class SourceSnapshot(BaseModel):
     snapshot_version: int = Field(default=SOURCE_SNAPSHOT_VERSION)
     commit_sha: str = Field(..., min_length=1)
     branch: str = Field(default="HEAD")
-    remote_url: str | None = Field(default=None)  # already sanitized at capture time
+    # The sanitized remote URL (or ``None`` when no origin was configured). The
+    # raw URL is sanitized in the capture path (:func:`_classify_remote_url_sanitization`)
+    # BEFORE construction, so the model only ever stores the already-sanitized
+    # form. ``remote_warnings`` carry the Literal redaction-observation codes
+    # (e.g. ``remote_credentials_removed``); they are self-validating after
+    # serialization because the codes are Literal-validated, and the capture
+    # path produces them in lock-step with sanitization. The model therefore
+    # does NOT correlate ``remote_url`` with ``remote_warnings``: that
+    # correlation cannot survive a sidecar round-trip (the stored URL is
+    # already sanitized, so the classifier would derive no required warnings
+    # and reject the retained warnings as fabricated).
+    remote_url: str | None = Field(default=None)
     remote_warnings: tuple[RemoteWarning, ...] = Field(default_factory=tuple)
     is_clean: bool
     is_canonical: bool
@@ -909,68 +1044,6 @@ class SourceSnapshot(BaseModel):
         if not _DIGEST_HEX_PATTERN.fullmatch(v):
             raise ValueError(f"digest must be 64 lowercase hex chars (sha256); got {v!r}.")
         return v
-
-    @model_validator(mode="after")
-    def _verify_remote_url_warnings(self) -> SourceSnapshot:
-        """Correlate ``remote_url`` with ``remote_warnings`` at the model level.
-
-        The correlation is TWO-WAY. Computes the canonical sanitization of the
-        stored ``remote_url`` using the same classifier used at capture time:
-
-        - Required warnings must be present: whenever the sanitized value
-          differs from what was supplied, the appropriate warning(s) MUST be in
-          ``remote_warnings`` — otherwise the lossy sanitization would be silent.
-        - Impossible warnings must be ABSENT: when ``remote_url`` is a clean
-          HTTPS URL with no credentials/query/fragment (or any URL the classifier
-          leaves untouched), the supplied warnings MUST exactly equal the
-          expected set. A fabricated warning (e.g. ``remote_credentials_removed``
-          on a URL that never carried credentials) is rejected as contradictory.
-
-        A ``None`` ``remote_url`` (no origin) MUST carry no warnings: warnings
-        without a URL are contradictory and a likely sign of a tampered sidecar.
-
-        The stored URL is replaced with the sanitized form (bypassing the frozen
-        check) so callers always see the canonical value. SCP-style
-        ``git@host:path`` URLs have no ``://`` scheme; their ``git`` is a
-        protocol user, not a credential — they are NOT flagged.
-        """
-        supplied_codes = {w.code for w in self.remote_warnings}
-        if self.remote_url is None:
-            # No origin → no sanitization ever happened → no warnings are valid.
-            if supplied_codes:
-                raise ValueError(
-                    f"remote_url is None but remote_warnings are present "
-                    f"{sorted(supplied_codes)!r}; a missing remote URL cannot "
-                    "carry sanitization warnings."
-                )
-            return self
-        expected_sanitized, expected_codes = _classify_remote_url_sanitization(self.remote_url)
-        expected_set = set(expected_codes)
-        # Each expected warning must be present (a missing warning means the
-        # sanitization lost information silently).
-        missing = [c for c in expected_codes if c not in supplied_codes]
-        if missing:
-            raise ValueError(
-                f"remote_url sanitization required warning codes {sorted(missing)!r} "
-                "but they are absent from remote_warnings; remote URL sanitization "
-                "must not lose information silently."
-            )
-        # No extra/impossible warnings: the supplied set must equal the expected
-        # set. A warning that the classifier did not require is fabricated
-        # (e.g. ``remote_credentials_removed`` on a clean URL with no userinfo).
-        extra = sorted(supplied_codes - expected_set)
-        if extra:
-            raise ValueError(
-                f"remote_url {self.remote_url!r} does not justify remote_warnings "
-                f"{extra!r}; the classifier expected only {sorted(expected_set)!r}. "
-                "Fabricated or impossible remote warnings are not permitted."
-            )
-        # Replace the stored value with its canonical sanitized form. The model
-        # is frozen; use object.__setattr__ to bypass the frozen check (this is
-        # canonicalization, not mutation of caller-supplied semantics).
-        if expected_sanitized != self.remote_url:
-            object.__setattr__(self, "remote_url", expected_sanitized)
-        return self
 
     @model_validator(mode="after")
     def _verify_source_invariants(self) -> SourceSnapshot:
@@ -1065,21 +1138,23 @@ def capture_source_snapshot(repo: Path | str, *, allow_dirty: bool = False) -> S
     tree_digest = _clean_tree_digest(repo_path)
     commit_sha = _head_sha(repo_path)
     branch = _branch_ref(repo_path)
-    # Capture the RAW remote URL and pre-compute the expected sanitization
-    # warnings. The SourceSnapshot model_validator recomputes the sanitization
-    # from the (still raw) stored URL and verifies the warnings match — so the
-    # raw URL must be supplied to the constructor, not the sanitized form.
+    # Capture the RAW remote URL and compute the sanitization (sanitized value
+    # + warning codes) in the CAPTURE PATH. The capture path is the sole place
+    # where URL↔warning correlation is performed: it sanitizes the raw URL,
+    # derives the matching warning codes, and supplies BOTH the sanitized URL
+    # and the codes to the constructor. The :class:`SourceSnapshot` model
+    # accepts whatever it is given — the codes are Literal-validated and the
+    # URL is already sanitized — so a sidecar round-trip (which sees the
+    # already-sanitized URL and the retained codes) re-validates without
+    # re-deriving redactions from the sanitized URL.
     raw_url = _raw_remote_url(repo_path)
-    # Pre-compute the expected sanitization warning codes. The model_validator
-    # recomputes the sanitization from the raw stored URL and verifies these
-    # warnings are present, so capture must supply them.
-    _, remote_warn_codes = _classify_remote_url_sanitization(raw_url)
+    sanitized_url, remote_warn_codes = _classify_remote_url_sanitization(raw_url)
     evidence = _build_dirty_evidence(repo_path) if dirty else None
     input_digest = _envelope_digest(tree_digest, evidence)
     return SourceSnapshot(
         commit_sha=commit_sha,
         branch=branch,
-        remote_url=raw_url or None,  # raw; model_validator sanitizes + verifies warnings
+        remote_url=sanitized_url,
         remote_warnings=tuple(RemoteWarning(code=w) for w in remote_warn_codes),
         is_clean=not dirty,
         is_canonical=not dirty,

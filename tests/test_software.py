@@ -108,19 +108,22 @@ class TestSoftwareCaptureAllowlist:
 
     def test_dependency_conflicts_recorded_on_version_mismatch(self) -> None:
         # When the SAME normalized name appears at DIFFERENT versions, the first
-        # observation wins and the conflict is recorded on the model. We verify
-        # the model carries and round-trips the dependency_conflicts field.
+        # observation wins and the conflict (name + sorted unique observed
+        # versions) is recorded on the model as a typed DependencyConflict. We
+        # verify the model carries and round-trips the dependency_conflicts field.
         from expertforge.provenance.record import (
+            DependencyConflict,
             DependencyObservation,
             PythonInfo,
         )
 
+        conflict = DependencyConflict(name="numpy", observed_versions=("1.0.0", "2.0.0"))
         env = SoftwareEnvironment(
             python=PythonInfo(version="3.11", implementation="cpython"),
             dependencies=(DependencyObservation(name="numpy", version="1.0.0"),),
-            dependency_conflicts=("dependency_version_conflict:numpy:1.0.0!=2.0.0",),
+            dependency_conflicts=(conflict,),
         )
-        assert env.dependency_conflicts == ("dependency_version_conflict:numpy:1.0.0!=2.0.0",)
+        assert env.dependency_conflicts == (conflict,)
         # Round-trips through JSON.
         restored = SoftwareEnvironment.model_validate_json(env.model_dump_json())
         assert restored.dependency_conflicts == env.dependency_conflicts
@@ -128,20 +131,23 @@ class TestSoftwareCaptureAllowlist:
     def test_dependency_conflicts_must_be_sorted_unique(self) -> None:
         from pydantic import ValidationError as PydanticValidationError
 
-        from expertforge.provenance.record import PythonInfo
+        from expertforge.provenance.record import DependencyConflict, PythonInfo
 
         with pytest.raises(PydanticValidationError):
             SoftwareEnvironment(
                 python=PythonInfo(version="3.11", implementation="cpython"),
                 dependency_conflicts=(
-                    "z_conflict",
-                    "a_conflict",
-                ),  # unsorted
+                    DependencyConflict(name="zeta", observed_versions=("1.0.0", "2.0.0")),
+                    DependencyConflict(name="alpha", observed_versions=("1.0.0", "2.0.0")),
+                ),  # unsorted by name
             )
         with pytest.raises(PydanticValidationError):
             SoftwareEnvironment(
                 python=PythonInfo(version="3.11", implementation="cpython"),
-                dependency_conflicts=("dup", "dup"),  # duplicate
+                dependency_conflicts=(
+                    DependencyConflict(name="numpy", observed_versions=("1.0.0", "2.0.0")),
+                    DependencyConflict(name="numpy", observed_versions=("1.0.0", "3.0.0")),
+                ),  # duplicate name
             )
 
 
