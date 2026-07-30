@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #7 provenance in review (not yet merged).
+Last updated: Milestone 0 in progress; #7 provenance/environment completed on `main`.
 
 ## Current milestone
 
@@ -41,40 +41,46 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#7 — M0.4 source provenance and execution environment — in review**
-  (PR #18, not yet merged). The next dependency-ordered action after #7 merges.
-- **#8 — M0.5 deterministic seed and RNG-state management** — may proceed in
-  parallel (depends only on #4/#5).
-- **#13 — M0.10 test/CI harness** — may begin early in parallel.
-- #3 umbrella and #9–#14 (other than #7) are open and dependency-ordered.
+- **#8 — M0.5 deterministic seed and RNG-state management** — available next;
+  depends only on #4/#5.
+- **#9 — M0.6 structured logging and metrics** — available next now that #7 is
+  complete; #10 follows #9.
+- **#13 — M0.10 test/CI harness** — may proceed early in parallel.
+- **#10 — artifact management** follows #9; **#11 — checkpoints** follows #8;
+  **#12 — experiment manifests** follows #5/#6/#7/#9/#10/#11; **#14 — smoke and
+  recovery gate** remains last.
+- #3 umbrella remains open.
 - **#4 — M0.1 repository and Python package scaffold — completed.**
 - **#5 — M0.2 validated configuration resolution — completed.**
 - **#6 — M0.3 run identity and configuration fingerprints — completed.**
+- **#7 — M0.4 source provenance and execution environment — completed** via
+  PR #18, squash commit `f59916228d730675151149c74e0dde2ac2a1aadc`.
 
 ## Open pull requests
 
-- PR #18 — #7 source provenance and execution environment (open, in review).
+- None after this state synchronization merges.
 
 ## Known blockers
 
-- PR #18 (#7) is under review; #9 (logging), #10 (artifacts) wait for #7 to
-  merge. #8 (seed/RNG) and #13 (CI) may proceed in parallel.
+- #8, #9, and #13 have no remaining dependency blocker and may proceed.
+- #10 waits for #9; #11 waits for #8; #12 waits for #9/#10/#11; #14 waits for
+  the complete Milestone 0 substrate.
 
 ## Latest accepted experiment
 
 - None yet. No experiments run; experiments will be recorded through the
-  `experiment` issue template (which now requires a maturity stage and a
-  research family) and the experiment doctrine
+  `experiment` issue template (which requires a maturity stage and a research
+  family) and the experiment doctrine
   ([doctrine/evaluation-and-experiments.md](doctrine/evaluation-and-experiments.md)).
 
 ## Next recommended action
 
-1. Resolve PR #18 (#7 provenance) review — the binding contract gaps must be
-   fixed before #7 can merge.
-2. In parallel, **#8 (seed/RNG)** may proceed (depends only on #4/#5), and
-   **#13 (test/CI harness)** may start early.
-3. After #7 merges: #9 (logging), #10 (artifacts); #11 after #8; #12 after
-   #5/#6/#7/#9/#10/#11; #14 last.
+1. Begin **#8 (seed/RNG)** and **#9 (logging/metrics)**; **#13 (test/CI harness)**
+   may proceed in parallel.
+2. After #9, implement **#10 (artifacts)**; after #8, implement **#11
+   (checkpoints)**.
+3. Implement **#12 (manifests)** after #9/#10/#11, then complete **#14
+   (smoke-and-recovery gate)** last.
 4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
