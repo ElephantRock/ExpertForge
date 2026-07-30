@@ -89,6 +89,8 @@ checkpoint embedding without pre-empting Issue #11's file-format ownership.
   behavior without reusing the root seed.
 - Provider doubles exercise configuration/state snapshots, distinct device
   streams, seed failure, restore failure, and complete rollback.
+- Optional provider probes and API failures are translated into stable typed codes;
+  raw exception text is not persisted in RNG evidence.
 - Permanent CI tests same-seed equality, different-seed sensitivity, state
   round-trip, subprocess repeatability, adapter behavior, and failure paths.
 
