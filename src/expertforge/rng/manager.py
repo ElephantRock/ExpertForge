@@ -12,7 +12,11 @@ import numpy as np
 
 from expertforge.config.models import ConfigRoot
 from expertforge.rng.adapters import FrameworkRngAdapter
-from expertforge.rng.derivation import DerivedSeed, SeedContext, derive_seed
+from expertforge.rng.derivation import (
+    DerivedSeed,
+    SeedContext,
+    derive_substream_seed,
+)
 from expertforge.rng.state import (
     RNG_STATE_SCHEMA_VERSION,
     DeterminismMode,
@@ -23,6 +27,7 @@ from expertforge.rng.state import (
     RngStateBundle,
     RngWarningCode,
     UnsupportedDeterminismPolicy,
+    framework_state_sort_key,
 )
 
 __all__ = ["RngInitialization", "RngManager", "RngManagerError"]
@@ -35,8 +40,15 @@ RngManagerErrorCode = Literal[
     "invalid_unsupported_determinism_policy",
     "state_contract_mismatch",
     "framework_provider_set_mismatch",
+    "framework_seed_plan_mismatch",
+    "initialization_rollback_failed",
+    "restore_rollback_failed",
     "python_state_invalid",
     "numpy_state_invalid",
+]
+RollbackErrorCode = Literal[
+    "initialization_rollback_failed",
+    "restore_rollback_failed",
 ]
 
 
@@ -55,6 +67,13 @@ class RngInitialization:
     derived_seeds: tuple[DerivedSeed, ...]
     warning_codes: tuple[RngWarningCode, ...]
     active_frameworks: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _AdapterSnapshot:
+    adapter: FrameworkRngAdapter
+    configuration: object
+    states: tuple[FrameworkRngState, ...]
 
 
 class RngManager:
@@ -140,55 +159,66 @@ class RngManager:
         python_seed = self._derive_for("python")
         numpy_legacy_seed = self._derive_for("numpy-legacy")
         numpy_generator_seed = self._derive_for("numpy-generator")
-        adapter_seeds = tuple(
-            (adapter, self._derive_for(adapter.provider)) for adapter in self._adapters
+        adapter_plans = tuple(
+            (adapter, adapter.derive_seeds(self.root_seed, self.context))
+            for adapter in self._adapters
         )
+        staged_generator = np.random.Generator(
+            np.random.PCG64(np.random.SeedSequence(self._seed_words(numpy_generator_seed)))
+        )
+        python_before = random.getstate()
+        numpy_before = np.random.get_state(legacy=True)
+        adapter_before = self._capture_adapter_snapshots()
 
         warnings: set[RngWarningCode] = set()
         if self.determinism_mode == "performance":
             warnings.add("performance_mode_enabled")
-        for adapter, _ in adapter_seeds:
-            warnings.update(adapter.configure(self.determinism_mode, self.unsupported_determinism))
-
-        random.seed(python_seed.seed_u64, version=2)
-        np.random.seed(numpy_legacy_seed.seed_u32)
-        self._generator = np.random.Generator(
-            np.random.PCG64(np.random.SeedSequence(self._seed_words(numpy_generator_seed)))
-        )
-
-        for adapter, seed in adapter_seeds:
-            warnings.update(adapter.seed(seed))
-
-        derived = tuple(
-            sorted(
-                (
-                    python_seed,
-                    numpy_legacy_seed,
-                    numpy_generator_seed,
-                    *(seed for _, seed in adapter_seeds),
-                ),
-                key=lambda item: item.context.component,
+        adapter_results: list[tuple[DerivedSeed, ...]] = []
+        try:
+            for adapter in self._adapters:
+                warnings.update(
+                    adapter.configure(self.determinism_mode, self.unsupported_determinism)
+                )
+            random.seed(python_seed.seed_u64, version=2)
+            np.random.seed(numpy_legacy_seed.seed_u32)
+            for adapter, expected_seeds in adapter_plans:
+                result = adapter.seed(self.root_seed, self.context)
+                if result.derived_seeds != expected_seeds:
+                    raise RngManagerError("framework_seed_plan_mismatch")
+                adapter_results.append(result.derived_seeds)
+                warnings.update(result.warning_codes)
+        except Exception:
+            self._rollback(
+                python_before,
+                numpy_before,
+                adapter_before,
+                code="initialization_rollback_failed",
             )
+            raise
+
+        derived = self._sorted_derived_seeds(
+            python_seed,
+            numpy_legacy_seed,
+            numpy_generator_seed,
+            *(seed for result in adapter_results for seed in result),
         )
-        self._initialization = RngInitialization(
+        initialization = RngInitialization(
             derived_seeds=derived,
             warning_codes=tuple(sorted(warnings)),
             active_frameworks=tuple(adapter.provider for adapter in self._adapters),
         )
-        return self._initialization
+        self._generator = staged_generator
+        self._initialization = initialization
+        return initialization
 
     def capture_state(self) -> RngStateBundle:
         """Capture the next-sample position of every active RNG."""
 
         initialization = self.initialization
-        python_state = random.getstate()
-        numpy_legacy = np.random.get_state(legacy=True)
-        generator_state = self.generator.bit_generator.state
-
         framework_states = tuple(
             sorted(
                 (state for adapter in self._adapters for state in adapter.capture()),
-                key=lambda item: (item.provider, item.device),
+                key=framework_state_sort_key,
             )
         )
         return RngStateBundle(
@@ -197,9 +227,11 @@ class RngManager:
             context=self.context,
             determinism_mode=self.determinism_mode,
             unsupported_determinism=self.unsupported_determinism,
-            python=self._python_state_from_runtime(python_state),
-            numpy_legacy=self._numpy_legacy_from_runtime(numpy_legacy),
-            numpy_generator=self._numpy_generator_from_runtime(generator_state),
+            python=self._python_state_from_runtime(random.getstate()),
+            numpy_legacy=self._numpy_legacy_from_runtime(np.random.get_state(legacy=True)),
+            numpy_generator=self._numpy_generator_from_runtime(
+                self.generator.bit_generator.state
+            ),
             framework_states=framework_states,
             warning_codes=initialization.warning_codes,
         )
@@ -223,71 +255,115 @@ class RngManager:
         adapter_providers = {adapter.provider for adapter in self._adapters}
         if set(states_by_provider) != adapter_providers:
             raise RngManagerError("framework_provider_set_mismatch")
-
         for adapter in self._adapters:
             adapter.validate_restore(states_by_provider[adapter.provider])
 
+        staged_generator = self._generator_from_state(bundle.numpy_generator)
+        planned_adapter_seeds = tuple(
+            seed
+            for adapter in self._adapters
+            for seed in adapter.derive_seeds(self.root_seed, self.context)
+        )
+        python_before = random.getstate()
+        numpy_before = np.random.get_state(legacy=True)
+        adapter_before = self._capture_adapter_snapshots()
+
         configure_warnings: set[RngWarningCode] = set()
-        for adapter in self._adapters:
-            configure_warnings.update(
-                adapter.configure(self.determinism_mode, self.unsupported_determinism)
-            )
-        if not configure_warnings.issubset(set(bundle.warning_codes)):
-            raise RngManagerError("state_contract_mismatch")
-
-        random.setstate(
-            (
-                bundle.python.version,
-                tuple(bundle.python.internal_state),
-                bundle.python.gauss_next,
-            )
-        )
-        np.random.set_state(
-            (
-                bundle.numpy_legacy.algorithm,
-                np.asarray(bundle.numpy_legacy.keys, dtype=np.uint32),
-                bundle.numpy_legacy.position,
-                bundle.numpy_legacy.has_gauss,
-                bundle.numpy_legacy.cached_gaussian,
-            )
-        )
-        generator = np.random.Generator(np.random.PCG64())
-        generator.bit_generator.state = {
-            "bit_generator": bundle.numpy_generator.bit_generator,
-            "state": {
-                "state": bundle.numpy_generator.state,
-                "inc": bundle.numpy_generator.increment,
-            },
-            "has_uint32": bundle.numpy_generator.has_uint32,
-            "uinteger": bundle.numpy_generator.uinteger,
-        }
-        self._generator = generator
-
-        for adapter in self._adapters:
-            adapter.restore(states_by_provider[adapter.provider])
-
-        derived = tuple(
-            sorted(
+        try:
+            for adapter in self._adapters:
+                configure_warnings.update(
+                    adapter.configure(self.determinism_mode, self.unsupported_determinism)
+                )
+            if not configure_warnings.issubset(set(bundle.warning_codes)):
+                raise RngManagerError("state_contract_mismatch")
+            random.setstate(
                 (
-                    self._derive_for("python"),
-                    self._derive_for("numpy-legacy"),
-                    self._derive_for("numpy-generator"),
-                    *(self._derive_for(adapter.provider) for adapter in self._adapters),
-                ),
-                key=lambda item: item.context.component,
+                    bundle.python.version,
+                    tuple(bundle.python.internal_state),
+                    bundle.python.gauss_next,
+                )
             )
-        )
-        self._initialization = RngInitialization(
-            derived_seeds=derived,
+            np.random.set_state(self._numpy_legacy_to_runtime(bundle.numpy_legacy))
+            for adapter in self._adapters:
+                adapter.restore(states_by_provider[adapter.provider])
+        except Exception:
+            self._rollback(
+                python_before,
+                numpy_before,
+                adapter_before,
+                code="restore_rollback_failed",
+            )
+            raise
+
+        initialization = RngInitialization(
+            derived_seeds=self._sorted_derived_seeds(
+                self._derive_for("python"),
+                self._derive_for("numpy-legacy"),
+                self._derive_for("numpy-generator"),
+                *planned_adapter_seeds,
+            ),
             warning_codes=bundle.warning_codes,
             active_frameworks=tuple(adapter.provider for adapter in self._adapters),
         )
-        return self._initialization
+        self._generator = staged_generator
+        self._initialization = initialization
+        return initialization
+
+    def _capture_adapter_snapshots(self) -> tuple[_AdapterSnapshot, ...]:
+        return tuple(
+            _AdapterSnapshot(
+                adapter=adapter,
+                configuration=adapter.capture_configuration(),
+                states=adapter.capture(),
+            )
+            for adapter in self._adapters
+        )
+
+    def _rollback(
+        self,
+        python_state: object,
+        numpy_state: object,
+        adapter_snapshots: tuple[_AdapterSnapshot, ...],
+        *,
+        code: RollbackErrorCode,
+    ) -> None:
+        first_error: Exception | None = None
+        try:
+            random.setstate(cast(tuple[Any, ...], python_state))
+        except Exception as exc:
+            first_error = exc
+        try:
+            np.random.set_state(cast(Any, numpy_state))
+        except Exception as exc:
+            first_error = first_error or exc
+        for snapshot in reversed(adapter_snapshots):
+            try:
+                snapshot.adapter.restore(snapshot.states)
+            except Exception as exc:
+                first_error = first_error or exc
+            try:
+                snapshot.adapter.restore_configuration(snapshot.configuration)
+            except Exception as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise RngManagerError(code) from first_error
 
     def _derive_for(self, subsystem: str) -> DerivedSeed:
-        return derive_seed(
-            self.root_seed,
-            self.context.child(component=f"{self.context.component}.{subsystem}"),
+        return derive_substream_seed(self.root_seed, self.context, subsystem)
+
+    @staticmethod
+    def _sorted_derived_seeds(*seeds: DerivedSeed) -> tuple[DerivedSeed, ...]:
+        return tuple(
+            sorted(
+                seeds,
+                key=lambda item: (
+                    item.context.component,
+                    item.context.worker,
+                    item.context.rank,
+                    item.context.device,
+                    item.context.stream,
+                ),
+            )
         )
 
     @staticmethod
@@ -296,6 +372,30 @@ class RngManager:
         return tuple(
             int.from_bytes(digest[offset : offset + 4], "big", signed=False)
             for offset in range(0, len(digest), 4)
+        )
+
+    @staticmethod
+    def _generator_from_state(state: NumpyGeneratorState) -> np.random.Generator:
+        generator = np.random.Generator(np.random.PCG64())
+        generator.bit_generator.state = {
+            "bit_generator": state.bit_generator,
+            "state": {
+                "state": state.state,
+                "inc": state.increment,
+            },
+            "has_uint32": state.has_uint32,
+            "uinteger": state.uinteger,
+        }
+        return generator
+
+    @staticmethod
+    def _numpy_legacy_to_runtime(state: NumpyLegacyState) -> tuple[object, ...]:
+        return (
+            state.algorithm,
+            np.asarray(state.keys, dtype=np.uint32),
+            state.position,
+            state.has_gauss,
+            state.cached_gaussian,
         )
 
     @staticmethod
