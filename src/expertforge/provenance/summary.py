@@ -15,7 +15,7 @@ __all__ = ["format_provenance_summary"]
 def _source_lines(record: ProvenanceRecord) -> list[str]:
     if record.source is None:
         return []
-    s = record.source.summary
+    s = record.source
     return [
         f"commit: {s.commit_sha[:12]}",
         f"branch: {s.branch}",

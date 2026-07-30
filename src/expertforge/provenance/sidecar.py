@@ -18,10 +18,12 @@ from pathlib import Path
 
 from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.record import ProvenanceRecord
+from expertforge.provenance.source_snapshot import SourceSnapshot
 
 __all__ = [
     "ProvenanceSidecarError",
     "load_provenance_sidecar",
+    "parse_provenance_sidecar",
     "provenance_sidecar_path",
     "write_provenance_sidecar",
 ]
@@ -115,21 +117,57 @@ def write_provenance_sidecar(artifact_root: Path, record: ProvenanceRecord) -> P
 def load_provenance_sidecar(
     path: Path,
     *,
-    expected_identity: AttemptIdentityRecord | None = None,
-    expected_source_digest: str | None = None,
+    expected_identity: AttemptIdentityRecord,
+    expected_source_snapshot: SourceSnapshot,
 ) -> ProvenanceRecord:
-    """Load and validate a provenance sidecar.
+    """Authoritatively load and verify a provenance sidecar.
 
-    When ``expected_identity`` is supplied, verifies the loaded record's
-    run_id, attempt_id, specification fingerprint, immutable inputs, and
-    timestamp match the identity. When ``expected_source_digest`` is supplied,
-    verifies the ``source.snapshot`` input digest matches it.
-
-    Raises :class:`ProvenanceSidecarError` on any mismatch.
+    **Both** ``expected_identity`` and ``expected_source_snapshot`` are
+    **required** — this is the verified load path. The loaded record's run_id,
+    attempt_id, timestamp, specification fingerprint, immutable inputs, and
+    source-snapshot envelope/digest are verified against these external
+    references. A self-consistent but unrelated record is rejected.
 
     Raises :class:`ProvenanceSidecarError` for missing files, invalid UTF-8,
-    malformed or non-object JSON, unknown schema versions, or validation
-    failures.
+    malformed or non-object JSON, unknown schema versions, validation failures,
+    or any binding mismatch.
+    """
+    record = parse_provenance_sidecar(path)
+
+    ident = expected_identity
+    if record.run_id != ident.run_id:
+        raise ProvenanceSidecarError(
+            f"run_id mismatch: record {record.run_id!r} vs identity {ident.run_id!r}."
+        )
+    if record.attempt_id != ident.attempt_id:
+        raise ProvenanceSidecarError(
+            f"attempt_id mismatch: record {record.attempt_id!r} vs identity {ident.attempt_id!r}."
+        )
+    if record.start_time_utc != ident.created_at_utc:
+        raise ProvenanceSidecarError(
+            f"timestamp mismatch: record {record.start_time_utc!r} vs identity {ident.created_at_utc!r}."
+        )
+    if record.specification_fingerprint != ident.specification_fingerprint:
+        raise ProvenanceSidecarError("specification_fingerprint mismatch.")
+    if record.immutable_inputs != ident.specification_fingerprint.immutable_inputs:
+        raise ProvenanceSidecarError("immutable_inputs mismatch.")
+
+    # Verify the complete source snapshot matches.
+    if record.source != expected_source_snapshot:
+        raise ProvenanceSidecarError(
+            "source snapshot mismatch: the loaded record's source does not "
+            "match the expected SourceSnapshot."
+        )
+
+    return record
+
+
+def parse_provenance_sidecar(path: Path) -> ProvenanceRecord:
+    """Parse a provenance sidecar WITHOUT external identity/source verification.
+
+    This is the internal unverified parser — it validates schema/version/fields
+    but does not verify binding to an external identity or source snapshot.
+    Use :func:`load_provenance_sidecar` for the authoritative verified path.
     """
     try:
         raw = path.read_bytes()
@@ -154,39 +192,6 @@ def load_provenance_sidecar(
         )
 
     try:
-        record = ProvenanceRecord.from_mapping(data)
+        return ProvenanceRecord.from_mapping(data)
     except ValueError as e:
         raise ProvenanceSidecarError(f"Provenance sidecar {path} failed validation: {e}") from e
-
-    # Verify against the expected identity when supplied.
-    if expected_identity is not None:
-        ident = expected_identity
-        if record.run_id != ident.run_id:
-            raise ProvenanceSidecarError(
-                f"run_id mismatch: record {record.run_id!r} vs identity {ident.run_id!r}."
-            )
-        if record.attempt_id != ident.attempt_id:
-            raise ProvenanceSidecarError(
-                f"attempt_id mismatch: record {record.attempt_id!r} vs identity {ident.attempt_id!r}."
-            )
-        if record.start_time_utc != ident.created_at_utc:
-            raise ProvenanceSidecarError(
-                f"timestamp mismatch: record {record.start_time_utc!r} vs identity {ident.created_at_utc!r}."
-            )
-        if record.specification_fingerprint != ident.specification_fingerprint:
-            raise ProvenanceSidecarError("specification_fingerprint mismatch.")
-        if record.immutable_inputs != ident.specification_fingerprint.immutable_inputs:
-            raise ProvenanceSidecarError("immutable_inputs mismatch.")
-
-    # Verify the source.snapshot digest when supplied.
-    if expected_source_digest is not None:
-        snap_input = next(
-            (ii for ii in record.immutable_inputs if ii.name == "source.snapshot"),
-            None,
-        )
-        if snap_input is None or snap_input.digest != expected_source_digest:
-            raise ProvenanceSidecarError(
-                f"source.snapshot digest mismatch: expected {expected_source_digest!r}."
-            )
-
-    return record

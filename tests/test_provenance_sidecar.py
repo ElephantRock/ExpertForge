@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,27 +18,54 @@ import pytest
 
 from expertforge.config.resolve import resolve_config
 from expertforge.identity.emit import emit_attempt_identity
+from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.record import PROVENANCE_SCHEMA_VERSION, ProvenanceRecord
 from expertforge.provenance.sidecar import (
     ProvenanceSidecarError,
     load_provenance_sidecar,
+    parse_provenance_sidecar,
     provenance_sidecar_path,
     write_provenance_sidecar,
 )
 from expertforge.provenance.software import capture_software_environment
+from expertforge.provenance.source_snapshot import (
+    SourceSnapshot,
+    capture_source_snapshot,
+    source_snapshot_immutable_input,
+)
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 _FIXED = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
 
+def _init_repo(repo: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+
 def _record(tmp_path: Path, **sections: object) -> ProvenanceRecord:
+    ident, snap = _identity_and_snap(tmp_path)
+    return ProvenanceRecord.from_identity(ident, source=snap, **sections)  # type: ignore[arg-type]
+
+
+def _identity_and_snap(tmp_path: Path) -> tuple[AttemptIdentityRecord, SourceSnapshot]:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    _init_repo(repo)
+    snap = capture_source_snapshot(repo)
     ident, _ = emit_attempt_identity(
         artifact_root=tmp_path,
         config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+        immutable_inputs=[source_snapshot_immutable_input(snap)],
         clock=lambda: _FIXED,
         entropy=lambda n: bytes(n),
     )
-    return ProvenanceRecord.from_identity(ident, **sections)  # type: ignore[arg-type]
+    return ident, snap
 
 
 # --- path layout ----------------------------------------------------------
@@ -127,15 +155,15 @@ class TestProvenanceSidecarWrite:
 
 
 class TestProvenanceSidecarLoad:
-    def test_load_round_trips(self, tmp_path: Path) -> None:
+    def test_parse_round_trips(self, tmp_path: Path) -> None:
         rec = _record(tmp_path, software=capture_software_environment())
         write_provenance_sidecar(tmp_path, rec)
-        loaded = load_provenance_sidecar(
+        loaded = parse_provenance_sidecar(
             provenance_sidecar_path(tmp_path, rec.run_id, rec.attempt_id)
         )
         assert loaded == rec
 
-    def test_load_rejects_unknown_schema_version(self, tmp_path: Path) -> None:
+    def test_parse_rejects_unknown_schema_version(self, tmp_path: Path) -> None:
         rec = _record(tmp_path)
         p = provenance_sidecar_path(tmp_path, rec.run_id, rec.attempt_id)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -143,40 +171,44 @@ class TestProvenanceSidecarLoad:
         bad["provenance_schema_version"] = 999
         p.write_text(json.dumps(bad, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         with pytest.raises(ProvenanceSidecarError):
-            load_provenance_sidecar(p)
+            parse_provenance_sidecar(p)
 
-    def test_load_rejects_non_object_json(self, tmp_path: Path) -> None:
+    def test_parse_rejects_non_object_json(self, tmp_path: Path) -> None:
         rec = _record(tmp_path)
         p = provenance_sidecar_path(tmp_path, rec.run_id, rec.attempt_id)
         p.parent.mkdir(parents=True, exist_ok=True)
         for bad in ["[]", "null", "42", '"x"']:
             p.write_text(bad, encoding="utf-8")
             with pytest.raises(ProvenanceSidecarError):
-                load_provenance_sidecar(p)
+                parse_provenance_sidecar(p)
 
-    def test_load_rejects_invalid_utf8(self, tmp_path: Path) -> None:
+    def test_parse_rejects_invalid_utf8(self, tmp_path: Path) -> None:
         rec = _record(tmp_path)
         p = provenance_sidecar_path(tmp_path, rec.run_id, rec.attempt_id)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(b"\xff\xfe bad")
         with pytest.raises(ProvenanceSidecarError):
-            load_provenance_sidecar(p)
+            parse_provenance_sidecar(p)
 
-    def test_load_missing_file(self, tmp_path: Path) -> None:
+    def test_parse_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(ProvenanceSidecarError):
-            load_provenance_sidecar(tmp_path / "nope.json")
+            parse_provenance_sidecar(tmp_path / "nope.json")
 
     def test_load_rejects_identity_mismatch(self, tmp_path: Path) -> None:
         from expertforge.config.resolve import resolve_config
         from expertforge.identity.emit import emit_attempt_identity
 
         # Write a record for identity A, then try to load with identity B.
-        rec_a = _record(tmp_path)
+        ident_a, snap_a = _identity_and_snap(tmp_path)
+        rec_a = ProvenanceRecord.from_identity(ident_a, source=snap_a)
         write_provenance_sidecar(tmp_path, rec_a)
-        # A different identity (different entropy).
+        # A different identity (different entropy), same source input.
+        repo = tmp_path / "repo"  # already initialized by _identity_and_snap
+        snap = capture_source_snapshot(repo)
         ident_b, _ = emit_attempt_identity(
             artifact_root=tmp_path,
             config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
+            immutable_inputs=[source_snapshot_immutable_input(snap)],
             clock=lambda: _FIXED,
             entropy=lambda n: b"\xff" * n,
         )
@@ -184,33 +216,41 @@ class TestProvenanceSidecarLoad:
             load_provenance_sidecar(
                 provenance_sidecar_path(tmp_path, rec_a.run_id, rec_a.attempt_id),
                 expected_identity=ident_b,
+                expected_source_snapshot=snap,
             )
 
-    def test_load_accepts_matching_identity(self, tmp_path: Path) -> None:
-        from expertforge.config.resolve import resolve_config
-        from expertforge.identity.emit import emit_attempt_identity
-
-        ident, _ = emit_attempt_identity(
-            artifact_root=tmp_path,
-            config_envelope=resolve_config(CONFIGS / "smoke.yaml"),
-            clock=lambda: _FIXED,
-            entropy=lambda n: bytes(n),
-        )
-        rec = ProvenanceRecord.from_identity(ident)
+    def test_load_accepts_matching_identity_and_source(self, tmp_path: Path) -> None:
+        ident, snap = _identity_and_snap(tmp_path)
+        rec = ProvenanceRecord.from_identity(ident, source=snap)
         write_provenance_sidecar(tmp_path, rec)
         loaded = load_provenance_sidecar(
             provenance_sidecar_path(tmp_path, ident.run_id, ident.attempt_id),
             expected_identity=ident,
+            expected_source_snapshot=snap,
         )
         assert loaded == rec
 
-    def test_load_rejects_source_digest_mismatch(self, tmp_path: Path) -> None:
-        rec = _record(tmp_path)
+    def test_load_rejects_source_snapshot_mismatch(self, tmp_path: Path) -> None:
+        from expertforge.provenance.source_snapshot import SourceSnapshot, _envelope_digest
+
+        ident, snap_a = _identity_and_snap(tmp_path)
+        rec = ProvenanceRecord.from_identity(ident, source=snap_a)
         write_provenance_sidecar(tmp_path, rec)
+        # Build a different SourceSnapshot with a different tree_digest.
+        tree = "b" * 64
+        input_d = _envelope_digest(tree, None)
+        wrong_snap = SourceSnapshot(
+            commit_sha="1" * 40,
+            is_clean=True,
+            is_canonical=True,
+            tree_digest=tree,
+            input_digest=input_d,
+        )
         with pytest.raises(ProvenanceSidecarError):
             load_provenance_sidecar(
-                provenance_sidecar_path(tmp_path, rec.run_id, rec.attempt_id),
-                expected_source_digest="0" * 64,
+                provenance_sidecar_path(tmp_path, ident.run_id, ident.attempt_id),
+                expected_identity=ident,
+                expected_source_snapshot=wrong_snap,
             )
 
 

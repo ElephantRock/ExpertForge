@@ -81,7 +81,7 @@ class TestPrepareRun:
         )
         snap = capture_source_snapshot(repo)
         assert provenance.source is not None
-        assert provenance.source.summary.input_digest == snap.input_digest
+        assert provenance.source.input_digest == snap.input_digest
         source_input = next(
             ii
             for ii in identity.specification_fingerprint.immutable_inputs
@@ -121,7 +121,7 @@ class TestPrepareRun:
             entropy=lambda n: bytes(n),
         )
         assert provenance.source is not None
-        assert provenance.source.summary.is_clean is False
+        assert provenance.source.is_clean is False
         assert path.exists()
 
     def test_two_preparations_same_source_same_fingerprint(self, tmp_path: Path) -> None:
