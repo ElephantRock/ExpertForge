@@ -253,12 +253,32 @@ class RngStateBundle(_FrozenModel):
             and "performance_mode_enabled" in self.warning_codes
         ):
             raise ValueError("reproducible mode cannot record performance_mode_enabled")
+
         framework_warning_codes = {
             "framework_determinism_unavailable",
             "accelerator_unavailable",
         }
         if not self.framework_states and framework_warning_codes.intersection(self.warning_codes):
             raise ValueError("framework warning codes require persisted framework states")
+        if "framework_determinism_unavailable" in self.warning_codes and (
+            self.determinism_mode != "reproducible"
+            or self.unsupported_determinism != "warn"
+        ):
+            raise ValueError(
+                "framework_determinism_unavailable requires reproducible/warn policy"
+            )
+        if "accelerator_unavailable" in self.warning_codes:
+            devices_by_provider: dict[str, set[str]] = {}
+            for state in self.framework_states:
+                devices_by_provider.setdefault(state.provider, set()).add(state.device)
+            cpu_only_provider_exists = any(
+                "cpu" in devices and all(device == "cpu" for device in devices)
+                for devices in devices_by_provider.values()
+            )
+            if not cpu_only_provider_exists:
+                raise ValueError(
+                    "accelerator_unavailable requires at least one CPU-only provider"
+                )
         return self
 
     def to_deterministic_json(self) -> bytes:
@@ -297,12 +317,25 @@ class RngStateBundle(_FrozenModel):
     def from_json_bytes(cls, payload: bytes) -> RngStateBundle:
         try:
             text = payload.decode("utf-8")
-            data = json.loads(text, parse_constant=_reject_json_constant)
+            data = json.loads(
+                text,
+                object_pairs_hook=_object_without_duplicates,
+                parse_constant=_reject_json_constant,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("RNG state payload must be valid UTF-8 JSON") from exc
         if not isinstance(data, dict):
             raise ValueError("RNG state JSON root must be an object")
         return cls.from_mapping(data)
+
+
+def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key is not allowed: {key}")
+        result[key] = value
+    return result
 
 
 def _reject_json_constant(value: str) -> NoReturn:
