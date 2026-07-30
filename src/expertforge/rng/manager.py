@@ -343,7 +343,11 @@ class RngManager:
             bit_generator = state["bit_generator"]
             nested = state["state"]
             has_uint32 = state["has_uint32"]
-            if bit_generator != "PCG64" or not isinstance(nested, Mapping) or has_uint32 not in {0, 1}:
+            if (
+                bit_generator != "PCG64"
+                or not isinstance(nested, Mapping)
+                or has_uint32 not in {0, 1}
+            ):
                 raise TypeError
             return NumpyGeneratorState(
                 bit_generator="PCG64",
