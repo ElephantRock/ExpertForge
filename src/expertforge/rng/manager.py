@@ -229,9 +229,7 @@ class RngManager:
             unsupported_determinism=self.unsupported_determinism,
             python=self._python_state_from_runtime(random.getstate()),
             numpy_legacy=self._numpy_legacy_from_runtime(np.random.get_state(legacy=True)),
-            numpy_generator=self._numpy_generator_from_runtime(
-                self.generator.bit_generator.state
-            ),
+            numpy_generator=self._numpy_generator_from_runtime(self.generator.bit_generator.state),
             framework_states=framework_states,
             warning_codes=initialization.warning_codes,
         )

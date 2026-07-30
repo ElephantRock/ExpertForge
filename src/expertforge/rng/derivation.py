@@ -47,8 +47,7 @@ class SeedContext(BaseModel):
     def _validate_component(cls, value: str) -> str:
         if not _COMPONENT_PATTERN.fullmatch(value):
             raise ValueError(
-                "component must be a lowercase stable identifier matching "
-                "[a-z][a-z0-9._-]{0,127}"
+                "component must be a lowercase stable identifier matching [a-z][a-z0-9._-]{0,127}"
             )
         return value
 
@@ -190,9 +189,7 @@ def derive_substream_seed(
     if _COMPONENT_PATTERN.fullmatch(candidate):
         component = candidate
     else:
-        namespace = hashlib.sha256(
-            f"{parent.component}\0{suffix}".encode("utf-8")
-        ).hexdigest()
+        namespace = hashlib.sha256(f"{parent.component}\0{suffix}".encode()).hexdigest()
         component = f"stream-{namespace}"
     return derive_seed(
         root_seed,

@@ -78,9 +78,7 @@ class FakeCuda:
 
     def manual_seed(self, seed: int) -> None:
         self.seed_values[self.current_device] = seed
-        self.states[self.current_device] = FakeTensor(
-            [seed % 256, (seed >> 8) % 256]
-        )
+        self.states[self.current_device] = FakeTensor([seed % 256, (seed >> 8) % 256])
 
     def get_rng_state_all(self) -> list[FakeTensor]:
         return list(self.states)
@@ -179,9 +177,7 @@ def test_missing_deterministic_api_obeys_error_and_warn_policy() -> None:
     with pytest.raises(DeterminismUnavailableError, match="framework_determinism_unavailable"):
         adapter.configure("reproducible", "error")
 
-    assert adapter.configure("reproducible", "warn") == (
-        "framework_determinism_unavailable",
-    )
+    assert adapter.configure("reproducible", "warn") == ("framework_determinism_unavailable",)
 
 
 def test_seed_uses_distinct_cpu_and_cuda_streams() -> None:
