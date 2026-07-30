@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +14,7 @@ from expertforge.rng.derivation import (
     DerivedSeed,
     SeedContext,
     derive_seed,
+    derive_substream_seed,
     seed_derivation_bytes,
 )
 
@@ -70,6 +71,34 @@ def test_component_and_root_seed_change_stream() -> None:
     assert first.digest != derive_seed(7, SeedContext(component="model.dropout")).digest
 
 
+def test_long_parent_component_uses_stable_full_hash_namespace() -> None:
+    parent = SeedContext(component="a" * 128, worker=2, rank=3, device=4, stream=5)
+
+    first = derive_substream_seed(7, parent, "numpy-generator")
+    second = derive_substream_seed(7, parent, "numpy-generator")
+    different = derive_substream_seed(7, parent, "numpy-legacy")
+
+    assert first == second
+    assert first.context.component.startswith("stream-")
+    assert len(first.context.component) == len("stream-") + 64
+    assert first.context.worker == 2
+    assert first.context.rank == 3
+    assert first.context.device == 4
+    assert first.context.stream == 5
+    assert first.digest != different.digest
+
+
+def test_substream_device_override_is_explicit() -> None:
+    parent = SeedContext(component="torch", device=9)
+
+    cpu = derive_substream_seed(7, parent, "cpu")
+    cuda = derive_substream_seed(7, parent, "cuda", device=2)
+
+    assert cpu.context.device == 9
+    assert cuda.context.device == 2
+    assert cpu.digest != cuda.digest
+
+
 def test_worker_rank_device_grid_has_unique_full_digests() -> None:
     digests = {
         derive_seed(
@@ -110,6 +139,30 @@ def test_derived_seed_rejects_tampering(field: str) -> None:
 
     with pytest.raises(ValidationError, match=r"do(?:es)? not match"):
         DerivedSeed.model_validate(data, strict=False)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("derivation_version",), True),
+        (("root_seed",), "42"),
+        (("context", "worker"), "0"),
+        (("seed_u64",), "1"),
+    ],
+)
+def test_derived_seed_loading_rejects_coercible_scalars(
+    path: tuple[str, ...], value: object
+) -> None:
+    data: Any = derive_seed(42, SeedContext(component="evaluation.sampling")).model_dump(
+        mode="json"
+    )
+    target = data
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    with pytest.raises((ValidationError, ValueError)):
+        DerivedSeed.from_mapping(data)
 
 
 def test_derived_seed_rejects_unknown_version() -> None:
