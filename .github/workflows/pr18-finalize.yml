@@ -1,0 +1,64 @@
+name: PR18 Finalize
+
+on:
+  push:
+    branches:
+      - local/7-provenance-environment
+    paths:
+      - .github/workflows/pr18-finalize.yml
+      - .github/pr18/**
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: local/7-provenance-environment
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Apply final contract corrections
+        run: python .github/pr18/pr18_finalize.py
+
+      - name: Sync locked environment
+        run: uv sync --locked
+
+      - name: Check formatting
+        run: uv run --locked ruff format --check .
+
+      - name: Run Ruff
+        run: uv run --locked ruff check .
+
+      - name: Run mypy
+        run: uv run --locked mypy src tests
+
+      - name: Run full test suite
+        run: uv run --locked pytest
+
+      - name: Check package import
+        run: uv run --locked python -c "import expertforge"
+
+      - name: Check CLI fixture
+        run: uv run --locked expertforge-config configs/smoke.yaml
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Commit validated branch result
+        env:
+          BRANCH: local/7-provenance-environment
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: close final provenance contract gaps (#7)"
+          git push origin "HEAD:${BRANCH}"
