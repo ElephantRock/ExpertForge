@@ -7,6 +7,10 @@ on:
     types:
       - synchronize
 
+concurrency:
+  group: pr18-finalize
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -24,23 +28,6 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
-
-      - name: Correct harness signature marker
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('.github/pr18/pr18_finalize.py')
-          text = path.read_text(encoding='utf-8')
-          text = text.replace(
-              '    ) -> Literal["io_error", "timeout", "decode_error", "duplicate_device_ordinals", "not_found"]:',
-              ') -> Literal["io_error", "timeout", "decode_error", "duplicate_device_ordinals", "not_found"]:',
-          )
-          text = text.replace(
-              '    ) -> Literal["io_error", "timeout", "decode_error", "duplicate_device_ordinals"]:',
-              ') -> Literal["io_error", "timeout", "decode_error", "duplicate_device_ordinals"]:',
-          )
-          path.write_text(text, encoding='utf-8')
-          PY
 
       - name: Apply final contract corrections
         run: python .github/pr18/pr18_finalize.py
