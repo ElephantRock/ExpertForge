@@ -1,0 +1,281 @@
+name: RNG Final Boundaries
+
+on:
+  push:
+    branches:
+      - local/8-seed-rng
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rng-final-boundaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: local/8-seed-rng
+          persist-credentials: true
+
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Tighten model, provider, and restore boundaries
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/expertforge/rng/adapters.py')
+          text = path.read_text()
+          text = text.replace(
+              '    "framework_not_installed",\n',
+              '    "framework_not_installed",\n    "framework_import_failed",\n',
+          )
+          text = text.replace(
+              '            except ModuleNotFoundError as exc:\n'
+              '                raise FrameworkAdapterError("framework_not_installed") from exc\n',
+              '            except ModuleNotFoundError as exc:\n'
+              '                raise FrameworkAdapterError("framework_not_installed") from exc\n'
+              '            except Exception as exc:\n'
+              '                raise FrameworkAdapterError("framework_import_failed") from exc\n',
+          )
+          text = text.replace(
+              '        try:\n'
+              '            enabled_api = getattr(self._torch, "are_deterministic_algorithms_enabled", None)\n',
+              '        try:\n'
+              '            deterministic_api = getattr(self._torch, "use_deterministic_algorithms", None)\n'
+              '            enabled_api = getattr(self._torch, "are_deterministic_algorithms_enabled", None)\n',
+              1,
+          )
+          text = text.replace(
+              '            enabled = bool(enabled_api()) if callable(enabled_api) else None\n'
+              '            warn_only = bool(warn_api()) if callable(warn_api) else None\n',
+              '            if callable(deterministic_api) and (\n'
+              '                not callable(enabled_api) or not callable(warn_api)\n'
+              '            ):\n'
+              '                raise FrameworkAdapterError("framework_api_unavailable")\n'
+              '            enabled = bool(enabled_api()) if callable(enabled_api) else None\n'
+              '            warn_only = bool(warn_api()) if callable(warn_api) else None\n',
+          )
+          text = text.replace(
+              '        except Exception as exc:\n'
+              '            raise FrameworkAdapterError("framework_capture_failed") from exc\n\n'
+              '    def restore_configuration',
+              '        except FrameworkAdapterError:\n'
+              '            raise\n'
+              '        except Exception as exc:\n'
+              '            raise FrameworkAdapterError("framework_capture_failed") from exc\n\n'
+              '    def restore_configuration',
+              1,
+          )
+          text = text.replace(
+              '        is_available = getattr(cuda, "is_available", None)\n'
+              '        try:\n'
+              '            if not callable(is_available) or not bool(is_available()):\n'
+              '                return cuda, 0\n',
+              '        is_available = getattr(cuda, "is_available", None)\n'
+              '        if not callable(is_available):\n'
+              '            raise FrameworkAdapterError("framework_api_unavailable")\n'
+              '        try:\n'
+              '            if not bool(is_available()):\n'
+              '                return cuda, 0\n',
+          )
+          path.write_text(text)
+
+          path = Path('src/expertforge/rng/state.py')
+          text = path.read_text()
+          text = text.replace(
+              '        framework_warning_codes = {\n'
+              '            "framework_determinism_unavailable",\n'
+              '            "accelerator_unavailable",\n'
+              '        }\n'
+              '        if not self.framework_states and framework_warning_codes.intersection(self.warning_codes):\n'
+              '            raise ValueError("framework warning codes require persisted framework states")\n'
+              '        return self\n',
+              '        framework_warning_codes = {\n'
+              '            "framework_determinism_unavailable",\n'
+              '            "accelerator_unavailable",\n'
+              '        }\n'
+              '        if not self.framework_states and framework_warning_codes.intersection(self.warning_codes):\n'
+              '            raise ValueError("framework warning codes require persisted framework states")\n'
+              '        if "framework_determinism_unavailable" in self.warning_codes and (\n'
+              '            self.determinism_mode != "reproducible"\n'
+              '            or self.unsupported_determinism != "warn"\n'
+              '        ):\n'
+              '            raise ValueError(\n'
+              '                "framework_determinism_unavailable requires reproducible/warn policy"\n'
+              '            )\n'
+              '        if "accelerator_unavailable" in self.warning_codes:\n'
+              '            devices_by_provider: dict[str, set[str]] = {}\n'
+              '            for state in self.framework_states:\n'
+              '                devices_by_provider.setdefault(state.provider, set()).add(state.device)\n'
+              '            if devices_by_provider and all(\n'
+              '                any(device != "cpu" for device in devices)\n'
+              '                for devices in devices_by_provider.values()\n'
+              '            ):\n'
+              '                raise ValueError(\n'
+              '                    "accelerator_unavailable requires at least one CPU-only provider"\n'
+              '                )\n'
+              '        return self\n',
+          )
+          text = text.replace(
+              '            data = json.loads(text, parse_constant=_reject_json_constant)\n',
+              '            data = json.loads(\n'
+              '                text,\n'
+              '                object_pairs_hook=_object_without_duplicates,\n'
+              '                parse_constant=_reject_json_constant,\n'
+              '            )\n',
+          )
+          text = text.replace(
+              '\ndef _reject_json_constant(value: str) -> NoReturn:\n',
+              '\ndef _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:\n'
+              '    result: dict[str, Any] = {}\n'
+              '    for key, value in pairs:\n'
+              '        if key in result:\n'
+              '            raise ValueError(f"duplicate JSON object key is not allowed: {key}")\n'
+              '        result[key] = value\n'
+              '    return result\n\n\n'
+              'def _reject_json_constant(value: str) -> NoReturn:\n',
+          )
+          path.write_text(text)
+
+          path = Path('src/expertforge/rng/manager.py')
+          text = path.read_text().replace(
+              '            if not configure_warnings.issubset(set(bundle.warning_codes)):\n'
+              '                raise RngManagerError("state_contract_mismatch")\n',
+              '            runtime_determinism_warning = (\n'
+              '                "framework_determinism_unavailable" in configure_warnings\n'
+              '            )\n'
+              '            stored_determinism_warning = (\n'
+              '                "framework_determinism_unavailable" in bundle.warning_codes\n'
+              '            )\n'
+              '            if runtime_determinism_warning != stored_determinism_warning:\n'
+              '                raise RngManagerError("state_contract_mismatch")\n',
+          )
+          path.write_text(text)
+          PY
+
+          cat >> tests/test_rng_state.py <<'PY'
+
+
+def test_framework_warning_codes_match_policy_and_device_facts() -> None:
+    cpu = _cpu_framework_state()
+    cuda = FrameworkRngState.from_bytes(
+        provider="torch", device="cuda:0", payload=b"cuda"
+    )
+
+    with pytest.raises(ValidationError, match="reproducible/warn"):
+        _bundle(
+            framework_states=(cpu,),
+            warning_codes=("framework_determinism_unavailable",),
+        )
+
+    warning_bundle = RngStateBundle.model_validate(
+        {
+            **_bundle(framework_states=(cpu,)).model_dump(mode="json"),
+            "unsupported_determinism": "warn",
+            "warning_codes": ["framework_determinism_unavailable"],
+        },
+        strict=False,
+    )
+    assert warning_bundle.warning_codes == ("framework_determinism_unavailable",)
+
+    with pytest.raises(ValidationError, match="CPU-only provider"):
+        _bundle(
+            framework_states=(cpu, cuda),
+            warning_codes=("accelerator_unavailable",),
+        )
+
+    assert _bundle(
+        framework_states=(cpu,),
+        warning_codes=("accelerator_unavailable",),
+    ).warning_codes == ("accelerator_unavailable",)
+
+
+def test_state_json_rejects_duplicate_object_keys() -> None:
+    payload = _bundle().to_deterministic_json().decode("utf-8")
+    duplicate = payload.replace('"root_seed":7', '"root_seed":7,"root_seed":8')
+
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        RngStateBundle.from_json_bytes(duplicate.encode("utf-8"))
+PY
+
+          cat >> tests/test_rng_torch_adapter.py <<'PY'
+
+
+def test_broken_optional_torch_import_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_import(name: str) -> Any:
+        assert name == "torch"
+        raise OSError("private loader detail")
+
+    monkeypatch.setattr("expertforge.rng.adapters.importlib.import_module", fail_import)
+
+    with pytest.raises(FrameworkAdapterError, match="framework_import_failed"):
+        TorchRngAdapter()
+
+
+def test_missing_cuda_availability_api_is_not_misclassified() -> None:
+    torch = FakeTorch()
+    torch.cuda.is_available = None  # type: ignore[method-assign]
+    adapter = TorchRngAdapter(torch)
+
+    with pytest.raises(FrameworkAdapterError, match="framework_api_unavailable"):
+        adapter.capture()
+
+
+def test_configuration_snapshot_requires_determinism_getters() -> None:
+    torch = FakeTorch()
+    torch.are_deterministic_algorithms_enabled = None  # type: ignore[method-assign]
+    adapter = TorchRngAdapter(torch)
+
+    with pytest.raises(FrameworkAdapterError, match="framework_api_unavailable"):
+        adapter.capture_configuration()
+PY
+
+          cat >> tests/test_rng_manager.py <<'PY'
+
+
+def test_restore_rejects_changed_determinism_capability() -> None:
+    source_adapter = FakeFrameworkAdapter(deterministic_supported=False)
+    source = RngManager(
+        root_seed=7,
+        context=SeedContext(component="run"),
+        unsupported_determinism="warn",
+        adapters=(source_adapter,),
+    )
+    source.initialize()
+    bundle = source.capture_state()
+
+    target_adapter = FakeFrameworkAdapter(deterministic_supported=True)
+    target = RngManager(
+        root_seed=7,
+        context=SeedContext(component="run"),
+        unsupported_determinism="warn",
+        adapters=(target_adapter,),
+    )
+
+    with pytest.raises(RngManagerError, match="state_contract_mismatch"):
+        target.restore_state(bundle)
+
+    assert target_adapter.mode is None
+    with pytest.raises(RngManagerError, match="not_initialized"):
+        _ = target.generator
+PY
+
+          uv run --locked ruff format src/expertforge/rng tests/test_rng_*.py
+          uv run --locked ruff check --fix-only src/expertforge/rng tests/test_rng_*.py
+
+      - name: Remove workflow and commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/rng-final-boundaries.yml
+          git add src/expertforge/rng tests/test_rng_*.py
+          git commit -m "fix(rng): enforce final persisted and provider invariants"
+          git push origin HEAD:local/8-seed-rng
