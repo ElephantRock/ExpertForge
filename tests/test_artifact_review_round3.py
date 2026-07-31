@@ -229,6 +229,34 @@ class TestItem1PathRejectionBeforeMutation:
             "AttemptLock mutated the symlinked parent target before rejection"
         )
 
+    def test_attempt_lock_symlinked_ancestor_missing_target(self, tmp_path: Path) -> None:
+        """The AttemptLock rejects creation when the target is missing but its
+        deepest existing ancestor is a symlink. The symlink target must not
+        receive any directory or lock file (review 4828911851)."""
+        _skip_if_no_symlink_privilege()
+        from expertforge.artifacts.locks import (
+            AttemptLock,
+            LockUnavailableError,
+        )
+
+        # Create: runs/<run>/attempts -> symlink to victim
+        # The attempt dir itself does NOT exist; attempts is the symlink.
+        run_real = tmp_path / "runs" / VALID_RUN
+        run_real.mkdir(parents=True, exist_ok=True)
+        victim = tmp_path / "victim-ancestor-symlink"
+        victim.mkdir()
+        snapshot_before = set(victim.iterdir())
+        os.symlink(victim, run_real / "attempts")
+        # The lock path is under a MISSING attempt dir, whose deepest existing
+        # ancestor (attempts) is a symlink.
+        lock = AttemptLock(run_real / "attempts" / VALID_ATTEMPT / "registry.lock")
+        with pytest.raises(LockUnavailableError):
+            lock.acquire()
+        snapshot_after = set(victim.iterdir())
+        assert snapshot_after == snapshot_before, (
+            "AttemptLock created directories through a symlinked ancestor before rejection"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Item 2: reconciliation and locate fully symlink-safe.

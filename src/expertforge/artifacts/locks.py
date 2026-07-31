@@ -87,6 +87,9 @@ def _symlink_safe_makedirs(target: Path) -> None:
     chain is symlink-free, then re-verify after creation (item #1).
 
     Checks both intermediate components AND the target itself for symlinks.
+    The deepest existing ancestor (anchor) is also checked — if it is itself
+    a symlink, ``mkdir(parents=True)`` would follow it and create directories
+    outside the artifact tree.
     """
     import stat as _stat
 
@@ -106,6 +109,19 @@ def _symlink_safe_makedirs(target: Path) -> None:
             break
         except FileNotFoundError:
             anchor = anchor.parent
+
+    # Explicitly check the anchor itself for symlink — _verify_no_symlinks_in_chain
+    # only checks components BELOW the anchor, so a symlinked ancestor would be missed.
+    try:
+        anchor_st = os.lstat(anchor)
+        if _stat.S_ISLNK(anchor_st.st_mode):
+            raise LockUnavailableError(
+                f"deepest existing ancestor {anchor} is a symlink; "
+                "mkdir would follow it outside the artifact tree (item #1)."
+            )
+    except FileNotFoundError:
+        pass  # anchor doesn't exist — nothing to check
+
     _verify_no_symlinks_in_chain(anchor, target)
     target.mkdir(parents=True, exist_ok=True)
     _verify_no_symlinks_in_chain(anchor, target)
