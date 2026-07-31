@@ -250,20 +250,14 @@ class TelemetryWriter:
         self._require_open()
         self._fsync_or_fail()
 
-    def close(
-        self, outcome: str, diagnostic_code: DiagnosticCode | None = None
-    ) -> None:
+    def close(self, outcome: str, diagnostic_code: DiagnosticCode | None = None) -> None:
         if self._closed:
             return
         if self._failed:
             self._closed = True
-            raise WriterFailedError(
-                "telemetry writer is in a terminal failed state; cannot close."
-            )
+            raise WriterFailedError("telemetry writer is in a terminal failed state; cannot close.")
         if outcome not in {"normal", "interrupted", "failed"}:
-            raise ValueError(
-                f"close outcome must be normal|interrupted|failed; got {outcome!r}."
-            )
+            raise ValueError(f"close outcome must be normal|interrupted|failed; got {outcome!r}.")
         if outcome == "normal":
             if diagnostic_code is not None:
                 raise ValueError("normal close forbids diagnostic_code.")
@@ -299,12 +293,17 @@ class TelemetryWriter:
             )
             self._write_record(record)
             self._fsync_or_fail()
-            self._render_console(record)
+            self._render_console(record, allow_diagnostic=False)
             self._close_fd_or_fail()
             self._closed = True
         except WriterFailedError:
             self._closed = True
             raise
+        except Exception as exc:
+            self._failed = True
+            self._closed = True
+            self._close_fd_silently()
+            raise WriterFailedError("telemetry close failed before completion.") from exc
 
     def __enter__(self) -> TelemetryWriter:
         return self
@@ -335,8 +334,7 @@ class TelemetryWriter:
         elapsed = now - self._monotonic_baseline
         if elapsed < 0 or elapsed < self._last_elapsed_ns:
             self._terminal_failure(
-                "monotonic clock regressed "
-                f"(last={self._last_elapsed_ns}, current={elapsed})."
+                f"monotonic clock regressed (last={self._last_elapsed_ns}, current={elapsed})."
             )
         return elapsed
 
@@ -373,13 +371,17 @@ class TelemetryWriter:
             )
             self._write_record(record)
             self._render_console(record)
-        except BaseException:
+        except BaseException as exc:
             if self._records_written == 0:
                 self._safe_unlink()
             else:
                 self._failed = True
                 self._close_fd_silently()
-            raise
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, WriterFailedError):
+                raise
+            raise WriterFailedError("telemetry writer initialization failed.") from exc
 
     def _write_record(self, record: EventRecord | MetricRecord) -> None:
         if self._fd is None:
@@ -388,8 +390,7 @@ class TelemetryWriter:
         payload = record.to_deterministic_json() + b"\n"
         if len(payload) > MAX_RECORD_BYTES:
             raise ValueError(
-                f"serialized record ({len(payload)} bytes) exceeds max "
-                f"{MAX_RECORD_BYTES}."
+                f"serialized record ({len(payload)} bytes) exceeds max {MAX_RECORD_BYTES}."
             )
         self._write_all(payload)
 
@@ -412,9 +413,7 @@ class TelemetryWriter:
             current = getattr(progress, name)
             previous = self._last_progress[name]
             if current is not None and previous is not None and current < previous:
-                raise ValueError(
-                    f"progress.{name} {current} regresses below previous {previous}."
-                )
+                raise ValueError(f"progress.{name} {current} regresses below previous {previous}.")
 
     def _commit_progress(self, progress: ProgressPosition | None) -> None:
         if progress is None:
@@ -460,7 +459,12 @@ class TelemetryWriter:
             self._failed = True
             raise WriterFailedError(f"telemetry close failed: {exc}") from exc
 
-    def _render_console(self, record: EventRecord | MetricRecord) -> None:
+    def _render_console(
+        self,
+        record: EventRecord | MetricRecord,
+        *,
+        allow_diagnostic: bool = True,
+    ) -> None:
         if not self._console_enabled or self._console_failed_reported:
             return
         line = render_record(record) + "\n"
@@ -475,7 +479,7 @@ class TelemetryWriter:
             self._console_failures += 1
             self._console_failed_reported = True
             self._console_enabled = False
-            if not self._failed and not self._closed:
+            if allow_diagnostic and not self._failed and not self._closed:
                 self._emit_console_write_failed()
 
     def _emit_console_write_failed(self) -> None:

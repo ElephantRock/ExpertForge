@@ -175,7 +175,9 @@ class LoggingConfig(_Section):
     log_interval_steps: int = Field(
         default=10, gt=0, description="Emit a log line every N optimizer steps."
     )
-    level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO"
+    )
     # Issue #9 (design comment 5136093570 §9): additive telemetry-writer controls.
     console_enabled: bool = Field(
         default=True, description="Render telemetry records to the console."

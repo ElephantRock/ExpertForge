@@ -1,64 +1,51 @@
-"""Authoritative loader and diagnostic scanner for telemetry streams
-(Issue #9 design comment 5136093570 §10).
-
-Two boundaries:
-
-- :func:`load_telemetry_stream` — authoritative verified load. Verifies valid
-  UTF-8, newline-terminated records only, no duplicate JSON keys, known record
-  schemas and versions, strict model validation (no scalar coercion), exact
-  external identity/fingerprint/process binding, contiguous sequence numbers,
-  non-decreasing elapsed time and progress, required open/close lifecycle, and no
-  records after close. Raises :class:`TelemetryLoadError` on any violation.
-
-- :func:`scan_telemetry_stream` — diagnostic scan that reports an accepted prefix
-  plus a ``complete | incomplete | corrupt`` status without claiming completion.
-  A missing close event is ``incomplete``; a malformed interior record, identity
-  mismatch, sequence gap, or progress regression is ``corrupt``; a truncated
-  trailing fragment is ``incomplete``.
-
-This module has NO import-time side effects.
-"""
+"""Canonical authoritative loading and diagnostic scanning for telemetry JSONL."""
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias, cast
 
 from pydantic import ValidationError
 
 from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.telemetry.models import (
     EVENT_SCHEMA,
+    MAX_RECORD_BYTES,
     METRIC_SCHEMA,
     EventRecord,
     MetricRecord,
     ProcessContext,
+    ProgressPosition,
     StreamStatus,
 )
 
 __all__ = ["ScanResult", "TelemetryLoadError", "load_telemetry_stream", "scan_telemetry_stream"]
 
-_EVENT_STREAM_OPENED = "logging.stream_opened"
-_EVENT_STREAM_CLOSED = "logging.stream_closed"
+Record: TypeAlias = EventRecord | MetricRecord
+Binding: TypeAlias = tuple[str, str, str, int, int | None, int]
+
+_OPEN_EVENT = "logging.stream_opened"
+_CLOSE_EVENT = "logging.stream_closed"
+_CANONICAL_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$"
+)
+_PROGRESS_FIELDS = ("step", "update", "processed_tokens")
 
 
 class TelemetryLoadError(Exception):
-    """Raised when an authoritative telemetry load fails any validation."""
+    """Raised when a telemetry stream cannot be accepted authoritatively."""
 
 
 class ScanResult:
-    """Diagnostic scan result: an accepted-prefix count and a stream status.
+    """Immutable-view result containing a validated accepted prefix."""
 
-    Immutable by construction. ``records`` holds the validated accepted-prefix
-    records (EventRecord | MetricRecord).
-    """
+    __slots__ = ("_records", "_status")
 
-    __slots__ = ("_status", "_records")
-
-    def __init__(self, status: StreamStatus, records: list[EventRecord | MetricRecord]) -> None:
+    def __init__(self, status: StreamStatus, records: list[Record]) -> None:
         self._status = status
-        self._records = list(records)
+        self._records = tuple(records)
 
     @property
     def status(self) -> StreamStatus:
@@ -69,110 +56,157 @@ class ScanResult:
         return len(self._records)
 
     @property
-    def records(self) -> list[EventRecord | MetricRecord]:
+    def records(self) -> list[Record]:
         return list(self._records)
 
-    def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return f"ScanResult(status={self._status!r}, accepted_count={self.accepted_count})"
-
-
-# ---------------------------------------------------------------------------
-# Shared low-level parsing
-# ---------------------------------------------------------------------------
+    def __repr__(self) -> str:
+        return f"ScanResult(status={self.status!r}, accepted_count={self.accepted_count})"
 
 
 class _ParseFailure(Exception):
-    """Internal: a record line could not be parsed/validated."""
-
-    def __init__(self, reason: str, *, truncated: bool = False) -> None:
-        super().__init__(reason)
-        self.truncated = truncated
+    pass
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """``object_pairs_hook`` that rejects duplicate JSON keys."""
-    seen: set[str] = set()
-    out: dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for key, value in pairs:
-        if key in seen:
+        if key in result:
             raise _ParseFailure(f"duplicate JSON key {key!r}.")
-        seen.add(key)
-        out[key] = value
-    return out
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> None:
+    raise _ParseFailure(f"non-standard JSON numeric constant {value!r}.")
 
 
 def _split_records(raw: bytes) -> tuple[list[bytes], bool]:
-    """Split raw bytes into newline-terminated record byte-strings.
-
-    Returns ``(records, trailing_partial)``. Each entry in ``records`` is a
-    complete newline-terminated record body (the trailing newline stripped).
-    ``trailing_partial`` is True when the file does NOT end with a newline,
-    meaning the bytes after the last interior newline are a partial (possibly
-    empty) fragment that is not a complete record. The partial fragment itself
-    is NOT included in ``records``.
-    """
-    if raw == b"":
-        return ([], False)
+    if not raw:
+        return [], False
     if raw.endswith(b"\n"):
         body = raw[:-1]
-        if body == b"":
-            return ([], False)
-        return (body.split(b"\n"), False)
-    # No trailing newline: everything after the last interior newline is a
-    # partial fragment. The complete records are everything before it.
-    last_newline = raw.rfind(b"\n")
-    if last_newline < 0:
-        # No newline at all: the whole payload is a single partial fragment.
-        return ([], True)
-    body = raw[:last_newline]
-    if body == b"":
-        return ([], True)
-    return (body.split(b"\n"), True)
+        return ([] if not body else body.split(b"\n")), False
+    boundary = raw.rfind(b"\n")
+    if boundary < 0:
+        return [], True
+    body = raw[:boundary]
+    return ([] if not body else body.split(b"\n")), True
 
 
-def _parse_record(line_bytes: bytes) -> dict[str, Any]:
-    """Parse one newline-terminated record body into a mapping, rejecting dup keys
-    and non-object JSON. Invalid UTF-8 and JSON errors raise :class:`_ParseFailure`.
-    """
+def _parse_line(line: bytes) -> Record:
+    if len(line) + 1 > MAX_RECORD_BYTES:
+        raise _ParseFailure(
+            f"record size {len(line) + 1} exceeds {MAX_RECORD_BYTES} bytes."
+        )
     try:
-        text = line_bytes.decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise _ParseFailure(f"record is not valid UTF-8: {e}") from e
+        text = line.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _ParseFailure("record is not valid UTF-8.") from exc
     try:
-        data = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+        parsed: Any = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
     except _ParseFailure:
         raise
-    except json.JSONDecodeError as e:
-        raise _ParseFailure(f"record is not valid JSON: {e}") from e
-    if not isinstance(data, dict):
-        raise _ParseFailure(f"record must be a JSON object; got {type(data).__name__}.")
-    return data
-
-
-def _validate_record(line_bytes: bytes, data: dict[str, Any]) -> EventRecord | MetricRecord:
-    """Dispatch by schema name and strict-validate. Raises :class:`_ParseFailure`
-    on unknown schema or validation failure.
-
-    Validation uses ``model_validate_json`` so that JSON's native datetime/tuple
-    representations (ISO-8601 string, JSON array) deserialize correctly while the
-    model's ``strict=True`` config still forbids scalar coercion (e.g. a string
-    where an int is required) and ``extra="forbid"`` rejects unknown keys.
-    Duplicate-key detection is performed separately in :func:`_parse_record`.
-    """
+    except json.JSONDecodeError as exc:
+        raise _ParseFailure("record is not valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise _ParseFailure("record must be a JSON object.")
+    data = cast(dict[str, Any], parsed)
+    timestamp = data.get("timestamp_utc")
+    if not isinstance(timestamp, str) or _CANONICAL_TIMESTAMP.fullmatch(timestamp) is None:
+        raise _ParseFailure("timestamp_utc is not fixed-width canonical UTC.")
     schema = data.get("schema")
     try:
         if schema == EVENT_SCHEMA:
-            return EventRecord.model_validate_json(line_bytes)
-        if schema == METRIC_SCHEMA:
-            return MetricRecord.model_validate_json(line_bytes)
-        raise _ParseFailure(f"unknown record schema {schema!r}.")
-    except ValidationError as e:
-        raise _ParseFailure(f"record failed strict validation: {e}") from e
+            record: Record = EventRecord.model_validate_json(line, strict=True)
+        elif schema == METRIC_SCHEMA:
+            record = MetricRecord.model_validate_json(line, strict=True)
+        else:
+            raise _ParseFailure(f"unknown record schema {schema!r}.")
+    except ValidationError as exc:
+        raise _ParseFailure("record failed strict schema validation.") from exc
+    if record.to_deterministic_json() != line:
+        raise _ParseFailure("record is not canonical deterministic JSON.")
+    return record
 
 
-# ---------------------------------------------------------------------------
-# Authoritative load
-# ---------------------------------------------------------------------------
+def _binding(record: Record) -> Binding:
+    return (
+        record.run_id,
+        record.attempt_id,
+        record.specification_fingerprint,
+        record.rank,
+        record.local_rank,
+        record.world_size,
+    )
+
+
+def _expected_binding(
+    identity: AttemptIdentityRecord, process_context: ProcessContext
+) -> Binding:
+    return (
+        identity.run_id,
+        identity.attempt_id,
+        identity.fingerprint_digest_str(),
+        process_context.rank,
+        process_context.local_rank,
+        process_context.world_size,
+    )
+
+
+def _is_open(record: Record) -> bool:
+    return isinstance(record, EventRecord) and record.event_name == _OPEN_EVENT
+
+
+def _is_close(record: Record) -> bool:
+    return isinstance(record, EventRecord) and record.event_name == _CLOSE_EVENT
+
+
+def _check_sequence(record: Record, accepted_count: int) -> None:
+    if record.sequence != accepted_count:
+        raise TelemetryLoadError(
+            f"sequence {record.sequence} is not contiguous; expected {accepted_count}."
+        )
+
+
+def _check_monotonic(
+    record: Record,
+    previous_elapsed: int | None,
+    previous_progress: dict[str, int | None],
+) -> None:
+    if previous_elapsed is not None and record.elapsed_ns < previous_elapsed:
+        raise TelemetryLoadError("elapsed_ns regresses within the process stream.")
+    progress = record.progress
+    if progress is None:
+        return
+    for name in _PROGRESS_FIELDS:
+        current = getattr(progress, name)
+        previous = previous_progress[name]
+        if current is not None and previous is not None and current < previous:
+            raise TelemetryLoadError(f"progress.{name} regresses within the stream.")
+
+
+def _commit_progress(
+    progress: ProgressPosition | None, previous_progress: dict[str, int | None]
+) -> None:
+    if progress is None:
+        return
+    for name in _PROGRESS_FIELDS:
+        current = getattr(progress, name)
+        if current is not None:
+            previous_progress[name] = current
+
+
+def _read(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError as exc:
+        raise TelemetryLoadError(f"telemetry stream not found: {path}") from exc
+    except OSError as exc:
+        raise TelemetryLoadError(f"could not read telemetry stream {path}.") from exc
 
 
 def load_telemetry_stream(
@@ -181,246 +215,93 @@ def load_telemetry_stream(
     expected_identity: AttemptIdentityRecord,
     expected_process_context: ProcessContext,
     require_closed: bool = True,
-) -> list[EventRecord | MetricRecord]:
-    """Authoritatively load and verify a telemetry stream.
-
-    Raises :class:`TelemetryLoadError` on: missing file, I/O error, invalid
-    UTF-8, non-newline-terminated records, duplicate JSON keys, non-object JSON,
-    unknown schema/version, strict-validation failure, identity/process mismatch,
-    non-contiguous sequence, elapsed/progress regression, missing open event,
-    missing close event (when ``require_closed``), or any record after close.
-    """
-    raw = _read_or_raise(path)
-    records, truncated = _split_records(raw)
+) -> list[Record]:
+    """Load a stream only after complete canonical and external-binding checks."""
+    raw = _read(path)
+    lines, truncated = _split_records(raw)
     if truncated:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} is not newline-terminated (truncated tail)."
-        )
+        raise TelemetryLoadError("telemetry stream has a truncated trailing record.")
+    if not lines:
+        raise TelemetryLoadError("telemetry stream contains no complete records.")
 
-    validated: list[EventRecord | MetricRecord] = []
-    prev_elapsed: int | None = None
-    prev_progress: dict[str, int | None] = {"step": None, "update": None, "processed_tokens": None}
-    seen_close = False
-
-    for index, line_bytes in enumerate(records):
-        if seen_close:
-            raise TelemetryLoadError(
-                f"telemetry stream {path} has a record after the close event (line {index + 1})."
-            )
-        try:
-            data = _parse_record(line_bytes)
-            record = _validate_record(line_bytes, data)
-        except _ParseFailure as e:
-            raise TelemetryLoadError(f"telemetry stream {path} line {index + 1}: {e}") from e
-
-        _check_identity_binding(
-            path, record, expected_identity, expected_process_context, index + 1
-        )
-        _check_sequence(path, validated, record, index + 1)
-        _check_monotonic(path, record, prev_elapsed, prev_progress, index + 1)
-        prev_elapsed = record.elapsed_ns
-        _merge_progress(prev_progress, record.progress)
-
-        if index == 0:
-            if not (isinstance(record, EventRecord) and record.event_name == _EVENT_STREAM_OPENED):
-                raise TelemetryLoadError(
-                    f"telemetry stream {path} first record must be {_EVENT_STREAM_OPENED}; "
-                    f"got {_event_id(record)}."
-                )
-        if isinstance(record, EventRecord) and record.event_name == _EVENT_STREAM_CLOSED:
-            seen_close = True
-
-        validated.append(record)
-
-    if not validated:
-        raise TelemetryLoadError(f"telemetry stream {path} contains no records.")
-
-    if not seen_close:
-        if require_closed:
-            raise TelemetryLoadError(
-                f"telemetry stream {path} is missing the required close event."
-            )
-    return validated
-
-
-# ---------------------------------------------------------------------------
-# Diagnostic scan
-# ---------------------------------------------------------------------------
-
-
-def scan_telemetry_stream(path: Path) -> ScanResult:
-    """Diagnostic scan: report an accepted prefix plus a stream status.
-
-    Returns a :class:`ScanResult` with ``status`` in ``complete | incomplete |
-    corrupt`` and ``accepted_count`` records that validated cleanly. A malformed
-    interior record makes the status ``corrupt``; a missing close or truncated
-    trailing fragment makes it ``incomplete``.
-    """
-    try:
-        raw = _read_or_raise(path)
-    except TelemetryLoadError as e:
-        # Unreadable file: nothing accepted, corrupt.
-        del e
-        return ScanResult("corrupt", [])
-
-    records, truncated = _split_records(raw)
-
-    accepted: list[EventRecord | MetricRecord] = []
-    prev_elapsed: int | None = None
-    prev_progress: dict[str, int | None] = {
+    expected = _expected_binding(expected_identity, expected_process_context)
+    accepted: list[Record] = []
+    previous_elapsed: int | None = None
+    previous_progress: dict[str, int | None] = {
         "step": None,
         "update": None,
         "processed_tokens": None,
     }
     seen_close = False
-    interior_corrupt = False
 
-    for index, line_bytes in enumerate(records):
-        try:
-            data = _parse_record(line_bytes)
-            record = _validate_record(line_bytes, data)
-        except _ParseFailure:
-            interior_corrupt = True
-            break
-        # Sequence/monotonicity/identity are structural invariants; a violation
-        # corrupts the stream at this point.
-        try:
-            _check_sequence(path, accepted, record, index + 1)
-            _check_monotonic(path, record, prev_elapsed, prev_progress, index + 1)
-        except TelemetryLoadError:
-            interior_corrupt = True
-            break
-        prev_elapsed = record.elapsed_ns
-        _merge_progress(prev_progress, record.progress)
+    for line_number, line in enumerate(lines, start=1):
         if seen_close:
-            interior_corrupt = True
-            break
-        if isinstance(record, EventRecord) and record.event_name == _EVENT_STREAM_CLOSED:
-            seen_close = True
+            raise TelemetryLoadError("telemetry stream contains a record after closure.")
+        try:
+            record = _parse_line(line)
+        except _ParseFailure as exc:
+            raise TelemetryLoadError(
+                f"telemetry stream line {line_number}: {exc}"
+            ) from exc
+        if line_number == 1 and not _is_open(record):
+            raise TelemetryLoadError("first record must be logging.stream_opened.")
+        if _binding(record) != expected:
+            raise TelemetryLoadError(
+                f"telemetry stream line {line_number} does not match expected identity/process."
+            )
+        _check_sequence(record, len(accepted))
+        _check_monotonic(record, previous_elapsed, previous_progress)
         accepted.append(record)
+        previous_elapsed = record.elapsed_ns
+        _commit_progress(record.progress, previous_progress)
+        if _is_close(record):
+            seen_close = True
 
-    if interior_corrupt:
-        return ScanResult("corrupt", accepted)
+    if require_closed and not seen_close:
+        raise TelemetryLoadError("telemetry stream is missing logging.stream_closed.")
+    return accepted
+
+
+def scan_telemetry_stream(path: Path) -> ScanResult:
+    """Return a validated prefix and complete/incomplete/corrupt status."""
+    try:
+        raw = _read(path)
+    except TelemetryLoadError:
+        return ScanResult("corrupt", [])
+    lines, truncated = _split_records(raw)
+    accepted: list[Record] = []
+    internal_binding: Binding | None = None
+    previous_elapsed: int | None = None
+    previous_progress: dict[str, int | None] = {
+        "step": None,
+        "update": None,
+        "processed_tokens": None,
+    }
+    seen_close = False
+
+    for line in lines:
+        if seen_close:
+            return ScanResult("corrupt", accepted)
+        try:
+            record = _parse_line(line)
+            if not accepted:
+                if not _is_open(record):
+                    return ScanResult("corrupt", accepted)
+                internal_binding = _binding(record)
+            elif _binding(record) != internal_binding:
+                return ScanResult("corrupt", accepted)
+            _check_sequence(record, len(accepted))
+            _check_monotonic(record, previous_elapsed, previous_progress)
+        except (_ParseFailure, TelemetryLoadError):
+            return ScanResult("corrupt", accepted)
+        accepted.append(record)
+        previous_elapsed = record.elapsed_ns
+        _commit_progress(record.progress, previous_progress)
+        if _is_close(record):
+            seen_close = True
 
     if truncated:
-        # A trailing partial fragment (no newline) discards the fragment; the
-        # accepted prefix is intact but the stream is not complete.
         return ScanResult("incomplete", accepted)
-
-    if not accepted:
-        # Empty file (no bytes): no accepted records, not complete.
+    if not accepted or not seen_close:
         return ScanResult("incomplete", accepted)
-
-    if seen_close:
-        return ScanResult("complete", accepted)
-    return ScanResult("incomplete", accepted)
-
-
-# ---------------------------------------------------------------------------
-# Internal checks
-# ---------------------------------------------------------------------------
-
-
-def _read_or_raise(path: Path) -> bytes:
-    try:
-        return path.read_bytes()
-    except FileNotFoundError as e:
-        raise TelemetryLoadError(f"telemetry stream not found: {path}") from e
-    except OSError as e:
-        raise TelemetryLoadError(f"could not read telemetry stream {path}: {e}") from e
-
-
-def _event_id(record: EventRecord | MetricRecord) -> str:
-    if isinstance(record, EventRecord):
-        return f"event {record.event_name!r}"
-    return "metric record"
-
-
-def _check_identity_binding(
-    path: Path,
-    record: EventRecord | MetricRecord,
-    expected_identity: AttemptIdentityRecord,
-    expected_process_context: ProcessContext,
-    line: int,
-) -> None:
-    if record.run_id != expected_identity.run_id:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} line {line}: run_id {record.run_id!r} "
-            f"does not match expected {expected_identity.run_id!r}."
-        )
-    if record.attempt_id != expected_identity.attempt_id:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} line {line}: attempt_id {record.attempt_id!r} "
-            f"does not match expected {expected_identity.attempt_id!r}."
-        )
-    expected_fp = expected_identity.fingerprint_digest_str()
-    if record.specification_fingerprint != expected_fp:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} line {line}: specification_fingerprint "
-            f"{record.specification_fingerprint!r} does not match expected {expected_fp!r}."
-        )
-    ctx = expected_process_context
-    if record.rank != ctx.rank or record.world_size != ctx.world_size:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} line {line}: rank/world_size "
-            f"({record.rank},{record.world_size}) do not match expected "
-            f"({ctx.rank},{ctx.world_size})."
-        )
-    rec_local = record.local_rank
-    exp_local = ctx.local_rank
-    if rec_local != exp_local:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} line {line}: local_rank {rec_local!r} "
-            f"does not match expected {exp_local!r}."
-        )
-
-
-def _check_sequence(
-    path: Path,
-    prior: list[EventRecord | MetricRecord],
-    record: EventRecord | MetricRecord,
-    line: int,
-) -> None:
-    expected_seq = len(prior)
-    if record.sequence != expected_seq:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} line {line}: sequence {record.sequence} is not "
-            f"contiguous (expected {expected_seq})."
-        )
-
-
-def _check_monotonic(
-    path: Path,
-    record: EventRecord | MetricRecord,
-    prev_elapsed: int | None,
-    prev_progress: dict[str, int | None],
-    line: int,
-) -> None:
-    if prev_elapsed is not None and record.elapsed_ns < prev_elapsed:
-        raise TelemetryLoadError(
-            f"telemetry stream {path} line {line}: elapsed_ns {record.elapsed_ns} "
-            f"regresses below previous {prev_elapsed}."
-        )
-    if record.progress is not None:
-        for field in ("step", "update", "processed_tokens"):
-            cur = getattr(record.progress, field)
-            prev = prev_progress[field]
-            if cur is not None and prev is not None and cur < prev:
-                raise TelemetryLoadError(
-                    f"telemetry stream {path} line {line}: progress.{field} {cur} "
-                    f"regresses below previous {prev}."
-                )
-
-
-def _merge_progress(prev_progress: dict[str, int | None], progress: Any) -> None:
-    """Update the running progress maxima with the latest supplied counters.
-
-    Omitted fields make no progress claim and do not reset prior values.
-    """
-    if progress is None:
-        return
-    for field in ("step", "update", "processed_tokens"):
-        cur = getattr(progress, field)
-        if cur is not None:
-            prev = prev_progress[field]
-            prev_progress[field] = cur if prev is None else max(prev, cur)
+    return ScanResult("complete", accepted)

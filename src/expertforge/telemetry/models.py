@@ -7,6 +7,7 @@ import math
 import re
 from datetime import datetime, timedelta
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import (
     BaseModel,
@@ -41,6 +42,7 @@ __all__ = [
     "MetricValueStatus",
     "ProcessContext",
     "ProgressPosition",
+    "Severity",
     "StreamOutcome",
     "StreamStatus",
     "WriterStats",
@@ -198,9 +200,9 @@ METRIC_WINDOWS: frozenset[str] = frozenset(
     {"point", "since_last_emit", "attempt", "run", "evaluation"}
 )
 
+Severity = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 StreamStatus = Literal["complete", "incomplete", "corrupt"]
 StreamOutcome = Literal["normal", "interrupted", "failed"]
-Severity = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 _IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _FINGERPRINT_RE = re.compile(r"^spec-v1-sha256-[0-9a-f]{64}$")
@@ -218,9 +220,7 @@ _RE_IPV6 = re.compile(
 )
 _RE_HOME_PATH = re.compile(r"(?i)(?:~|/(?:users|home|root))/[^\s\"']+")
 _RE_WIN_PATH = re.compile(r"\b[A-Za-z]:[\\/][^\s\"'<>|]+")
-_RE_UNIX_ABS_PATH = re.compile(
-    r"(?<!:)(?<![A-Za-z0-9])/(?:tmp|var|opt|srv|mnt|media|private|etc)/[^\s\"']+"
-)
+_RE_UNIX_ABS_PATH = re.compile(r"(?<!:)(?<![A-Za-z0-9])/(?!/)[^\s\"']+")
 _RE_DEVICE_UUID = re.compile(
     r"(?i)\b(?:gpu-|device[_-]?uuid\s*[:=]\s*)?[0-9a-f]{8}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
@@ -231,12 +231,10 @@ _RE_HOST_ASSIGNMENT = re.compile(
 
 
 def _contains_control(value: str) -> bool:
-    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
 
 
 def _sanitize_url(match: re.Match[str]) -> str:
-    from urllib.parse import urlsplit, urlunsplit
-
     raw = match.group(0)
     try:
         parsed = urlsplit(raw)
@@ -244,37 +242,46 @@ def _sanitize_url(match: re.Match[str]) -> str:
         port = f":{parsed.port}" if parsed.port is not None else ""
     except ValueError:
         return "[redacted]"
-    if _RE_IPV4.fullmatch(hostname) or ":" in hostname:
-        netloc = "[redacted]"
-    else:
-        netloc = f"{hostname}{port}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    sensitive = (
+        parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+        or _RE_IPV4.fullmatch(hostname) is not None
+        or ":" in hostname
+    )
+    if sensitive:
+        return "[redacted]"
+    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
 
 
 def sanitize_persisted_string(value: str, *, truncate: bool = False) -> tuple[str, bool]:
-    """Sanitize one persisted string and report whether replacement occurred."""
+    """Sanitize one persisted string and report whether it changed."""
     if _contains_control(value):
         raise ValueError("persisted string contains forbidden control characters.")
     original = value
-    out = _RE_URL.sub(_sanitize_url, value)
-    out = _RE_KV_SECRET.sub(lambda match: f"{match.group(1)}=[redacted]", out)
-    out = _RE_IPV4.sub("[redacted]", out)
-    out = _RE_IPV6.sub("[redacted]", out)
-    out = _RE_HOME_PATH.sub("[redacted]", out)
-    out = _RE_WIN_PATH.sub("[redacted]", out)
-    out = _RE_UNIX_ABS_PATH.sub("[redacted]", out)
-    out = _RE_DEVICE_UUID.sub("[redacted]", out)
-    out = _RE_HOST_ASSIGNMENT.sub(
-        lambda match: match.group(0).split("=", 1)[0].split(":", 1)[0] + "=[redacted]",
-        out,
+    sanitized = _RE_URL.sub(_sanitize_url, value)
+    sanitized = _RE_KV_SECRET.sub(
+        lambda match: f"{match.group(1)}=[redacted]", sanitized
     )
-    if truncate and len(out) > MAX_PERSISTED_STRING:
-        out = out[:MAX_PERSISTED_STRING]
-    elif len(out) > MAX_PERSISTED_STRING:
+    sanitized = _RE_IPV4.sub("[redacted]", sanitized)
+    sanitized = _RE_IPV6.sub("[redacted]", sanitized)
+    sanitized = _RE_HOME_PATH.sub("[redacted]", sanitized)
+    sanitized = _RE_WIN_PATH.sub("[redacted]", sanitized)
+    sanitized = _RE_UNIX_ABS_PATH.sub("[redacted]", sanitized)
+    sanitized = _RE_DEVICE_UUID.sub("[redacted]", sanitized)
+    sanitized = _RE_HOST_ASSIGNMENT.sub(
+        lambda match: match.group(0).split("=", 1)[0].split(":", 1)[0]
+        + "=[redacted]",
+        sanitized,
+    )
+    if truncate and len(sanitized) > MAX_PERSISTED_STRING:
+        sanitized = sanitized[:MAX_PERSISTED_STRING]
+    elif len(sanitized) > MAX_PERSISTED_STRING:
         raise ValueError(
-            f"persisted string length {len(out)} exceeds max {MAX_PERSISTED_STRING}."
+            f"persisted string length {len(sanitized)} exceeds max {MAX_PERSISTED_STRING}."
         )
-    return out, out != original
+    return sanitized, sanitized != original
 
 
 def redacted(text: str) -> str:
@@ -458,13 +465,13 @@ class EventRecord(_RecordBase):
         if len(set(names)) != len(names):
             raise ValueError("event fields must be unique by name.")
 
-        replaced = (
+        replacement_present = (
             self.operator_message is not None and "[redacted]" in self.operator_message
         ) or any(
             isinstance(field.value, str) and "[redacted]" in field.value
             for field in self.fields
         )
-        if replaced and self.diagnostic_code != "redacted_sensitive_value":
+        if replacement_present and self.diagnostic_code != "redacted_sensitive_value":
             raise ValueError(
                 "redacted persisted strings require diagnostic_code "
                 "'redacted_sensitive_value'."
@@ -473,6 +480,7 @@ class EventRecord(_RecordBase):
         if self.event_name == "logging.stream_opened":
             if (
                 self.sequence != 0
+                or self.elapsed_ns != 0
                 or self.component != "logging"
                 or self.severity != "INFO"
                 or self.diagnostic_code is not None
