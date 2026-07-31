@@ -86,26 +86,26 @@ def _symlink_safe_makedirs(target: Path) -> None:
     """Create ``target`` (and parents) only after verifying the existing path
     chain is symlink-free, then re-verify after creation (item #1).
 
-    The anchor is the deepest existing ancestor of ``target``; the walk verifies
-    every already-present component between the anchor and ``target`` so no
-    directory is created through a symlinked ancestor. The post-creation
-    re-verify closes the check/mkdir TOCTOU window.
+    Checks both intermediate components AND the target itself for symlinks.
     """
+    import stat as _stat
+
+    # Check if target itself is a symlink (lstat doesn't follow).
+    try:
+        target_st = os.lstat(target)
+        if _stat.S_ISLNK(target_st.st_mode):
+            raise LockUnavailableError(f"target {target} is a symlink; refused (item #1).")
+    except FileNotFoundError:
+        pass  # target doesn't exist yet — fine
+
     # Find the deepest existing ancestor to anchor the chain walk on.
-    anchor = target
-    exists = False
+    anchor = target.parent
     while anchor != anchor.parent:
         try:
             os.lstat(anchor)
-            exists = True
             break
         except FileNotFoundError:
             anchor = anchor.parent
-    if not exists:
-        # Nothing in the chain exists; nothing to verify against. mkdir will
-        # create the whole chain freshly (no symlink can pre-exist).
-        target.mkdir(parents=True, exist_ok=True)
-        return
     _verify_no_symlinks_in_chain(anchor, target)
     target.mkdir(parents=True, exist_ok=True)
     _verify_no_symlinks_in_chain(anchor, target)
@@ -218,15 +218,10 @@ class AttemptLock(AbstractContextManager["AttemptLock"]):
 
     def _ensure_parent(self) -> None:
         parent = self._lock_path.parent
+        # Always verify the path chain for symlinks, even when the parent
+        # already exists (it may exist AS a symlink). Then create if needed.
+        _symlink_safe_makedirs(parent)
         if not parent.exists():
-            # Create the parent directory symlink-safely (item #1): verify the
-            # existing path chain from the filesystem root down to the parent
-            # BEFORE mkdir so no directory is created through a symlinked
-            # ancestor, then re-verify after creation to close the check/mkdir
-            # TOCTOU window. The artifact root is the first path component under
-            # the system temp/workspace root that the store owns; we anchor the
-            # walk at the parent's existing ancestor that is NOT a symlink.
-            _symlink_safe_makedirs(parent)
             self._owns_dir = True
 
     def __enter__(self) -> AttemptLock:
