@@ -100,11 +100,6 @@ def sha256_stream(read_fn: Any, *, block_size: int = BLOCK_SIZE) -> tuple[str, i
     return f"sha256:{h.hexdigest()}", total
 
 
-def _hash_path(path: Path) -> tuple[str, int]:
-    with open(path, "rb") as fh:
-        return sha256_stream(fh.read)
-
-
 # ---------------------------------------------------------------------------
 # Atomic helpers
 # ---------------------------------------------------------------------------
@@ -133,6 +128,20 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _close_quietly(fd: int | None) -> None:
+    """Close a file descriptor if open, swallowing close errors (item #3).
+
+    Used in error/cleanup paths of the streaming copy so a failed ``os.close``
+    does not mask the original exception.
+    """
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def _is_symlink(path: Path) -> bool:
     try:
         st = os.lstat(path)
@@ -141,6 +150,24 @@ def _is_symlink(path: Path) -> bool:
     import stat as _stat
 
     return _stat.S_ISLNK(st.st_mode)
+
+
+def _is_dir_no_follow(path: Path) -> bool:
+    """True iff ``path`` is a real directory and NOT a symlink (item #2a).
+
+    Uses ``os.lstat`` (never follows a symlinked final element), unlike
+    ``Path.is_dir()`` which follows symlinks. Reconciliation must not follow a
+    symlinked category/bundle directory.
+    """
+    import stat as _stat
+
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if _stat.S_ISLNK(st.st_mode):
+        return False
+    return _stat.S_ISDIR(st.st_mode)
 
 
 def _verify_no_symlinks_in_chain(root: Path, target: Path) -> None:
@@ -176,6 +203,71 @@ def _verify_no_symlinks_in_chain(root: Path, target: Path) -> None:
             raise ArtifactConflictError(
                 f"path component {current} is a symlink; refused (amendment H)."
             )
+
+
+def _verify_no_symlinks_in_chain_lenient(root: Path, target: Path) -> None:
+    """Reject symlinks in the chain from ``root`` to ``target`` (item #1).
+
+    Unlike :func:`_verify_no_symlinks_in_chain`, MISSING components are allowed:
+    a component that does not exist yet cannot be a symlink and is about to be
+    created by mkdir. Any component that DOES exist and is a symlink is rejected.
+    This is what makes :func:`_safe_makedirs` safe to call on a not-yet-existing
+    chain: it verifies every already-present component without failing merely
+    because the chain is being created fresh.
+    """
+    import stat as _stat
+
+    try:
+        target_rel = target.relative_to(root)
+    except ValueError as e:
+        raise ArtifactConflictError(f"target {target} is not within artifact root {root}") from e
+    current = root
+    # Verify root itself is not a symlink (root may not exist yet on a fresh
+    # store; that is allowed — it will be created by mkdir).
+    try:
+        root_st = os.lstat(root)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        raise ArtifactConflictError(f"cannot lstat artifact root {root}: {e}") from e
+    else:
+        if _stat.S_ISLNK(root_st.st_mode):
+            raise ArtifactConflictError(f"artifact root {root} is a symlink; rejected.")
+    for part in target_rel.parts:
+        current = current / part
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            # Missing component is expected during makedirs; not a symlink.
+            continue
+        except OSError as e:
+            raise ArtifactConflictError(f"cannot lstat path component {current}: {e}") from e
+        if _stat.S_ISLNK(st.st_mode):
+            raise ArtifactConflictError(
+                f"path component {current} is a symlink; refused (amendment H)."
+            )
+
+
+def _safe_makedirs(root: Path, target: Path) -> None:
+    """Create ``target`` (and parents) only after verifying the path chain is
+    symlink-free, and re-verify after creation (item #1 / item #4).
+
+    The order matters: verify -> mkdir -> re-verify. The pre-creation check
+    rejects a symlinked ancestor that already exists, so no filesystem mutation
+    happens through a symlink before the rejection. The post-creation re-verify
+    closes the TOCTOU window where a symlink component is introduced between the
+    first check and the mkdir (a symlink planted on a freshly-created parent
+    component is caught before the caller proceeds).
+
+    Missing components are allowed (the chain may be created fresh); only
+    existing symlink components are rejected. ``root`` is the artifact root;
+    ``target`` is the directory to create.
+    """
+    _verify_no_symlinks_in_chain_lenient(root, target)
+    target.mkdir(parents=True, exist_ok=True)
+    # Re-verify the chain to the target itself after creation to catch a symlink
+    # planted on an intermediate component between the first check and the mkdir.
+    _verify_no_symlinks_in_chain_lenient(root, target)
 
 
 def _open_read_no_follow(path: Path) -> int:
@@ -485,11 +577,11 @@ class ArtifactStore:
             self._identity.attempt_id,
             category,
         )
-        # Verify no symlinked parent directory in the chain from the artifact
-        # root to the category directory BEFORE creating any temp bundle (item
-        # #4). This rejects a symlinked run/attempts/artifacts/category ancestor.
-        cdir.mkdir(parents=True, exist_ok=True)
-        _verify_no_symlinks_in_chain(self._artifact_root, cdir)
+        # Create the category directory through the symlink-safe makedirs helper
+        # so NO filesystem mutation happens through a symlink before the chain
+        # is rejected (item #1): the helper verifies the chain, then mkdir's,
+        # then re-verifies to close the check/mkdir TOCTOU window.
+        _safe_makedirs(self._artifact_root, cdir)
 
         # Stream content into a temp bundle, hashing as we go.
         tmp_bundle = self._make_temp_bundle_dir(cdir)
@@ -841,39 +933,55 @@ class ArtifactStore:
                 pass
 
     def _copy_to_owned_buffer(self, source: Path) -> Path:
-        """Copy a regular source file into a store-owned temp file (item #5).
+        """Copy a regular source file into a store-owned temp file (items #3, #5).
 
-        The source bytes are read via the symlink-safe path
-        (:func:`_read_bytes_no_follow`, which opens with ``O_NOFOLLOW`` and
-        ``fstat``-verifies a regular file) so a symlinked or non-regular source
-        is rejected. The copy lives beneath the attempt directory so it is owned
-        by this process.
+        Implemented as a bounded streaming copy so the entire telemetry stream
+        never needs to be in memory at once (item #3):
+
+        a) open the source with :func:`_open_read_no_follow` (``O_NOFOLLOW`` +
+           ``fstat`` regular-file verification) to obtain the source fd;
+        b) ``tempfile.mkstemp`` returns ``(dest_fd, temp_path)`` — the dest fd is
+           used directly (no descriptor leak from discarding it and reopening
+           the path);
+        c) stream from the source fd to the dest fd in 64 KiB blocks via
+           ``os.read``/``os.write`` (full-write loop);
+        d) ``fsync`` the dest fd, then close both fds;
+        e) on any error both fds are closed and the temp path is unlinked before
+           re-raising.
+
+        The parent attempt directory is created through the symlink-safe
+        :func:`_safe_makedirs` helper so no directory is created through a
+        symlinked ancestor (item #1).
         """
-        self._attempt_dir.mkdir(parents=True, exist_ok=True)
-        _verify_no_symlinks_in_chain(self._artifact_root, self._attempt_dir)
-        # Read the source through the symlink-safe reader (closes its own fd).
-        data = _read_bytes_no_follow(source)
-        tmp = Path(tempfile.mkstemp(prefix=".tmp-tel-", dir=self._attempt_dir)[1])
+        _safe_makedirs(self._artifact_root, self._attempt_dir)
+        # Open the source through the symlink-safe reader; the fd is fstat-
+        # verified to be a regular file inside _open_read_no_follow (item #5).
+        src_fd = _open_read_no_follow(source)
+        dest_fd: int | None = None
+        # mkstemp returns (fd, path); use the fd directly (no reopen, no leak).
+        dest_fd, tmp_str = tempfile.mkstemp(prefix=".tmp-tel-", dir=self._attempt_dir)
+        tmp = Path(tmp_str)
         try:
-            flags = (
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_TRUNC
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_BINARY", 0)
-            )
-            fd_dst = os.open(tmp, flags, 0o600)
-            try:
-                _full_write(fd_dst, data)
-                os.fsync(fd_dst)
-            finally:
-                os.close(fd_dst)
-        except Exception:
+            # Stream in 64 KiB blocks; the full source is never held in memory.
+            while True:
+                chunk = os.read(src_fd, BLOCK_SIZE)
+                if not chunk:
+                    break
+                _full_write(dest_fd, chunk)
+            os.fsync(dest_fd)
+        except BaseException:
+            # Close both fds and unlink the temp path on ANY error (including
+            # KeyboardInterrupt/BaseException so no fd is leaked mid-stream).
+            _close_quietly(dest_fd)
+            _close_quietly(src_fd)
             try:
                 tmp.unlink()
             except OSError:
                 pass
             raise
+        else:
+            os.close(dest_fd)
+            os.close(src_fd)
         return tmp
 
     # -- register_external -------------------------------------------------
@@ -992,7 +1100,7 @@ class ArtifactStore:
             self._identity.attempt_id,
             record.category,
         )
-        cdir.mkdir(parents=True, exist_ok=True)
+        _safe_makedirs(self._artifact_root, cdir)
         tmp_bundle = self._make_temp_bundle_dir(cdir)
         try:
             # artifact.json carries the immutable record. The external.json
@@ -1182,13 +1290,25 @@ class ArtifactStore:
         raise ArtifactNotFoundError(f"artifact {artifact_id!r} not found.")
 
     def locate(self, artifact_id: str) -> Path | None:
-        """The canonical ``content`` path of ``artifact_id``, or ``None`` if absent."""
+        """The canonical ``content`` path of ``artifact_id``, or ``None`` if absent.
+
+        A symlinked final ``content`` entry is rejected (item #2c): ``locate``
+        returns ``None`` rather than handing back a path that, when read, would
+        follow a symlink outside the bundle. The bundle's parent chain is already
+        verified symlink-free by :meth:`_bundle_path`; this closes the remaining
+        gap where only the final ``content`` element is swapped for a symlink.
+        """
         try:
             bdir = self._bundle_path(artifact_id)
         except ArtifactNotFoundError:
             return None
         content = bdir / "content"
-        return content if content.exists() else None
+        if not content.exists():
+            return None
+        # Reject a symlinked final content entry via os.lstat (item #2c).
+        if _is_symlink(content):
+            return None
+        return content
 
     def _current_record(self, artifact_id: str) -> ArtifactRecord | None:
         """The last-known registry state for ``artifact_id`` (None if unindexed).
@@ -1482,11 +1602,27 @@ class ArtifactStore:
         # an attacker-controlled tree.
         _verify_no_symlinks_in_chain(self._artifact_root, arts)
         for cat_dir in sorted(arts.iterdir()):
-            if not cat_dir.is_dir():
+            # Use os.lstat on every entry from iterdir() so a symlinked category
+            # directory is skipped, not followed (item #2a).
+            if not _is_dir_no_follow(cat_dir):
+                continue
+            # Verify the full chain to this category directory before processing
+            # any bundle beneath it (item #2a).
+            try:
+                _verify_no_symlinks_in_chain(self._artifact_root, cat_dir)
+            except (ArtifactConflictError, ArtifactNotFoundError):
                 continue
             category = cat_dir.name
             for bundle in sorted(cat_dir.iterdir()):
-                if not bundle.is_dir() or bundle.name.startswith(".tmp-bundle-"):
+                # Reject a symlinked bundle entry via lstat (item #2a); never
+                # follow it via is_dir().
+                if not _is_dir_no_follow(bundle) or bundle.name.startswith(".tmp-bundle-"):
+                    continue
+                # Verify the full chain to this bundle before processing it
+                # (item #2a).
+                try:
+                    _verify_no_symlinks_in_chain(self._artifact_root, bundle)
+                except (ArtifactConflictError, ArtifactNotFoundError):
                     continue
                 artifact_id = bundle.name
                 if artifact_id in indexed:
@@ -1534,10 +1670,20 @@ class ArtifactStore:
                         appended.append(artifact_id)
                         indexed.add(artifact_id)
                         continue
-                    # Local bundle with content: verify the payload.
-                    if _is_symlink(content_path):
-                        raise ValueError("content is a symlink")
-                    digest, size = _hash_path(content_path)
+                    # Local bundle with content: verify the payload. Open the
+                    # content via the symlink-safe path and hash THROUGH the fd
+                    # directly (item #2b) — _open_read_no_follow uses O_NOFOLLOW
+                    # + fstat to verify a regular file, and _hash_fd reads the
+                    # already-open descriptor. This closes the TOCTOU window that
+                    # _hash_path (which reopens the path) leaves open.
+                    try:
+                        content_fd = _open_read_no_follow(content_path)
+                    except ArtifactConflictError as e:
+                        raise ValueError("content is not a regular file") from e
+                    try:
+                        digest, size = self._hash_fd(content_fd)
+                    finally:
+                        os.close(content_fd)
                     if digest != record.content_digest:
                         raise ValueError("content digest mismatch")
                     if size != record.byte_size:
