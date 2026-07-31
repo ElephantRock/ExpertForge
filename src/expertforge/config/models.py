@@ -163,12 +163,28 @@ class CheckpointConfig(_Section):
 
 
 class LoggingConfig(_Section):
-    """Structured logging cadence."""
+    """Structured logging cadence.
+
+    ``console_enabled`` and ``fsync_interval_records`` are additive Issue #9
+    fields; the configuration format version is unchanged (Issue #5 §1/§2).
+    Existing ``level`` controls event filtering; metrics are never discarded
+    solely because of log severity. ``log_interval_steps`` remains the caller's
+    cadence policy.
+    """
 
     log_interval_steps: int = Field(
         default=10, gt=0, description="Emit a log line every N optimizer steps."
     )
-    level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="INFO")
+    # Issue #9 (design comment 5136093570 §9): additive telemetry-writer controls.
+    console_enabled: bool = Field(
+        default=True, description="Render telemetry records to the console."
+    )
+    fsync_interval_records: int = Field(
+        default=100,
+        ge=1,
+        description="fsync the telemetry stream every N written records.",
+    )
 
 
 # --- artifacts -------------------------------------------------------------
