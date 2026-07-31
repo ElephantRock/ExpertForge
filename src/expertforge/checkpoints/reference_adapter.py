@@ -16,7 +16,7 @@ cannot advance independently during capture.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Protocol
 
 from expertforge.checkpoints.models import (
     CapturedCheckpointState,
@@ -31,8 +31,8 @@ from expertforge.checkpoints.models import (
     OptimizerParamGroup,
     OptimizerStateSlot,
     RngDescriptor,
-    SchedulerDescriptor,
     ScalerDescriptor,
+    SchedulerDescriptor,
     TopologyDescriptor,
 )
 
@@ -41,7 +41,6 @@ __all__ = [
     "StateConsumer",
     "ReferenceState",
     "ReferenceStateProvider",
-    "ReferenceStateConsumer",
     "ReferenceCheckpointError",
 ]
 
@@ -143,18 +142,26 @@ class ReferenceStateProvider:
             )
             for name in sorted(s.buffers)
         )
-        optimizer = CapturedTensor(
-            logical_name="optimizer.state",
-            dtype="float32",
-            shape=(len(s.optimizer_state) // 4,),
-            raw_bytes=s.optimizer_state,
-        ) if s.optimizer_state else None
-        scheduler = CapturedTensor(
-            logical_name="scheduler.state",
-            dtype="float32",
-            shape=(len(s.scheduler_state) // 4,),
-            raw_bytes=s.scheduler_state,
-        ) if s.scheduler_state else None
+        optimizer = (
+            CapturedTensor(
+                logical_name="optimizer.state",
+                dtype="float32",
+                shape=(len(s.optimizer_state) // 4,),
+                raw_bytes=s.optimizer_state,
+            )
+            if s.optimizer_state
+            else None
+        )
+        scheduler = (
+            CapturedTensor(
+                logical_name="scheduler.state",
+                dtype="float32",
+                shape=(len(s.scheduler_state) // 4,),
+                raw_bytes=s.scheduler_state,
+            )
+            if s.scheduler_state
+            else None
+        )
         scaler = None
         if s.scaler_state is not None:
             scaler = CapturedTensor(
@@ -165,9 +172,7 @@ class ReferenceStateProvider:
             )
 
         param_desc = tuple(
-            ModelParameterDescriptor(
-                name=t.logical_name, shape=tuple(t.shape), dtype=t.dtype
-            )
+            ModelParameterDescriptor(name=t.logical_name, shape=tuple(t.shape), dtype=t.dtype)
             for t in (*parameters, *buffers)
         )
         optimizer_desc = _build_optimizer_descriptor(s, parameters)

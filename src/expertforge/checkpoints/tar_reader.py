@@ -12,7 +12,7 @@ parses sequentially for large archives).
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 from expertforge.checkpoints.tar_writer import USTAR_BLOCK_SIZE
 
@@ -53,9 +53,7 @@ def _parse_numeric(field: bytes, *, label: str) -> int:
     # Must be all octal digits.
     for ch in text:
         if ch not in "01234567":
-            raise TarParseError(
-                f"{label}: non-octal character {ch!r} in numeric field"
-            )
+            raise TarParseError(f"{label}: non-octal character {ch!r} in numeric field")
     try:
         return int(text, 8)
     except ValueError as e:  # pragma: no cover - guarded above
@@ -95,9 +93,7 @@ def _parse_header(buf: bytes, offset: int) -> tuple[str, bytes, int, int]:
     except ValueError:
         raise TarParseError("bad checksum octal value") from None
     if stored_val != computed:
-        raise TarParseError(
-            f"header checksum mismatch: stored={stored_val} computed={computed}"
-        )
+        raise TarParseError(f"header checksum mismatch: stored={stored_val} computed={computed}")
 
     # magic: bytes 257:263 must be "ustar\x00".
     magic = header[257:263]
@@ -114,9 +110,7 @@ def _parse_header(buf: bytes, offset: int) -> tuple[str, bytes, int, int]:
     typeflag = header[156:157]
     # Reject PAX/GNU extended headers outright.
     if typeflag in (b"x", b"g", b"L", b"K"):
-        raise TarParseError(
-            f"extended header typeflag {typeflag!r} rejected (PAX/GNU not allowed)"
-        )
+        raise TarParseError(f"extended header typeflag {typeflag!r} rejected (PAX/GNU not allowed)")
     # Symlinks/hardlinks/dirs/devices/fifos rejected.
     if typeflag not in (b"0", b"\x00"):
         raise TarParseError(f"unsupported typeflag {typeflag!r}; only regular files allowed")
@@ -168,7 +162,6 @@ def parse_ustar_archive(buf: bytes) -> list[ParsedMember]:
         )
     members: list[ParsedMember] = []
     seen: set[str] = set()
-    offset = 0
     n_blocks = len(buf) // USTAR_BLOCK_SIZE
     block_idx = 0
     terminator_seen = False
@@ -198,7 +191,6 @@ def parse_ustar_archive(buf: bytes) -> list[ParsedMember]:
         # Advance past the data (padded to block boundary).
         data_blocks = (size + USTAR_BLOCK_SIZE - 1) // USTAR_BLOCK_SIZE
         block_idx += 1 + data_blocks
-        offset = data_start + data_blocks * USTAR_BLOCK_SIZE
 
     if not terminator_seen:
         raise TarParseError("missing two-block zero terminator")
@@ -211,9 +203,7 @@ def parse_ustar_archive(buf: bytes) -> list[ParsedMember]:
         raise TarParseError("second terminator block is non-zero")
     after = (block_idx + 1) * USTAR_BLOCK_SIZE
     if after != len(buf):
-        raise TarParseError(
-            f"trailing {len(buf) - after} bytes after terminator are rejected"
-        )
+        raise TarParseError(f"trailing {len(buf) - after} bytes after terminator are rejected")
     return members
 
 
@@ -227,9 +217,7 @@ def _validate_member_name(name: str) -> None:
         raise TarParseError(f"backslash in member name {name!r} rejected")
     parts = name.split("/")
     if any(p in ("", "..", ".") for p in parts):
-        raise TarParseError(
-            f"member name {name!r} contains '.', '..', or empty components"
-        )
+        raise TarParseError(f"member name {name!r} contains '.', '..', or empty components")
 
 
 def iter_members(buf: bytes) -> Iterator[ParsedMember]:

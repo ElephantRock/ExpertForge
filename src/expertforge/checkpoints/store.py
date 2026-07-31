@@ -29,7 +29,7 @@ from expertforge.artifacts.models import (
     ParentReference,
     RetentionStatus,
 )
-from expertforge.artifacts.store import ArtifactStore, BLOCK_SIZE
+from expertforge.artifacts.store import BLOCK_SIZE, ArtifactStore
 from expertforge.checkpoints.encoder import ArchiveMembers, build_archive
 from expertforge.checkpoints.models import (
     CHECKPOINT_ARCHIVE_FORMAT_VERSION,
@@ -38,7 +38,6 @@ from expertforge.checkpoints.models import (
     CompatibilityDescriptor,
     CompatibilityMismatch,
     CompatibilityResult,
-    InspectionStatus,
     canonical_json_bytes,
 )
 from expertforge.checkpoints.tar_reader import ParsedMember, TarParseError, parse_ustar_archive
@@ -174,10 +173,7 @@ class CheckpointArchive:
         return self.member(member_name)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return (
-            f"CheckpointArchive(artifact_id={self.artifact_id!r}, "
-            f"byte_size={self._byte_size})"
-        )
+        return f"CheckpointArchive(artifact_id={self.artifact_id!r}, byte_size={self._byte_size})"
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +219,7 @@ class CheckpointStore:
 
         if not isinstance(captured, CapturedCheckpointState):
             raise CheckpointComponentError(
-                "captured must be a CapturedCheckpointState from "
-                "capture_checkpoint_snapshot()"
+                "captured must be a CapturedCheckpointState from capture_checkpoint_snapshot()"
             )
         ts = created_at_utc or datetime.now(tz=_UTC())
         archive = build_archive(
@@ -259,9 +254,7 @@ class CheckpointStore:
                 f"published record category {record.category!r} != 'checkpoint'"
             )
         if record.format != "tar":
-            raise CheckpointCorruptError(
-                f"published record format {record.format!r} != 'tar'"
-            )
+            raise CheckpointCorruptError(f"published record format {record.format!r} != 'tar'")
         if record.format_version != CHECKPOINT_ARCHIVE_FORMAT_VERSION:
             raise CheckpointVersionError(
                 f"published record format_version {record.format_version!r} != "
@@ -354,8 +347,7 @@ class CheckpointStore:
     def _assert_record_loadable(self, record: ArtifactRecord) -> None:
         if record.category != "checkpoint":
             raise CheckpointCorruptError(
-                f"artifact {record.artifact_id!r} category {record.category!r} "
-                "is not 'checkpoint'"
+                f"artifact {record.artifact_id!r} category {record.category!r} is not 'checkpoint'"
             )
         if record.format != "tar":
             raise CheckpointCorruptError(
@@ -401,19 +393,14 @@ class CheckpointStore:
             )
         if manifest.attempt_id != record.attempt_id:
             raise CheckpointCorruptError(
-                f"manifest attempt_id {manifest.attempt_id!r} != record "
-                f"{record.attempt_id!r}"
+                f"manifest attempt_id {manifest.attempt_id!r} != record {record.attempt_id!r}"
             )
         if manifest.specification_fingerprint != record.specification_fingerprint:
             raise CheckpointCorruptError(
                 "manifest specification_fingerprint != record specification_fingerprint"
             )
-        if manifest.parent_artifact_id != (
-            record.parent.artifact_id if record.parent else None
-        ):
-            raise CheckpointCorruptError(
-                "manifest parent_artifact_id != record parent artifact_id"
-            )
+        if manifest.parent_artifact_id != (record.parent.artifact_id if record.parent else None):
+            raise CheckpointCorruptError("manifest parent_artifact_id != record parent artifact_id")
 
     def _open_no_follow(self, path: Path) -> int:
         """Open ``path`` for reading without following a symlink final element."""
@@ -422,9 +409,7 @@ class CheckpointStore:
         try:
             fd = os.open(path, flags)
         except OSError as e:
-            raise CheckpointCorruptError(
-                f"could not open content path {path}: {e}"
-            ) from e
+            raise CheckpointCorruptError(f"could not open content path {path}: {e}") from e
         try:
             st = os.fstat(fd)
         except OSError as e:
@@ -454,9 +439,7 @@ class CheckpointStore:
         except TarParseError as e:
             raise CheckpointCorruptError(f"tar framing invalid: {e}") from e
         if not members or members[0].name != "manifest.json":
-            raise CheckpointCorruptError(
-                "manifest.json must be the first archive member"
-            )
+            raise CheckpointCorruptError("manifest.json must be the first archive member")
         return members
 
     def _decode_manifest(self, members: list[ParsedMember]) -> CheckpointManifest:
@@ -471,9 +454,7 @@ class CheckpointStore:
         # Re-encode canonically and require the stored bytes match.
         canonical = canonical_json_bytes(data)
         if canonical != raw:
-            raise CheckpointCorruptError(
-                "manifest.json is not canonical compact sorted JSON"
-            )
+            raise CheckpointCorruptError("manifest.json is not canonical compact sorted JSON")
         try:
             manifest = CheckpointManifest.model_validate_json(canonical, strict=True)
         except Exception as e:
@@ -496,9 +477,7 @@ class CheckpointStore:
         non_manifest = {n for n in by_name if n != "manifest.json"}
         unlisted = non_manifest - set(expected)
         if unlisted:
-            raise CheckpointCorruptError(
-                f"unlisted members present: {sorted(unlisted)!r}"
-            )
+            raise CheckpointCorruptError(f"unlisted members present: {sorted(unlisted)!r}")
         missing = set(expected) - non_manifest
         if missing:
             raise CheckpointCorruptError(f"missing members: {sorted(missing)!r}")
@@ -537,9 +516,7 @@ class CheckpointStore:
         try:
             st = os.fstat(fd)
             if not stat_mod.S_ISREG(st.st_mode):
-                return CheckpointInspection(
-                    status="corrupt", diagnostic="not a regular file"
-                )
+                return CheckpointInspection(status="corrupt", diagnostic="not a regular file")
             tar_bytes = self._read_all_fd(fd)
         finally:
             os.close(fd)
@@ -735,7 +712,7 @@ def _check_optimizer(actual: Any, expected: Any, add: Any) -> None:
             len(actual.param_groups),
         )
     else:
-        for ag, eg in zip(actual.param_groups, expected.param_groups):
+        for ag, eg in zip(actual.param_groups, expected.param_groups, strict=False):
             if tuple(ag.param_names) != tuple(eg.param_names):
                 add(
                     "optimizer_groups",
@@ -745,8 +722,12 @@ def _check_optimizer(actual: Any, expected: Any, add: Any) -> None:
                     path=str(ag.group_index),
                 )
     # State slot shapes.
-    a_slots = {(s.group_index, s.param_name, s.slot_name): tuple(s.shape) for s in actual.state_slots}
-    e_slots = {(s.group_index, s.param_name, s.slot_name): tuple(s.shape) for s in expected.state_slots}
+    a_slots = {
+        (s.group_index, s.param_name, s.slot_name): tuple(s.shape) for s in actual.state_slots
+    }
+    e_slots = {
+        (s.group_index, s.param_name, s.slot_name): tuple(s.shape) for s in expected.state_slots
+    }
     for key in sorted(set(e_slots) - set(a_slots)):
         add("optimizer_slots", "optimizer_slot_missing", key, "<absent>", path=str(key))
     for key in sorted(set(a_slots) - set(e_slots)):

@@ -11,7 +11,7 @@ two terminal zero blocks.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 __all__ = ["USTAR_BLOCK_SIZE", "TarMember", "build_ustar_archive", "TarWriterError"]
 
@@ -59,7 +59,10 @@ def _split_name_prefix(name: str) -> tuple[str, str]:
     for i in range(1, len(parts)):
         prefix = "/".join(parts[:i])
         suffix = "/".join(parts[i:])
-        if len(suffix.encode("utf-8")) <= _NAME_LIMIT and len(prefix.encode("utf-8")) <= _PREFIX_LIMIT:
+        if (
+            len(suffix.encode("utf-8")) <= _NAME_LIMIT
+            and len(prefix.encode("utf-8")) <= _PREFIX_LIMIT
+        ):
             best = (suffix, prefix)
             break
     if best is None:

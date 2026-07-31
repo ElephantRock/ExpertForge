@@ -14,7 +14,7 @@ import base64
 import hashlib
 import json
 import re
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -339,17 +339,13 @@ class _FrozenModel(BaseModel):
 
 def _check_str(value: str) -> str:
     if len(value.encode("utf-8")) > MAX_SAFE_STRING_BYTES:
-        raise ResourceLimitError(
-            f"string value exceeds {MAX_SAFE_STRING_BYTES} byte limit"
-        )
+        raise ResourceLimitError(f"string value exceeds {MAX_SAFE_STRING_BYTES} byte limit")
     return value
 
 
 def _check_bytes(value: bytes) -> bytes:
     if len(value) > MAX_SAFE_INLINE_BYTES:
-        raise ResourceLimitError(
-            f"inline bytes value exceeds {MAX_SAFE_INLINE_BYTES} byte limit"
-        )
+        raise ResourceLimitError(f"inline bytes value exceeds {MAX_SAFE_INLINE_BYTES} byte limit")
     return value
 
 
@@ -412,8 +408,7 @@ class _SafeFloat(_FrozenModel):
         hi = (1 << bits) - 1
         if self.bit_pattern < 0 or self.bit_pattern > hi:
             raise ValueError(
-                f"float bit_pattern {self.bit_pattern} out of range for "
-                f"float{bits} ([0, {hi}])"
+                f"float bit_pattern {self.bit_pattern} out of range for float{bits} ([0, {hi}])"
             )
         return self
 
@@ -437,17 +432,13 @@ class _SafeBytes(_FrozenModel):
     @model_validator(mode="after")
     def _verify(self) -> _SafeBytes:
         if self.byte_length > MAX_SAFE_INLINE_BYTES:
-            raise ResourceLimitError(
-                f"bytes value exceeds {MAX_SAFE_INLINE_BYTES} byte limit"
-            )
+            raise ResourceLimitError(f"bytes value exceeds {MAX_SAFE_INLINE_BYTES} byte limit")
         try:
             decoded = base64.b64decode(self.value.encode("ascii"), validate=True)
         except (UnicodeEncodeError, ValueError) as exc:
             raise ValueError("bytes value must be canonical ASCII base64") from exc
         if len(decoded) != self.byte_length:
-            raise ValueError(
-                f"bytes byte_length {self.byte_length} != decoded {len(decoded)}"
-            )
+            raise ValueError(f"bytes byte_length {self.byte_length} != decoded {len(decoded)}")
         if base64.b64encode(decoded).decode("ascii") != self.value:
             raise ValueError("bytes value must use canonical padded base64")
         if hashlib.sha256(decoded).hexdigest() != self.sha256:
@@ -463,40 +454,34 @@ class _SafeString(_FrozenModel):
     @classmethod
     def _check_len(cls, v: str) -> str:
         if len(v.encode("utf-8")) > MAX_SAFE_STRING_BYTES:
-            raise ResourceLimitError(
-                f"string value exceeds {MAX_SAFE_STRING_BYTES} byte limit"
-            )
+            raise ResourceLimitError(f"string value exceeds {MAX_SAFE_STRING_BYTES} byte limit")
         return v
 
 
 class _SafeSequence(_FrozenModel):
     kind: Literal["sequence"] = "sequence"
-    value: tuple["SafeValue", ...] = Field(default_factory=tuple)
+    value: tuple[SafeValue, ...] = Field(default_factory=tuple)
 
     @field_validator("value")
     @classmethod
-    def _check_len(cls, v: tuple["SafeValue", ...]) -> tuple["SafeValue", ...]:
+    def _check_len(cls, v: tuple[SafeValue, ...]) -> tuple[SafeValue, ...]:
         if len(v) > MAX_SAFE_SEQUENCE_ENTRIES:
-            raise ResourceLimitError(
-                f"sequence exceeds {MAX_SAFE_SEQUENCE_ENTRIES} entries"
-            )
+            raise ResourceLimitError(f"sequence exceeds {MAX_SAFE_SEQUENCE_ENTRIES} entries")
         return v
 
 
 class _SafeMapping(_FrozenModel):
     kind: Literal["mapping"] = "mapping"
     # Mappings use canonical sorted keys (sorted at construction time).
-    value: tuple[tuple[str, "SafeValue"], ...] = Field(default_factory=tuple)
+    value: tuple[tuple[str, SafeValue], ...] = Field(default_factory=tuple)
 
     @field_validator("value")
     @classmethod
     def _check_canonical(
-        cls, v: tuple[tuple[str, "SafeValue"], ...]
-    ) -> tuple[tuple[str, "SafeValue"], ...]:
+        cls, v: tuple[tuple[str, SafeValue], ...]
+    ) -> tuple[tuple[str, SafeValue], ...]:
         if len(v) > MAX_SAFE_MAPPING_ENTRIES:
-            raise ResourceLimitError(
-                f"mapping exceeds {MAX_SAFE_MAPPING_ENTRIES} entries"
-            )
+            raise ResourceLimitError(f"mapping exceeds {MAX_SAFE_MAPPING_ENTRIES} entries")
         keys = [k for k, _ in v]
         if len(set(keys)) != len(keys):
             raise ValueError("mapping keys must be unique")
@@ -508,16 +493,14 @@ class _SafeMapping(_FrozenModel):
 # The discriminated union. Exactly one variant is set; the discriminator is the
 # ``kind`` field. Use Annotated[Union[...], Field(discriminator="kind")].
 SafeValue = Annotated[
-    Union[
-        _SafeNull,
-        _SafeBool,
-        _SafeInt,
-        _SafeFloat,
-        _SafeBytes,
-        _SafeString,
-        _SafeSequence,
-        _SafeMapping,
-    ],
+    _SafeNull
+    | _SafeBool
+    | _SafeInt
+    | _SafeFloat
+    | _SafeBytes
+    | _SafeString
+    | _SafeSequence
+    | _SafeMapping,
     Field(discriminator="kind"),
 ]
 
@@ -592,9 +575,7 @@ class CapturedTensor(_FrozenModel):
     @classmethod
     def _check_name(cls, v: str) -> str:
         if not _CANONICAL_NAME.fullmatch(v):
-            raise ValueError(
-                f"logical_name {v!r} must match {_CANONICAL_NAME.pattern}"
-            )
+            raise ValueError(f"logical_name {v!r} must match {_CANONICAL_NAME.pattern}")
         return v
 
     @field_validator("shape")
@@ -612,18 +593,14 @@ class CapturedTensor(_FrozenModel):
     @model_validator(mode="after")
     def _check_bytes(self) -> CapturedTensor:
         if len(self.raw_bytes) > MAX_TENSOR_MEMBER_BYTES:
-            raise ResourceLimitError(
-                f"tensor raw_bytes exceeds {MAX_TENSOR_MEMBER_BYTES} bytes"
-            )
+            raise ResourceLimitError(f"tensor raw_bytes exceeds {MAX_TENSOR_MEMBER_BYTES} bytes")
         itemsize = _DTYPE_ITEMSIZE[self.dtype]
         # Overflow-safe product check.
         product = 1
         for dim in self.shape:
             product *= dim
             if product > MAX_TENSOR_ELEMENTS:
-                raise ValueError(
-                    f"tensor element count exceeds {MAX_TENSOR_ELEMENTS}"
-                )
+                raise ValueError(f"tensor element count exceeds {MAX_TENSOR_ELEMENTS}")
         expected = product * itemsize
         if expected != len(self.raw_bytes):
             raise ValueError(
@@ -662,15 +639,15 @@ class CapturedCheckpointState(_FrozenModel):
     scheduler: CapturedTensor | None = None
     scaler: CapturedTensor | None = None
     rng_bundle_bytes: bytes
-    data_cursor: "DataCursor"
-    counters: "CounterSnapshot"
-    model_descriptor: "ModelDescriptor"
-    optimizer_descriptor: "OptimizerDescriptor"
-    scheduler_descriptor: "SchedulerDescriptor"
-    scaler_descriptor: "ScalerDescriptor | None"
-    rng_descriptor: "RngDescriptor"
-    data_descriptor: "DataDescriptor"
-    topology_descriptor: "TopologyDescriptor"
+    data_cursor: DataCursor
+    counters: CounterSnapshot
+    model_descriptor: ModelDescriptor
+    optimizer_descriptor: OptimizerDescriptor
+    scheduler_descriptor: SchedulerDescriptor
+    scaler_descriptor: ScalerDescriptor | None
+    rng_descriptor: RngDescriptor
+    data_descriptor: DataDescriptor
+    topology_descriptor: TopologyDescriptor
     optimizer_update_complete: bool = True
     accumulation_position: int = 0
     async_prefetch_active: bool = False
@@ -688,18 +665,14 @@ class CapturedCheckpointState(_FrozenModel):
     @model_validator(mode="after")
     def _check_quiescent(self) -> CapturedCheckpointState:
         if not self.optimizer_update_complete:
-            raise ValueError(
-                "capture requires optimizer_update_complete=True (V1 save boundary)"
-            )
+            raise ValueError("capture requires optimizer_update_complete=True (V1 save boundary)")
         if self.async_prefetch_active:
             raise ValueError(
                 "capture requires async_prefetch_active=False (V1 rejects active prefetch)"
             )
         # Scaler descriptor presence must match scaler tensor presence.
         if (self.scaler is not None) != (self.scaler_descriptor is not None):
-            raise ValueError(
-                "scaler tensor and scaler_descriptor presence must agree"
-            )
+            raise ValueError("scaler tensor and scaler_descriptor presence must agree")
         if self.scaler_descriptor is not None and self.scaler_descriptor.active != (
             self.scaler is not None
         ):
@@ -749,8 +722,7 @@ class TensorMemberRef(_FrozenModel):
     def _check_name(cls, v: str) -> str:
         if not _TENSOR_MEMBER_NAME.fullmatch(v):
             raise ValueError(
-                f"tensor member_name must match {_TENSOR_MEMBER_NAME.pattern}; "
-                f"got {v!r}"
+                f"tensor member_name must match {_TENSOR_MEMBER_NAME.pattern}; got {v!r}"
             )
         return v
 
@@ -791,9 +763,7 @@ class StateComponentRef(_FrozenModel):
     def _check_member_name(cls, v: str) -> str:
         # Non-manifest, non-tensor members live under state/<role>.json.
         if not v.startswith("state/") or not v.endswith(".json"):
-            raise ValueError(
-                f"component member_name must be 'state/<role>.json'; got {v!r}"
-            )
+            raise ValueError(f"component member_name must be 'state/<role>.json'; got {v!r}")
         return v
 
 
@@ -822,9 +792,7 @@ class CounterSnapshot(_FrozenModel):
     @model_validator(mode="after")
     def _check_quiescent(self) -> CounterSnapshot:
         if self.accumulation_position != 0:
-            raise ValueError(
-                "accumulation_position must be 0 at save/restore (V1 save boundary)"
-            )
+            raise ValueError("accumulation_position must be 0 at save/restore (V1 save boundary)")
         return self
 
 
@@ -885,14 +853,10 @@ class DataCursor(_FrozenModel):
     def _check_permutation(self) -> DataCursor:
         if self.sampler_type == "shuffled":
             if self.permutation_seed is None:
-                raise ValueError(
-                    "shuffled sampler requires a permutation_seed/state"
-                )
+                raise ValueError("shuffled sampler requires a permutation_seed/state")
         else:  # sequential
             if self.permutation_seed is not None:
-                raise ValueError(
-                    "sequential sampler must not carry a permutation_seed"
-                )
+                raise ValueError("sequential sampler must not carry a permutation_seed")
         return self
 
 
@@ -1001,7 +965,7 @@ class OptimizerParamGroup(_FrozenModel):
 
     group_index: int = Field(..., ge=0)
     param_names: tuple[str, ...] = Field(default_factory=tuple)
-    options: tuple[tuple[str, "SafeValue"], ...] = Field(default_factory=tuple)
+    options: tuple[tuple[str, SafeValue], ...] = Field(default_factory=tuple)
 
     @field_validator("param_names")
     @classmethod
@@ -1066,7 +1030,9 @@ class OptimizerDescriptor(_FrozenModel):
     @classmethod
     def _check_slots(cls, v: tuple[OptimizerStateSlot, ...]) -> tuple[OptimizerStateSlot, ...]:
         # Slots must be canonically sorted by (group, param, slot).
-        key = lambda s: (s.group_index, s.param_name, s.slot_name)
+        def key(s: OptimizerStateSlot) -> tuple[int, str, str]:
+            return (s.group_index, s.param_name, s.slot_name)
+
         if list(v) != sorted(v, key=key):
             raise ValueError("state_slots must be sorted by (group, param, slot)")
         seen = {(s.group_index, s.param_name, s.slot_name) for s in v}
@@ -1159,8 +1125,7 @@ class TopologyDescriptor(_FrozenModel):
     def _check_v1(self) -> TopologyDescriptor:
         if self.world_size != 1:
             raise ValueError(
-                f"V1 is single-process only; topology world_size must be 1 "
-                f"(got {self.world_size})"
+                f"V1 is single-process only; topology world_size must be 1 (got {self.world_size})"
             )
         return self
 
@@ -1168,9 +1133,7 @@ class TopologyDescriptor(_FrozenModel):
 class CompatibilityDescriptor(_FrozenModel):
     """The full compatibility descriptor (design §11)."""
 
-    compatibility_schema: Literal["expertforge.checkpoint-compatibility"] = (
-        COMPATIBILITY_SCHEMA
-    )
+    compatibility_schema: Literal["expertforge.checkpoint-compatibility"] = COMPATIBILITY_SCHEMA
     compatibility_schema_version: int = COMPATIBILITY_SCHEMA_VERSION
     archive_format_version: int = CHECKPOINT_ARCHIVE_FORMAT_VERSION
     manifest_schema_version: int = CHECKPOINT_MANIFEST_SCHEMA_VERSION
@@ -1215,7 +1178,9 @@ class CompatibilityResult(_FrozenModel):
     def _check_sorted(
         cls, v: tuple[CompatibilityMismatch, ...]
     ) -> tuple[CompatibilityMismatch, ...]:
-        key = lambda m: (m.component, m.path, m.diagnostic_code, m.expected, m.actual)
+        def key(m: CompatibilityMismatch) -> tuple[str, str, str, str, str]:
+            return (m.component, m.path, m.diagnostic_code, m.expected, m.actual)
+
         if list(v) != sorted(v, key=key):
             raise ValueError("mismatches must be sorted canonically")
         return v
@@ -1314,9 +1279,7 @@ class CheckpointManifest(_FrozenModel):
         all_set = all(f is not None for f in fields)
         none_set = all(f is None for f in fields)
         if not (all_set or none_set):
-            raise ValueError(
-                "parent fields must be all-set or all-None (fully qualified)"
-            )
+            raise ValueError("parent fields must be all-set or all-None (fully qualified)")
         return self
 
     @model_validator(mode="after")

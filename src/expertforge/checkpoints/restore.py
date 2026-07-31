@@ -21,10 +21,9 @@ stage, including RNG rollback.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
-from typing import Any, Callable, Literal, Protocol
+from collections.abc import Callable
+from typing import Any, Literal, Protocol
 
 from expertforge.checkpoints.models import CapturedTensor, CounterSnapshot, DataCursor
 from expertforge.checkpoints.store import CheckpointArchive
@@ -116,9 +115,9 @@ def decode_component_json(raw: bytes) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise RestoreError("component JSON root must be an object")
     # Require canonical compact sorted JSON.
-    canonical = json.dumps(
-        data, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
     if canonical != raw:
         raise RestoreError("component JSON is not canonical compact sorted JSON")
     return data
@@ -156,9 +155,7 @@ def build_restored_tensors(
 
     state_tensors: dict[str, CapturedTensor] = {}
     for role in ("optimizer", "scheduler", "scaler"):
-        comp_ref = next(
-            (c for c in manifest.state_components if c.role == role), None
-        )
+        comp_ref = next((c for c in manifest.state_components if c.role == role), None)
         if comp_ref is None:
             continue
         payload = decode_component_json(archive.component(role))
@@ -319,9 +316,7 @@ class RestoreTransaction:
                 cleanup_error = cleanup_exc
             if cleanup_error is not None:
                 raise RestoreError("rng restore failed; rng rollback also failed") from e
-            raise RestoreError(
-                f"rng restore failed; previous RNG bundle restored: {e}"
-            ) from e
+            raise RestoreError(f"rng restore failed; previous RNG bundle restored: {e}") from e
 
         self._committed = True
         return RestoredState(

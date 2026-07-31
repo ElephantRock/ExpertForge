@@ -25,15 +25,13 @@ from expertforge.checkpoints.models import (
     MAX_COMPONENT_MEMBER_BYTES,
     MAX_TENSOR_COUNT,
     MAX_TENSOR_MEMBER_BYTES,
-    CapturedTensor,
     CapturedCheckpointState,
+    CapturedTensor,
     CheckpointManifest,
     CompatibilityDescriptor,
-    CounterSnapshot,
     StateComponentRef,
     TensorMemberRef,
     canonical_json_bytes,
-    validate_canonical_digest,
 )
 from expertforge.checkpoints.tar_writer import TarMember, build_ustar_archive
 from expertforge.config.resolve import ResolutionEnvelope, canonical_bytes
@@ -210,9 +208,7 @@ def _resolve_tensors(
     for state_tensor in state_tensors:
         if state_tensor is not None:
             if state_tensor.logical_name in all_tensors:
-                raise EncoderError(
-                    f"tensor logical name collision: {state_tensor.logical_name!r}"
-                )
+                raise EncoderError(f"tensor logical name collision: {state_tensor.logical_name!r}")
             all_tensors[state_tensor.logical_name] = state_tensor
 
     name_to_member: dict[str, tuple[str, ...]] = {}
@@ -224,9 +220,7 @@ def _resolve_tensors(
         members = tuple(sorted({*group}))
         canonical_name = members[0]
         if canonical_name not in all_tensors:
-            raise EncoderError(
-                f"alias group canonical member {canonical_name!r} not captured"
-            )
+            raise EncoderError(f"alias group canonical member {canonical_name!r} not captured")
         canonical_tensors[canonical_name] = all_tensors[canonical_name]
         for n in members:
             name_to_member[n] = members
@@ -287,9 +281,7 @@ def build_archive(
     canonical_names_sorted = sorted(canonical_tensors.keys())
     if len(canonical_names_sorted) > MAX_TENSOR_COUNT:
         raise EncoderError(f"too many tensors ({len(canonical_names_sorted)})")
-    canonical_to_index: dict[str, int] = {
-        name: i for i, name in enumerate(canonical_names_sorted)
-    }
+    canonical_to_index: dict[str, int] = {name: i for i, name in enumerate(canonical_names_sorted)}
 
     tensor_members: list[TensorMemberRef] = []
     tensors_by_index: dict[int, tuple[CapturedTensor, tuple[str, ...]]] = {}
@@ -298,9 +290,7 @@ def build_archive(
         tensor = canonical_tensors[name]
         member_name = f"tensors/{idx}.bin"
         if len(tensor.raw_bytes) > MAX_TENSOR_MEMBER_BYTES:
-            raise EncoderError(
-                f"tensor member {name!r} exceeds {MAX_TENSOR_MEMBER_BYTES} bytes"
-            )
+            raise EncoderError(f"tensor member {name!r} exceeds {MAX_TENSOR_MEMBER_BYTES} bytes")
         members_for_storage = name_to_member[name]
         tensor_members.append(
             TensorMemberRef(
@@ -330,12 +320,8 @@ def build_archive(
         {
             "schema": "expertforge.checkpoint-model-state",
             "version": 1,
-            "parameters": [
-                _tensor_ref_payload(t.logical_name) for t in captured.parameters
-            ],
-            "buffers": [
-                _tensor_ref_payload(t.logical_name) for t in captured.buffers
-            ],
+            "parameters": [_tensor_ref_payload(t.logical_name) for t in captured.parameters],
+            "buffers": [_tensor_ref_payload(t.logical_name) for t in captured.buffers],
         }
     )
 
@@ -391,8 +377,7 @@ def build_archive(
     for role, payload in component_payloads:
         if len(payload) > MAX_COMPONENT_MEMBER_BYTES:
             raise EncoderError(
-                f"component member state/{role}.json exceeds "
-                f"{MAX_COMPONENT_MEMBER_BYTES} bytes"
+                f"component member state/{role}.json exceeds {MAX_COMPONENT_MEMBER_BYTES} bytes"
             )
 
     # --- Build the manifest --------------------------------------------------
@@ -442,20 +427,30 @@ def build_archive(
     if len(tar_bytes) > 64 * 1024 * 1024 * 1024:
         raise EncoderError("archive exceeds 64 GiB")
 
-    return ArchiveMembers(
-        manifest=manifest, members=members, tar_bytes=tar_bytes
-    )
+    return ArchiveMembers(manifest=manifest, members=members, tar_bytes=tar_bytes)
 
 
 def all_tensors_dtype(name: str, captured: CapturedCheckpointState) -> str:
-    for t in (*captured.parameters, *captured.buffers, captured.optimizer, captured.scheduler, captured.scaler):
+    for t in (
+        *captured.parameters,
+        *captured.buffers,
+        captured.optimizer,
+        captured.scheduler,
+        captured.scaler,
+    ):
         if t is not None and t.logical_name == name:
             return t.dtype
     raise EncoderError(f"unknown tensor {name!r}")
 
 
 def all_tensors_shape(name: str, captured: CapturedCheckpointState) -> list[int]:
-    for t in (*captured.parameters, *captured.buffers, captured.optimizer, captured.scheduler, captured.scaler):
+    for t in (
+        *captured.parameters,
+        *captured.buffers,
+        captured.optimizer,
+        captured.scheduler,
+        captured.scaler,
+    ):
         if t is not None and t.logical_name == name:
             return list(t.shape)
     raise EncoderError(f"unknown tensor {name!r}")
