@@ -55,8 +55,8 @@ __all__ = [
 STREAM_FORMAT_VERSION = 1
 EVENT_SCHEMA_VERSION = 1
 METRIC_SCHEMA_VERSION = 1
-EVENT_SCHEMA = "expertforge.telemetry-event"
-METRIC_SCHEMA = "expertforge.metric-record"
+EVENT_SCHEMA: Literal["expertforge.telemetry-event"] = "expertforge.telemetry-event"
+METRIC_SCHEMA: Literal["expertforge.metric-record"] = "expertforge.metric-record"
 
 MAX_RECORD_BYTES = 64 * 1024
 MAX_EVENT_FIELDS = 64
