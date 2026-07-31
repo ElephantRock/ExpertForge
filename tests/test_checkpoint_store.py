@@ -21,6 +21,7 @@ from expertforge.checkpoints.store import (
 from tests._checkpoint_fixtures import (
     make_captured_state,
     make_identity_and_provenance,
+    make_resume_identity,
     make_rng_bundle,
     make_store,
 )
@@ -47,7 +48,10 @@ def _save_checkpoint(
         provenance=provenance,
         rng_bundle=rng_bundle,
     )
-    archive = cp_store.load(record.artifact_id, expected_identity=identity)
+    # Item 9: load as a native resume (a NEW attempt continuing from the source
+    # checkpoint), not as the producing attempt itself.
+    resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
+    archive = cp_store.load(record.artifact_id, expected_identity=resume)
     return cp_store, archive, record.artifact_id
 
 
@@ -122,7 +126,8 @@ class TestSaveLoad:
             created_at_utc=ts,
         )
         # Save again with identical inputs at a fresh attempt dir for a clean id.
-        archive1 = cp_store.load(r1.artifact_id, expected_identity=identity)
+        resume = make_resume_identity(identity, parent_artifact_id=r1.artifact_id)
+        archive1 = cp_store.load(r1.artifact_id, expected_identity=resume)
         digest1 = hashlib.sha256(archive1.tar_bytes).hexdigest()
         # Re-encode by reading the published content: identical bytes.
         content_path = store.locate(r1.artifact_id)
@@ -204,8 +209,9 @@ class TestCorruption:
         assert content_path is not None
         data = content_path.read_bytes()
         content_path.write_bytes(data[:-64])
+        resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
         with pytest.raises(CheckpointCorruptError):
-            cp_store.load(record.artifact_id, expected_identity=identity)
+            cp_store.load(record.artifact_id, expected_identity=resume)
 
     def test_corrupt_tensor_member_rejected(self, tmp_path: Path) -> None:
         identity, provenance = make_identity_and_provenance(tmp_path)
@@ -231,8 +237,9 @@ class TestCorruption:
         # Flip a byte near the end of the data section (tensor bytes).
         data[-1024] ^= 0xFF
         content_path.write_bytes(bytes(data))
+        resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
         with pytest.raises(CheckpointCorruptError):
-            cp_store.load(record.artifact_id, expected_identity=identity)
+            cp_store.load(record.artifact_id, expected_identity=resume)
 
 
 class TestCompatibility:

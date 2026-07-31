@@ -26,6 +26,7 @@ from tests._checkpoint_fixtures import (
     CONFIGS,
     make_captured_state,
     make_identity_and_provenance,
+    make_resume_identity,
     make_store,
 )
 
@@ -38,13 +39,18 @@ def _save_and_load(
     identity, provenance = make_identity_and_provenance(tmp_path)
     store = make_store(tmp_path, identity=identity)
     cp_store = CheckpointStore(store)
-    captured = make_captured_state(scaler=scaler)
     # Use a dedicated RNG manager so we can independently restore it.
     rng_manager = RngManager(root_seed=7, context=SeedContext(component="run"))
     rng_manager.initialize()
     # Advance the RNG a little so the restored next-sample differs from initial.
     rng_manager.generator.integers(0, 1000, size=10)
     bundle = rng_manager.capture_state()
+    # Item 4: the captured snapshot's rng_bundle_bytes are authoritative. Build
+    # the captured state from the SAME (advanced) bundle so the encoder persists
+    # exactly the snapshot's RNG, not a separately-supplied bundle.
+    captured = make_captured_state(scaler=scaler).model_copy(
+        update={"rng_bundle_bytes": bundle.to_deterministic_json()}
+    )
     from expertforge.config.resolve import resolve_config
 
     envelope = resolve_config(CONFIGS / "smoke.yaml")
@@ -55,7 +61,10 @@ def _save_and_load(
         provenance=provenance,
         rng_bundle=bundle,
     )
-    archive = cp_store.load(record.artifact_id, expected_identity=identity)
+    # Item 9: load as a native resume (a NEW attempt continuing from the source
+    # checkpoint).
+    resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
+    archive = cp_store.load(record.artifact_id, expected_identity=resume)
     return cp_store, archive, bundle, rng_manager
 
 
@@ -72,6 +81,7 @@ class _RecordingFactory:
             "counters": None,
         }
         self.committed = False
+        self.reverted = False
 
     def create(self) -> dict[str, Any]:
         # Return a fresh target dict (isolated from any live state).
@@ -109,6 +119,12 @@ class _RecordingFactory:
         self.committed = True
         self.target = target
         return target
+
+    def revert_commit_to_live(self, target: dict[str, Any]) -> None:
+        # Item 1: on RNG failure the non-RNG swap is reverted so pre-restore
+        # live state is authoritative. Track the revert so tests can assert it.
+        self.committed = False
+        self.reverted = True
 
 
 def _make_txn(
@@ -229,7 +245,7 @@ class TestFailureInjection:
             "counters",
             "rng_prevalidate",
             "rng_capture_previous",
-            "commit",
+            "commit_non_rng",
         ],
     )
     def test_failure_after_stage_leaves_live_untouched(
@@ -251,10 +267,29 @@ class TestFailureInjection:
                 "counters",
             ) else txn.commit()
         # Existing live state untouched: RNG unchanged, factory not committed
-        # (unless the failure was injected exactly at "commit", in which case
-        # the swap was prepared but RNG restored — RNG still equals pre).
-        if stage != "commit":
+        # (unless the failure was injected exactly at "commit_non_rng", in which
+        # case the non-RNG swap was committed but RNG was never mutated — the
+        # two-phase rollback is not needed because commit_to_live succeeded but
+        # we raised before reaching RNG restore; RNG still equals pre).
+        if stage != "commit_non_rng":
             assert not factory.committed
+        assert holder["live"].capture_state() == pre
+
+    def test_commit_non_rng_failure_reverts_non_rng_swap(self, tmp_path: Path) -> None:
+        # Item 1: if RNG restore fails AFTER the non-RNG swap was committed, the
+        # two-phase commit must revert the non-RNG swap AND restore the previous
+        # RNG bundle so pre-restore live state is authoritative.
+        _, archive, _, rng_manager = _save_and_load(tmp_path, scaler=True)
+        pre = rng_manager.capture_state()
+        txn, factory, holder = _make_txn(archive, rng_manager)
+        txn.prepare()
+        # Inject an RNG restore failure after the non-RNG swap commits.
+        txn.rng_restore_should_fail = True
+        with pytest.raises(RestoreError):
+            txn.commit()
+        # The non-RNG swap was committed then reverted by the two-phase rollback.
+        assert factory.reverted
+        # The live RNG state equals the pre-commit bundle.
         assert holder["live"].capture_state() == pre
 
     def test_prepare_failure_does_not_call_factory_commit(self, tmp_path: Path) -> None:

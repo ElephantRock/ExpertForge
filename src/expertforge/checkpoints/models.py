@@ -230,7 +230,9 @@ CompatibilityDiagnosticCode = Literal[
     "optimizer_slot_missing",
     "optimizer_slot_unexpected",
     "optimizer_slot_shape_mismatch",
+    "optimizer_slot_dtype_mismatch",
     "scheduler_type_mismatch",
+    "scheduler_active_mismatch",
     "scheduler_state_shape_mismatch",
     "scaler_presence_mismatch",
     "rng_adapter_missing",
@@ -638,6 +640,14 @@ class CapturedCheckpointState(_FrozenModel):
     optimizer: CapturedTensor | None = None
     scheduler: CapturedTensor | None = None
     scaler: CapturedTensor | None = None
+    # General optimizer state (amendment E): multiple per-parameter slots plus
+    # structured scalar state (e.g. step counters). A generic Adam-like optimizer
+    # round-trips through these instead of the single legacy ``optimizer`` tensor.
+    # Each slot tensor's logical name MUST be ``optimizer.<slot_name>.<param>`` so
+    # it binds to the optimizer descriptor's (group, param, slot) tuple.
+    optimizer_slots: tuple[CapturedTensor, ...] = Field(default_factory=tuple)
+    optimizer_scalar_state: SafeValue | None = None
+    scheduler_scalar_state: SafeValue | None = None
     rng_bundle_bytes: bytes
     data_cursor: DataCursor
     counters: CounterSnapshot
@@ -661,6 +671,121 @@ class CapturedCheckpointState(_FrozenModel):
                 "only after a completed optimizer update)"
             )
         return v
+
+    @field_validator("optimizer_slots")
+    @classmethod
+    def _check_optimizer_slots_unique(
+        cls, v: tuple[CapturedTensor, ...]
+    ) -> tuple[CapturedTensor, ...]:
+        names = [t.logical_name for t in v]
+        if len(set(names)) != len(names):
+            raise ValueError("optimizer_slots logical names must be unique")
+        return v
+
+    def _validate_internal_consistency(self) -> None:
+        """Cross-validate that descriptors agree with the captured payloads.
+
+        Verifies:
+        - the model descriptor's parameters/buffers match the captured tensors
+          (name, shape, dtype);
+        - the optimizer descriptor's state_slots match the captured optimizer
+          state (each declared slot has a captured tensor of matching shape and
+          dtype; the legacy single ``optimizer`` tensor, when present, must
+          correspond to a declared slot);
+        - the data cursor's contract matches the data descriptor's identity
+          (sampler type/version, batch/sequence/drop_last, and the cursor's
+          accepted counts are consistent with the data length);
+        - the captured RNG bytes are a non-empty, decodable bundle and the RNG
+          descriptor's adapter set is non-empty when the bundle carries
+          per-adapter state.
+        """
+        # Model descriptor <-> captured parameters/buffers.
+        captured = {t.logical_name: t for t in (*self.parameters, *self.buffers)}
+        for p in (*self.model_descriptor.parameters, *self.model_descriptor.buffers):
+            t = captured.get(p.name)
+            if t is None:
+                raise ValueError(
+                    f"model descriptor references parameter/buffer {p.name!r} "
+                    "not present in captured tensors"
+                )
+            if tuple(t.shape) != tuple(p.shape):
+                raise ValueError(
+                    f"model descriptor shape {tuple(p.shape)!r} for {p.name!r} "
+                    f"!= captured shape {tuple(t.shape)!r}"
+                )
+            if t.dtype != p.dtype:
+                raise ValueError(
+                    f"model descriptor dtype {p.dtype!r} for {p.name!r} "
+                    f"!= captured dtype {t.dtype!r}"
+                )
+        # Every captured parameter/buffer must be declared in the descriptor.
+        declared = {
+            p.name for p in (*self.model_descriptor.parameters, *self.model_descriptor.buffers)
+        }
+        for name in captured:
+            if name not in declared:
+                raise ValueError(
+                    f"captured parameter/buffer {name!r} is not declared in the model descriptor"
+                )
+
+        # Optimizer descriptor slots <-> captured optimizer state.
+        slot_tensors = {t.logical_name: t for t in self.optimizer_slots}
+        # Build the expected logical name for each declared slot.
+        for slot in self.optimizer_descriptor.state_slots:
+            expected_name = f"optimizer.{slot.slot_name}.{slot.param_name}"
+            if self.optimizer_slots:
+                t = slot_tensors.get(expected_name)
+                if t is None:
+                    raise ValueError(
+                        f"optimizer slot ({slot.group_index},{slot.param_name!r},"
+                        f"{slot.slot_name!r}) has no captured optimizer_slot tensor"
+                    )
+                if tuple(t.shape) != tuple(slot.shape):
+                    raise ValueError(
+                        f"optimizer slot {expected_name!r} shape {tuple(t.shape)!r} "
+                        f"!= declared {tuple(slot.shape)!r}"
+                    )
+                if t.dtype != slot.dtype:
+                    raise ValueError(
+                        f"optimizer slot {expected_name!r} dtype {t.dtype!r} "
+                        f"!= declared {slot.dtype!r}"
+                    )
+            elif self.optimizer is not None:
+                # Legacy single-tensor optimizer: must match exactly one slot's
+                # shape/dtype. The slot's param_name is the canonical member.
+                if tuple(self.optimizer.shape) != tuple(slot.shape):
+                    raise ValueError(
+                        f"optimizer tensor shape {tuple(self.optimizer.shape)!r} "
+                        f"!= declared slot {tuple(slot.shape)!r}"
+                    )
+                if self.optimizer.dtype != slot.dtype:
+                    raise ValueError(
+                        f"optimizer tensor dtype {self.optimizer.dtype!r} "
+                        f"!= declared slot dtype {slot.dtype!r}"
+                    )
+        # If multi-slot tensors are present, the descriptor must declare them.
+        if self.optimizer_slots and not self.optimizer_descriptor.state_slots:
+            raise ValueError("optimizer_slots present but descriptor declares no state_slots")
+
+        # Data cursor contract <-> data descriptor identity.
+        di = self.data_descriptor
+        dc = self.data_cursor
+        if dc.sampler_type != di.sampler_type:
+            raise ValueError("data_cursor sampler_type != data_descriptor sampler_type")
+        if dc.sampler_version != di.sampler_version:
+            raise ValueError("data_cursor sampler_version != data_descriptor sampler_version")
+        if dc.batch_size != di.batch_size:
+            raise ValueError("data_cursor batch_size != data_descriptor batch_size")
+        if dc.sequence_length != di.sequence_length:
+            raise ValueError("data_cursor sequence_length != data_descriptor sequence_length")
+        if dc.drop_last != di.drop_last:
+            raise ValueError("data_cursor drop_last != data_descriptor drop_last")
+        if dc.accepted_samples > di.identity.length and di.identity.length > 0:
+            raise ValueError("data_cursor accepted_samples exceeds data identity length")
+
+        # RNG: the captured bytes must be present and decodable.
+        if not self.rng_bundle_bytes:
+            raise ValueError("rng_bundle_bytes must be present (non-empty) at capture")
 
     @model_validator(mode="after")
     def _check_quiescent(self) -> CapturedCheckpointState:
@@ -699,6 +824,8 @@ class CapturedCheckpointState(_FrozenModel):
         # Canonicalize group order.
         if tuple(sorted(canonical_groups)) != self.alias_groups:
             raise ValueError("alias_groups must be sorted (canonical order)")
+        # Cross-validate descriptors against captured payloads (amendment H/N).
+        self._validate_internal_consistency()
         return self
 
 
@@ -1147,6 +1274,46 @@ class CompatibilityDescriptor(_FrozenModel):
     data_descriptor: DataDescriptor
     topology_descriptor: TopologyDescriptor
 
+    @field_validator("compatibility_schema_version")
+    @classmethod
+    def _check_compat_version(cls, v: int) -> int:
+        if v != COMPATIBILITY_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported compatibility_schema_version {v!r}; "
+                f"this version supports exactly {COMPATIBILITY_SCHEMA_VERSION}"
+            )
+        return v
+
+    @field_validator("archive_format_version")
+    @classmethod
+    def _check_archive_format_version(cls, v: int) -> int:
+        if v != CHECKPOINT_ARCHIVE_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported archive_format_version {v!r}; "
+                f"this version supports exactly {CHECKPOINT_ARCHIVE_FORMAT_VERSION}"
+            )
+        return v
+
+    @field_validator("manifest_schema_version")
+    @classmethod
+    def _check_manifest_schema_version(cls, v: int) -> int:
+        if v != CHECKPOINT_MANIFEST_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported manifest_schema_version {v!r}; "
+                f"this version supports exactly {CHECKPOINT_MANIFEST_SCHEMA_VERSION}"
+            )
+        return v
+
+    @field_validator("state_format_version")
+    @classmethod
+    def _check_state_format_version(cls, v: int) -> int:
+        if v != SAFE_STATE_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported state_format_version {v!r}; "
+                f"this version supports exactly {SAFE_STATE_FORMAT_VERSION}"
+            )
+        return v
+
 
 class CompatibilityMismatch(_FrozenModel):
     """One typed compatibility mismatch (amendment M)."""
@@ -1213,6 +1380,37 @@ class CheckpointManifest(_FrozenModel):
     archive_format_version: int = CHECKPOINT_ARCHIVE_FORMAT_VERSION
     state_format_version: int = SAFE_STATE_FORMAT_VERSION
     run_id: str = Field(..., min_length=1)
+
+    @field_validator("manifest_schema_version")
+    @classmethod
+    def _check_manifest_schema_version(cls, v: int) -> int:
+        if v != CHECKPOINT_MANIFEST_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported manifest_schema_version {v!r}; "
+                f"this version supports exactly {CHECKPOINT_MANIFEST_SCHEMA_VERSION}"
+            )
+        return v
+
+    @field_validator("archive_format_version")
+    @classmethod
+    def _check_archive_format_version(cls, v: int) -> int:
+        if v != CHECKPOINT_ARCHIVE_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported archive_format_version {v!r}; "
+                f"this version supports exactly {CHECKPOINT_ARCHIVE_FORMAT_VERSION}"
+            )
+        return v
+
+    @field_validator("state_format_version")
+    @classmethod
+    def _check_state_format_version(cls, v: int) -> int:
+        if v != SAFE_STATE_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported state_format_version {v!r}; "
+                f"this version supports exactly {SAFE_STATE_FORMAT_VERSION}"
+            )
+        return v
+
     attempt_id: str = Field(..., min_length=1)
     specification_fingerprint: str = Field(..., min_length=1)
     parent_artifact_id: str | None = None

@@ -24,15 +24,23 @@ from pathlib import Path
 from typing import Any
 
 from expertforge.artifacts.models import (
+    ArtifactConflictError,
+    ArtifactNotFoundError,
     ArtifactRecord,
     ExternalReference,
     ParentReference,
     RetentionStatus,
 )
-from expertforge.artifacts.store import BLOCK_SIZE, ArtifactStore
+from expertforge.artifacts.store import (
+    BLOCK_SIZE,
+    ArtifactStore,
+    _open_read_no_follow,
+    _verify_no_symlinks_in_chain,
+)
 from expertforge.checkpoints.encoder import ArchiveMembers, build_archive
 from expertforge.checkpoints.models import (
     CHECKPOINT_ARCHIVE_FORMAT_VERSION,
+    MAX_ARCHIVE_BYTES,
     CheckpointInspection,
     CheckpointManifest,
     CompatibilityDescriptor,
@@ -202,18 +210,21 @@ class CheckpointStore:
         captured: Any,
         configuration_envelope: ResolutionEnvelope,
         provenance: ProvenanceRecord,
-        rng_bundle: RngStateBundle,
+        rng_bundle: RngStateBundle | None = None,
         parent: ParentReference | None = None,
         created_at_utc: datetime | None = None,
     ) -> ArtifactRecord:
         """Capture → encode → publish → verify the returned record.
 
         ``captured`` is the quiescent :class:`CapturedCheckpointState` from the
-        provider's :meth:`capture_checkpoint_snapshot`. The archive is built
-        fully in memory then published via :meth:`ArtifactStore.publish` (which
-        handles atomic write/rename/registry). The returned record is verified
-        for checkpoint category/format/version, producing component, identity,
-        parent, digest, and size before it is returned.
+        provider's :meth:`capture_checkpoint_snapshot`. The RNG member is
+        serialized from ``captured.rng_bundle_bytes`` (the atomic snapshot); an
+        optional ``rng_bundle`` is validated against those bytes and rejected on
+        disagreement (item 4). The archive is built fully in memory then
+        published via :meth:`ArtifactStore.publish` (which handles atomic
+        write/rename/registry). The returned record is verified for checkpoint
+        category/format/version, producing component, identity, parent, digest,
+        and size before it is returned.
         """
         from expertforge.checkpoints.models import CapturedCheckpointState
 
@@ -304,15 +315,31 @@ class CheckpointStore:
         # Identity binding: the record's run/attempt/fingerprint must match the
         # expected identity (amendment L: V1 same-run resume only).
         self._assert_identity_binding(record, expected_identity)
+        # Native resume lineage enforcement (item 9): the expected identity must
+        # be a NEW attempt distinct from the producing attempt, and its lineage
+        # (when present) must match the source checkpoint's run/attempt/artifact.
+        self._assert_resume_lineage(record, expected_identity)
         content_path = self._store.locate(artifact_id)
         if content_path is None:
             raise CheckpointCorruptError(
                 f"artifact {artifact_id!r} has no canonical content to load"
             )
-        # Single-fd open: O_NOFOLLOW where available + fstat regular-file check.
-        fd = self._open_no_follow(content_path)
+        # Item 10: TOCTOU-safe open. Verify the FULL parent chain under the
+        # artifact root is symlink-free BEFORE opening (O_NOFOLLOW only protects
+        # the final element), then open via the #10 store's symlink-safe reader.
         try:
-            tar_bytes = self._read_all_fd(fd)
+            _verify_no_symlinks_in_chain(self._store.artifact_root, content_path)
+        except (ArtifactConflictError, ArtifactNotFoundError) as e:
+            raise CheckpointCorruptError(f"content path chain is not trusted: {e}") from e
+        try:
+            fd = _open_read_no_follow(content_path)
+        except ArtifactConflictError as e:
+            raise CheckpointCorruptError(f"could not open content path {content_path}: {e}") from e
+        try:
+            # Item 10: bounded read. Check the file size via fstat BEFORE reading
+            # and reject archives exceeding MAX_ARCHIVE_BYTES, then read exactly
+            # the declared record size (never grow an unbounded bytearray).
+            tar_bytes = self._read_bounded_fd(fd, record.byte_size)
             digest = f"sha256:{hashlib.sha256(tar_bytes).hexdigest()}"
         finally:
             os.close(fd)
@@ -384,6 +411,77 @@ class CheckpointStore:
                 "identity (V1 full restore requires the same specification)"
             )
 
+    def _assert_resume_lineage(
+        self, record: ArtifactRecord, expected: AttemptIdentityRecord
+    ) -> None:
+        """Item 9: native resume lineage enforcement.
+
+        A V1 full-state restore must be performed by a NEW attempt (not the
+        producing attempt) whose declared :class:`ResumeLineage` names the source
+        checkpoint's run/attempt/artifact_id. When ``expected.lineage`` is
+        present, its parent fields must match the loaded record exactly.
+        """
+        if expected.attempt_id == record.attempt_id:
+            raise CheckpointLineageError(
+                f"resume attempt_id {expected.attempt_id!r} must differ from the "
+                f"producing attempt_id {record.attempt_id!r} (V1 resume is a new "
+                "attempt continuing from the source checkpoint)"
+            )
+        lineage = expected.lineage
+        if lineage is None:
+            return
+        # The lineage must name the source checkpoint.
+        if lineage.parent_run_id != record.run_id:
+            raise CheckpointLineageError(
+                f"lineage parent_run_id {lineage.parent_run_id!r} != source "
+                f"run_id {record.run_id!r}"
+            )
+        if lineage.parent_attempt_id is not None and lineage.parent_attempt_id != record.attempt_id:
+            raise CheckpointLineageError(
+                f"lineage parent_attempt_id {lineage.parent_attempt_id!r} != source "
+                f"attempt_id {record.attempt_id!r}"
+            )
+        if lineage.parent_checkpoint_id != record.artifact_id:
+            raise CheckpointLineageError(
+                f"lineage parent_checkpoint_id {lineage.parent_checkpoint_id!r} != "
+                f"source artifact_id {record.artifact_id!r}"
+            )
+
+    def resolve_parent(self, artifact_id: str, artifact_store: ArtifactStore) -> ArtifactRecord:
+        """Item 9: verify the parent checkpoint exists as a registered artifact.
+
+        Resolves ``artifact_id`` through ``artifact_store.inspect`` and requires
+        it to be a registered, loadable checkpoint (category ``checkpoint``,
+        canonical-local storage, acceptable retention). Returns the parent
+        :class:`ArtifactRecord` or raises :class:`CheckpointLineageError`.
+        """
+        try:
+            parent = artifact_store.inspect(artifact_id)
+        except ArtifactNotFoundError as e:
+            raise CheckpointLineageError(
+                f"parent checkpoint {artifact_id!r} is not a registered artifact: {e}"
+            ) from e
+        if isinstance(parent, ExternalReference):
+            raise CheckpointLineageError(
+                f"parent checkpoint {artifact_id!r} is an external reference, not a "
+                "registered local checkpoint"
+            )
+        if parent.category != "checkpoint":
+            raise CheckpointLineageError(
+                f"parent {artifact_id!r} category {parent.category!r} is not 'checkpoint'"
+            )
+        if parent.storage_class != "canonical_local":
+            raise CheckpointLineageError(
+                f"parent {artifact_id!r} storage_class {parent.storage_class!r} "
+                "is not canonical_local"
+            )
+        if parent.retention not in _ACCEPTABLE_RETENTION:
+            raise CheckpointLineageError(
+                f"parent {artifact_id!r} retention {parent.retention!r} is not "
+                "acceptable for resume"
+            )
+        return parent
+
     def _assert_manifest_record_binding(
         self, manifest: CheckpointManifest, record: ArtifactRecord
     ) -> None:
@@ -402,35 +500,46 @@ class CheckpointStore:
         if manifest.parent_artifact_id != (record.parent.artifact_id if record.parent else None):
             raise CheckpointCorruptError("manifest parent_artifact_id != record parent artifact_id")
 
-    def _open_no_follow(self, path: Path) -> int:
-        """Open ``path`` for reading without following a symlink final element."""
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
-        try:
-            fd = os.open(path, flags)
-        except OSError as e:
-            raise CheckpointCorruptError(f"could not open content path {path}: {e}") from e
-        try:
-            st = os.fstat(fd)
-        except OSError as e:
-            os.close(fd)
-            raise CheckpointCorruptError(f"fstat failed: {e}") from e
-        if stat_mod.S_ISLNK(st.st_mode):  # pragma: no cover - O_NOFOLLOW rejects
-            os.close(fd)
-            raise CheckpointCorruptError(f"{path} is a symlink; refused")
-        if not stat_mod.S_ISREG(st.st_mode):
-            os.close(fd)
-            raise CheckpointCorruptError(f"{path} is not a regular file; refused")
-        return fd
+    def _read_bounded_fd(self, fd: int, expected_size: int) -> bytes:
+        """Bounded read of ``fd`` (item 10).
 
-    def _read_all_fd(self, fd: int) -> bytes:
-        """Read the entire content of ``fd`` in BLOCK_SIZE chunks."""
-        buf = bytearray()
-        while True:
-            chunk = os.read(fd, BLOCK_SIZE)
+        Checks the file size via fstat BEFORE reading and rejects archives
+        exceeding :data:`MAX_ARCHIVE_BYTES`. Reads exactly ``expected_size``
+        bytes (the record's declared size) in BLOCK_SIZE chunks — never grows an
+        unbounded bytearray. The on-disk size must match ``expected_size`` (any
+        trailing mutation is a corruption, caught by the digest check).
+        """
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode):
+            raise CheckpointCorruptError("content descriptor is not a regular file")
+        on_disk = st.st_size
+        if on_disk > MAX_ARCHIVE_BYTES:
+            raise CheckpointCorruptError(
+                f"archive size {on_disk} exceeds MAX_ARCHIVE_BYTES ({MAX_ARCHIVE_BYTES})"
+            )
+        if on_disk != expected_size:
+            raise CheckpointCorruptError(
+                f"on-disk size {on_disk} != record byte_size {expected_size}"
+            )
+        # Read exactly expected_size bytes; reject if the stream is short or long.
+        buf = bytearray(expected_size)
+        view = memoryview(buf)
+        remaining = expected_size
+        offset = 0
+        while remaining > 0:
+            chunk = os.read(fd, min(BLOCK_SIZE, remaining))
             if not chunk:
-                break
-            buf.extend(chunk)
+                raise CheckpointCorruptError(
+                    f"unexpected EOF: read {offset} of {expected_size} bytes"
+                )
+            n = len(chunk)
+            view[offset : offset + n] = chunk
+            offset += n
+            remaining -= n
+        # The descriptor must now be at EOF; any extra bytes are corruption.
+        extra = os.read(fd, 1)
+        if extra:
+            raise CheckpointCorruptError("content has trailing bytes beyond declared size")
         return bytes(buf)
 
     def _parse_and_validate_tar(self, tar_bytes: bytes) -> list[ParsedMember]:
@@ -507,7 +616,8 @@ class CheckpointStore:
         """
         if not path.exists():
             return CheckpointInspection(status="corrupt", diagnostic="file not found")
-        # Open the path without following a symlink (best-effort).
+        # Open the path without following a symlink (best-effort), then perform a
+        # bounded read capped at MAX_ARCHIVE_BYTES (item 10).
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0))
@@ -517,7 +627,14 @@ class CheckpointStore:
             st = os.fstat(fd)
             if not stat_mod.S_ISREG(st.st_mode):
                 return CheckpointInspection(status="corrupt", diagnostic="not a regular file")
-            tar_bytes = self._read_all_fd(fd)
+            if st.st_size > MAX_ARCHIVE_BYTES:
+                return CheckpointInspection(
+                    status="corrupt",
+                    diagnostic=f"archive size {st.st_size} exceeds MAX_ARCHIVE_BYTES",
+                )
+            tar_bytes = self._read_bounded_fd(fd, st.st_size)
+        except CheckpointCorruptError as e:
+            return CheckpointInspection(status="corrupt", diagnostic=str(e))
         finally:
             os.close(fd)
         try:
@@ -597,6 +714,16 @@ def check_compatibility(
             "topology_world_size_mismatch",
             expected.topology_descriptor.world_size,
             actual.topology_descriptor.world_size,
+        )
+    # Item 14: topology rank assignment is a persisted required field.
+    if tuple(actual.topology_descriptor.rank_assignment) != tuple(
+        expected.topology_descriptor.rank_assignment
+    ):
+        add(
+            "topology",
+            "topology_rank_assignment_mismatch",
+            tuple(expected.topology_descriptor.rank_assignment),
+            tuple(actual.topology_descriptor.rank_assignment),
         )
 
     # Model descriptor.
@@ -721,26 +848,57 @@ def _check_optimizer(actual: Any, expected: Any, add: Any) -> None:
                     tuple(ag.param_names),
                     path=str(ag.group_index),
                 )
+            # Item 7: compare each group's canonical options (lr, weight_decay,
+            # momentum, betas, ...). Options are canonically-sorted SafeValue
+            # tuples; compare the full option set per group.
+            a_opts = tuple((k, _safe_value_json(v)) for k, v in ag.options)
+            e_opts = tuple((k, _safe_value_json(v)) for k, v in eg.options)
+            if a_opts != e_opts:
+                add(
+                    "optimizer_options",
+                    "optimizer_option_mismatch",
+                    _format_options(e_opts),
+                    _format_options(a_opts),
+                    path=str(ag.group_index),
+                )
     # State slot shapes.
-    a_slots = {
-        (s.group_index, s.param_name, s.slot_name): tuple(s.shape) for s in actual.state_slots
-    }
-    e_slots = {
-        (s.group_index, s.param_name, s.slot_name): tuple(s.shape) for s in expected.state_slots
-    }
+    a_slots = {(s.group_index, s.param_name, s.slot_name): s for s in actual.state_slots}
+    e_slots = {(s.group_index, s.param_name, s.slot_name): s for s in expected.state_slots}
     for key in sorted(set(e_slots) - set(a_slots)):
         add("optimizer_slots", "optimizer_slot_missing", key, "<absent>", path=str(key))
     for key in sorted(set(a_slots) - set(e_slots)):
         add("optimizer_slots", "optimizer_slot_unexpected", "<absent>", key, path=str(key))
     for key in sorted(set(a_slots) & set(e_slots)):
-        if a_slots[key] != e_slots[key]:
+        a_slot = a_slots[key]
+        e_slot = e_slots[key]
+        if tuple(a_slot.shape) != tuple(e_slot.shape):
             add(
                 "optimizer_slots",
                 "optimizer_slot_shape_mismatch",
-                e_slots[key],
-                a_slots[key],
+                tuple(e_slot.shape),
+                tuple(a_slot.shape),
                 path=str(key),
             )
+        # Item 14: optimizer-slot dtype is a persisted required field.
+        if a_slot.dtype != e_slot.dtype:
+            add(
+                "optimizer_slots",
+                "optimizer_slot_dtype_mismatch",
+                e_slot.dtype,
+                a_slot.dtype,
+                path=str(key),
+            )
+
+
+def _safe_value_json(value: Any) -> Any:
+    """Canonical JSON-serializable rendering of a SafeValue option value."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return value
+
+
+def _format_options(opts: tuple[tuple[str, Any], ...]) -> str:
+    return ",".join(f"{k}={_safe_value_json(v)}" for k, v in opts)
 
 
 def _check_scheduler(actual: Any, expected: Any, add: Any) -> None:
@@ -750,6 +908,14 @@ def _check_scheduler(actual: Any, expected: Any, add: Any) -> None:
             "scheduler_type_mismatch",
             expected.scheduler_type,
             actual.scheduler_type,
+        )
+    # Item 14: scheduler active state is a persisted required field.
+    if bool(actual.active) != bool(expected.active):
+        add(
+            "scheduler_identity",
+            "scheduler_active_mismatch",
+            bool(expected.active),
+            bool(actual.active),
         )
     if tuple(actual.state_shape) != tuple(expected.state_shape):
         add(
@@ -774,6 +940,16 @@ def _check_rng(actual: Any, expected: Any, add: Any) -> None:
             expected.rng_state_schema_version,
             actual.rng_state_schema_version,
         )
+    # Item 14: RNG framework versions are persisted required fields.
+    a_fw = {k: v for k, v in actual.framework_versions}
+    e_fw = {k: v for k, v in expected.framework_versions}
+    for fw in sorted(set(e_fw) - set(a_fw)):
+        add("rng_schema", "rng_schema_mismatch", e_fw[fw], "<absent>", path=fw)
+    for fw in sorted(set(a_fw) - set(e_fw)):
+        add("rng_schema", "rng_schema_mismatch", "<absent>", a_fw[fw], path=fw)
+    for fw in sorted(set(a_fw) & set(e_fw)):
+        if a_fw[fw] != e_fw[fw]:
+            add("rng_schema", "rng_schema_mismatch", e_fw[fw], a_fw[fw], path=fw)
 
 
 def _check_data(actual: Any, expected: Any, add: Any) -> None:
@@ -788,6 +964,8 @@ def _check_data(actual: Any, expected: Any, add: Any) -> None:
         or a_id.sequence_policy != e_id.sequence_policy
         or a_id.shard_selection != e_id.shard_selection
         or a_id.data_config_digest != e_id.data_config_digest
+        or a_id.data_identity_schema_version != e_id.data_identity_schema_version
+        or a_id.length != e_id.length
     ):
         add(
             "data_identity",

@@ -46,7 +46,8 @@ class TestTarWriter:
 
     def test_member_order_preserved(self) -> None:
         out = _build([("a.bin", b"1"), ("b.bin", b"22"), ("c.bin", b"333")])
-        members = parse_ustar_archive(out)
+        # Generic framing test: disable the checkpoint-specific member-order gate.
+        members = parse_ustar_archive(out, validate_member_order=False)
         assert [m.name for m in members] == ["a.bin", "b.bin", "c.bin"]
         assert [m.data for m in members] == [b"1", b"22", b"333"]
 
@@ -228,7 +229,8 @@ class TestTarReader:
     def test_large_member_uses_multiple_data_blocks(self) -> None:
         data = b"Z" * (USTAR_BLOCK_SIZE * 3 + 7)
         out = _build([("big.bin", data)])
-        members = parse_ustar_archive(out)
+        # Generic framing test: disable the checkpoint-specific member-order gate.
+        members = parse_ustar_archive(out, validate_member_order=False)
         assert members[0].data == data
         assert members[0].size == len(data)
 

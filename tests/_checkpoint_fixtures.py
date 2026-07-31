@@ -35,6 +35,8 @@ from expertforge.checkpoints.models import (
     TopologyDescriptor,
 )
 from expertforge.config.resolve import ResolutionEnvelope, resolve_config
+from expertforge.identity.ids import attempt_id
+from expertforge.identity.lineage import ResumeLineage
 from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.orchestrate import prepare_run
 from expertforge.provenance.record import ProvenanceRecord
@@ -159,7 +161,7 @@ def make_captured_state(
     )
     alias_groups: tuple[tuple[str, ...], ...] = ()
     if alias:
-        alias_groups = (("layer.weight_tied", "layer.weight_share"),)
+        alias_groups = (("layer.weight_share", "layer.weight_tied"),)
         # Use a single canonical tensor shared by both names.
         shared_bytes = _float32_bytes([0.7, 0.8, 0.9, 1.0, 1.1, 1.2])
         parameters = (
@@ -272,3 +274,28 @@ def expected_descriptor(captured: CapturedCheckpointState) -> Any:
         data_descriptor=captured.data_descriptor,
         topology_descriptor=captured.topology_descriptor,
     )
+
+
+def make_resume_identity(
+    source: AttemptIdentityRecord,
+    *,
+    parent_artifact_id: str,
+    clock: Any = None,
+    entropy: Any = None,
+) -> AttemptIdentityRecord:
+    """Build a NEW attempt identity that resumes from ``source`` (item 9).
+
+    The resume identity shares the source's run and specification fingerprint
+    but has a distinct attempt_id and a :class:`ResumeLineage` naming the source
+    checkpoint's run/attempt/artifact_id. This is the v1 native-resume contract
+    that :meth:`CheckpointStore.load` enforces.
+    """
+    clk = clock or (lambda: FIXED_TS)
+    ent = entropy or (lambda n: bytes(range(60, 60 + n)))
+    new_attempt = attempt_id(clock=clk, entropy=ent)
+    lineage = ResumeLineage(
+        parent_run_id=source.run_id,
+        parent_attempt_id=source.attempt_id,
+        parent_checkpoint_id=parent_artifact_id,
+    )
+    return source.model_copy(update={"attempt_id": new_attempt, "lineage": lineage})

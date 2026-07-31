@@ -65,6 +65,29 @@ class EncoderError(Exception):
     """Raised when a captured snapshot cannot be encoded into an archive."""
 
 
+def _resolve_rng_bytes(
+    captured: CapturedCheckpointState, rng_bundle: RngStateBundle | None
+) -> bytes:
+    """Resolve the RNG member bytes from the atomic captured snapshot (item 4).
+
+    The snapshot's own ``captured.rng_bundle_bytes`` are authoritative: they were
+    captured atomically alongside the rest of the state. A separately supplied
+    ``rng_bundle``, if any, MUST decode to the exact same bytes; any
+    disagreement raises :class:`EncoderError` rather than silently persisting a
+    bundle from a different instant (which would combine model/cursor/counters
+    from one instant with RNG from another and break deterministic continuation).
+    """
+    captured_bytes = captured.rng_bundle_bytes
+    if rng_bundle is not None:
+        supplied_bytes = rng_bundle.to_deterministic_json()
+        if supplied_bytes != captured_bytes:
+            raise EncoderError(
+                "supplied rng_bundle disagrees with captured.rng_bundle_bytes; "
+                "the atomic snapshot is authoritative"
+            )
+    return captured_bytes
+
+
 def encode_safe_value(value: Any) -> Any:
     """Best-effort SafeValue JSON encoder for option-dict scalars.
 
@@ -210,6 +233,11 @@ def _resolve_tensors(
             if state_tensor.logical_name in all_tensors:
                 raise EncoderError(f"tensor logical name collision: {state_tensor.logical_name!r}")
             all_tensors[state_tensor.logical_name] = state_tensor
+    # Item 13: include multi-slot optimizer state tensors under their names.
+    for slot_tensor in captured.optimizer_slots:
+        if slot_tensor.logical_name in all_tensors:
+            raise EncoderError(f"tensor logical name collision: {slot_tensor.logical_name!r}")
+        all_tensors[slot_tensor.logical_name] = slot_tensor
 
     name_to_member: dict[str, tuple[str, ...]] = {}
     canonical_tensors: dict[str, CapturedTensor] = {}
@@ -243,7 +271,7 @@ def build_archive(
     captured: CapturedCheckpointState,
     configuration_envelope: ResolutionEnvelope,
     provenance: ProvenanceRecord,
-    rng_bundle: RngStateBundle,
+    rng_bundle: RngStateBundle | None = None,
     parent: ParentReference | None = None,
     created_at_utc: datetime,
 ) -> ArchiveMembers:
@@ -252,10 +280,22 @@ def build_archive(
     The archive manifest authenticates every non-manifest member. The #10
     content digest (computed over the full tar byte stream) authenticates the
     manifest. No self-referential checkpoint id is stored (amendment A).
+
+    The RNG member is serialized from the snapshot's own
+    ``captured.rng_bundle_bytes`` (item 4): the bytes captured atomically by
+    :meth:`StateProvider.capture_checkpoint_snapshot`. If a ``rng_bundle`` is
+    additionally supplied, it MUST decode to the exact same bytes; any
+    disagreement raises :class:`EncoderError` rather than silently persisting a
+    bundle from a different instant.
     """
     config_bytes = canonical_bytes(configuration_envelope)
     config_digest = hashlib.sha256(config_bytes).hexdigest()
     config_fingerprint = identity.fingerprint_digest_str()
+
+    # Item 4: the RNG member is the snapshot's own captured bytes. A separately
+    # supplied bundle, if any, must agree byte-for-byte; reject disagreement
+    # rather than silently persisting a bundle from a different instant.
+    rng_bytes = _resolve_rng_bytes(captured, rng_bundle)
 
     # --- Component payloads (canonical JSON for the SafeState domain). -------
     identity_bytes = identity.to_deterministic_json()
@@ -270,7 +310,6 @@ def build_archive(
         }
     )
     provenance_bytes = provenance.to_deterministic_json()
-    rng_bytes = rng_bundle.to_deterministic_json()
     data_cursor_bytes = canonical_json_bytes(captured.data_cursor.model_dump(mode="json"))
     counters_bytes = canonical_json_bytes(captured.counters.model_dump(mode="json"))
     # Model/optimizer/scheduler/scaler component payloads encode the captured
@@ -325,39 +364,56 @@ def build_archive(
         }
     )
 
-    optimizer_payload = b""
+    # Item 5: optimizer/scheduler/scaler members are ALWAYS emitted as valid
+    # canonical JSON carrying the component's descriptor, even when stateless
+    # (no tensors). A ``has_state`` flag distinguishes stateless components from
+    # those carrying tensor/scalar state. This prevents the previously-emitted
+    # empty ``b""`` member from breaking restoration before apply_* can run.
+    opt_has_state = (
+        captured.optimizer is not None
+        or bool(captured.optimizer_slots)
+        or captured.optimizer_scalar_state is not None
+    )
+    optimizer_obj: dict[str, Any] = {
+        "schema": "expertforge.checkpoint-optimizer-state",
+        "version": 1,
+        "descriptor": captured.optimizer_descriptor.model_dump(mode="json"),
+        "has_state": opt_has_state,
+    }
     if captured.optimizer is not None:
-        optimizer_payload = canonical_json_bytes(
-            {
-                "schema": "expertforge.checkpoint-optimizer-state",
-                "version": 1,
-                "state_tensor": _tensor_ref_payload(captured.optimizer.logical_name),
-                "descriptor": captured.optimizer_descriptor.model_dump(mode="json"),
-            }
-        )
+        optimizer_obj["state_tensor"] = _tensor_ref_payload(captured.optimizer.logical_name)
+    if captured.optimizer_slots:
+        optimizer_obj["state_slots"] = [
+            _tensor_ref_payload(t.logical_name) for t in captured.optimizer_slots
+        ]
+    if captured.optimizer_scalar_state is not None:
+        optimizer_obj["scalar_state"] = captured.optimizer_scalar_state.model_dump(mode="json")
+    optimizer_payload = canonical_json_bytes(optimizer_obj)
 
-    scheduler_payload = b""
+    sched_has_state = captured.scheduler is not None or captured.scheduler_scalar_state is not None
+    scheduler_obj: dict[str, Any] = {
+        "schema": "expertforge.checkpoint-scheduler-state",
+        "version": 1,
+        "descriptor": captured.scheduler_descriptor.model_dump(mode="json"),
+        "has_state": sched_has_state,
+    }
     if captured.scheduler is not None:
-        scheduler_payload = canonical_json_bytes(
-            {
-                "schema": "expertforge.checkpoint-scheduler-state",
-                "version": 1,
-                "state_tensor": _tensor_ref_payload(captured.scheduler.logical_name),
-                "descriptor": captured.scheduler_descriptor.model_dump(mode="json"),
-            }
-        )
+        scheduler_obj["state_tensor"] = _tensor_ref_payload(captured.scheduler.logical_name)
+    if captured.scheduler_scalar_state is not None:
+        scheduler_obj["scalar_state"] = captured.scheduler_scalar_state.model_dump(mode="json")
+    scheduler_payload = canonical_json_bytes(scheduler_obj)
 
     scaler_payload = b""
-    if captured.scaler is not None and captured.scaler_descriptor is not None:
-        scaler_desc = captured.scaler_descriptor
-        scaler_payload = canonical_json_bytes(
-            {
-                "schema": "expertforge.checkpoint-scaler-state",
-                "version": 1,
-                "state_tensor": _tensor_ref_payload(captured.scaler.logical_name),
-                "descriptor": scaler_desc.model_dump(mode="json"),
-            }
-        )
+    if captured.scaler_descriptor is not None:
+        scaler_obj: dict[str, Any] = {
+            "schema": "expertforge.checkpoint-scaler-state",
+            "version": 1,
+            "descriptor": captured.scaler_descriptor.model_dump(mode="json"),
+            "has_state": captured.scaler is not None,
+        }
+        if captured.scaler is not None:
+            scaler_obj["state_tensor"] = _tensor_ref_payload(captured.scaler.logical_name)
+        scaler_payload = canonical_json_bytes(scaler_obj)
 
     # Validate component member size bounds.
     component_payloads: list[tuple[str, bytes]] = [

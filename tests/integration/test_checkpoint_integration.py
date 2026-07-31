@@ -11,11 +11,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
-from tests._checkpoint_fixtures import CONFIGS, make_identity_and_provenance, make_store
+from tests._checkpoint_fixtures import (
+    CONFIGS,
+    make_identity_and_provenance,
+    make_resume_identity,
+    make_store,
+)
 
 from expertforge.artifacts.models import ArtifactRecord, ParentReference
 from expertforge.checkpoints.models import CapturedTensor, CounterSnapshot, DataCursor
@@ -24,9 +29,10 @@ from expertforge.checkpoints.reference_adapter import (
     ReferenceState,
     ReferenceStateProvider,
 )
-from expertforge.checkpoints.restore import RestoreTransaction
+from expertforge.checkpoints.restore import RestoreError, RestoreTransaction
 from expertforge.checkpoints.store import (
     CheckpointCorruptError,
+    CheckpointLineageError,
     CheckpointStore,
     check_compatibility,
 )
@@ -122,6 +128,11 @@ class _RecordingFactory:
     def commit_to_live(self, target: dict[str, Any]) -> dict[str, Any]:
         return target
 
+    def revert_commit_to_live(self, target: dict[str, Any]) -> None:
+        # Item 1: two-phase rollback hook. The reference factory swaps no live
+        # handles, so this is a no-op (state remains on the target dict).
+        return None
+
 
 def _new_rng_manager(seed: int = 7) -> RngManager:
     m = RngManager(root_seed=seed, context=SeedContext(component="run"))
@@ -161,7 +172,8 @@ class TestSavePublishLoadRestore:
         bundle_bytes = rng.capture_state().to_deterministic_json()
         state = _reference_state(weight_value=0.42, rng_bundle=bundle_bytes)
         cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
-        archive = cp_store.load(aid, expected_identity=identity)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
 
         factory = _RecordingFactory()
         live_rng = _new_rng_manager()
@@ -196,7 +208,8 @@ class TestSavePublishLoadRestore:
 
         # (B) Save/resume: persist, then restore into a fresh manager.
         cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
-        archive = cp_store.load(aid, expected_identity=identity)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
 
         # Restore RNG from the archive into rng_b (which is at the pre-save
         # state but we want the archived next-sample position).
@@ -297,7 +310,8 @@ class TestAliasGraph:
         state.param_dtypes = {n: "float32" for n in state.parameters}
         state.alias_groups = (("layer.weight_share", "layer.weight_tied"),)
         cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
-        archive = cp_store.load(aid, expected_identity=identity)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
         # Both aliased names map to ONE canonical tensor member.
         member_for_share = next(
             m for m in archive.manifest.tensor_members if "layer.weight_share" in m.logical_names
@@ -324,8 +338,9 @@ class TestCorruptionRejection:
         # data starts immediately after the 512-byte header).
         data[512] ^= 0xFF
         content_path.write_bytes(bytes(data))
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
         with pytest.raises(CheckpointCorruptError):
-            cp_store.load(aid, expected_identity=identity)
+            cp_store.load(aid, expected_identity=resume)
 
 
 class TestAtomicCapture:
@@ -374,3 +389,275 @@ def test_attempt_id_helper_usable() -> None:
     # cross-run scenarios in the focused store tests).
     aid = attempt_id(clock=lambda: _FIXED, entropy=lambda n: bytes(range(n)))
     assert aid.startswith("attempt-")
+
+
+# ---------------------------------------------------------------------------
+# PR #35 review item regressions: continuation, alias, native lineage.
+# ---------------------------------------------------------------------------
+
+
+class _FullRecordingFactory:
+    """A StateFactory that records parameters, buffers, optimizer, scheduler,
+    scaler, cursor, and counters into a fresh target, with a two-phase rollback
+    hook (item 1)."""
+
+    def __init__(self) -> None:
+        self.committed = False
+        self.reverted = False
+        self.target: dict[str, Any] = {}
+
+    def create(self) -> dict[str, Any]:
+        return {
+            "parameters": {},
+            "buffers": {},
+            "optimizer": None,
+            "scheduler": None,
+            "scaler": None,
+            "cursor": None,
+            "counters": None,
+        }
+
+    def apply_parameters(self, target: dict[str, Any], tensors: dict[str, CapturedTensor]) -> None:
+        target["parameters"] = {n: t.raw_bytes for n, t in tensors.items()}
+
+    def apply_buffers(self, target: dict[str, Any], tensors: dict[str, CapturedTensor]) -> None:
+        target["buffers"] = {n: t.raw_bytes for n, t in tensors.items()}
+
+    def apply_optimizer(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
+        target["optimizer"] = tensor.raw_bytes if tensor else None
+
+    def apply_scheduler(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
+        target["scheduler"] = tensor.raw_bytes if tensor else None
+
+    def apply_scaler(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
+        target["scaler"] = tensor.raw_bytes if tensor else None
+
+    def apply_data_cursor(self, target: dict[str, Any], cursor: Any) -> None:
+        target["cursor"] = cursor
+
+    def apply_counters(self, target: dict[str, Any], counters: Any) -> None:
+        target["counters"] = counters
+
+    def commit_to_live(self, target: dict[str, Any]) -> dict[str, Any]:
+        self.committed = True
+        self.target = target
+        return target
+
+    def revert_commit_to_live(self, target: dict[str, Any]) -> None:
+        self.committed = False
+        self.reverted = True
+
+
+class TestItem1TwoPhaseCommit:
+    def test_rng_failure_reverts_non_rng_swap(self, tmp_path: Path) -> None:
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.42, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        factory = _FullRecordingFactory()
+        live_rng = _new_rng_manager()
+        pre_rng = live_rng.capture_state()
+        txn = RestoreTransaction(
+            archive=archive,
+            factory=factory,
+            rng_bundle_loader=lambda: live_rng.capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        txn.prepare()
+        txn.rng_restore_should_fail = True
+        with pytest.raises(RestoreError):
+            txn.commit()
+        # Item 1: the non-RNG swap was committed then reverted; RNG unchanged.
+        assert factory.reverted
+        assert not factory.committed
+        assert live_rng.capture_state() == pre_rng
+
+
+class TestItem2BuffersRestored:
+    def test_persisted_buffers_are_applied(self, tmp_path: Path) -> None:
+
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=1.0, rng_bundle=bundle_bytes)
+        # Add a buffer (e.g. running mean) alongside the parameter.
+        buf = np.full((2,), 0.5, dtype="<f4").tobytes()
+        state.buffers = {"layer.running_mean": buf}
+        state.param_shapes["layer.running_mean"] = (2,)
+        state.param_dtypes["layer.running_mean"] = "float32"
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        factory = _FullRecordingFactory()
+        txn = RestoreTransaction(
+            archive=archive,
+            factory=factory,
+            rng_bundle_loader=lambda: _new_rng_manager().capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        txn.prepare()
+        result = txn.commit()
+        # Item 2: buffers are restored, not dropped.
+        assert result.target["buffers"]["layer.running_mean"] == buf
+
+
+class TestItem3AliasRestoresEveryName:
+    def test_every_alias_name_gets_the_tensor(self, tmp_path: Path) -> None:
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        shared = np.full((2, 3), 7.0, dtype="<f4").tobytes()
+        state = _reference_state(weight_value=7.0, rng_bundle=bundle_bytes)
+        state.parameters = {
+            "layer.weight": shared,
+            "layer.weight_tied": shared,
+            "layer.weight_share": shared,
+        }
+        state.param_shapes = {n: (2, 3) for n in state.parameters}
+        state.param_dtypes = {n: "float32" for n in state.parameters}
+        state.alias_groups = (("layer.weight_share", "layer.weight_tied"),)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        factory = _FullRecordingFactory()
+        txn = RestoreTransaction(
+            archive=archive,
+            factory=factory,
+            rng_bundle_loader=lambda: _new_rng_manager().capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        txn.prepare()
+        txn.commit()
+        # Item 3: EVERY aliased name is present in the restored parameters and
+        # points to the shared tensor bytes.
+        for name in ("layer.weight", "layer.weight_tied", "layer.weight_share"):
+            assert name in factory.target["parameters"], name
+            assert factory.target["parameters"][name] == shared
+
+    def test_alias_member_binding_is_singular(self, tmp_path: Path) -> None:
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        shared = np.full((2, 3), 7.0, dtype="<f4").tobytes()
+        state = _reference_state(weight_value=7.0, rng_bundle=bundle_bytes)
+        state.parameters = {
+            "layer.weight": shared,
+            "layer.weight_tied": shared,
+            "layer.weight_share": shared,
+        }
+        state.param_shapes = {n: (2, 3) for n in state.parameters}
+        state.param_dtypes = {n: "float32" for n in state.parameters}
+        state.alias_groups = (("layer.weight_share", "layer.weight_tied"),)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+        # Both tied names point to ONE canonical tensor member.
+        member_for_share = next(
+            m for m in archive.manifest.tensor_members if "layer.weight_share" in m.logical_names
+        )
+        member_for_tied = next(
+            m for m in archive.manifest.tensor_members if "layer.weight_tied" in m.logical_names
+        )
+        assert member_for_share.member_name == member_for_tied.member_name
+
+
+class TestItem9NativeLineage:
+    def test_load_with_producing_attempt_rejected(self, tmp_path: Path) -> None:
+        # Loading with the producing identity itself is NOT the v1 resume
+        # contract: a NEW attempt is required.
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.5, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        with pytest.raises(CheckpointLineageError):
+            cp_store.load(aid, expected_identity=identity)
+
+    def test_load_rejects_mismatched_lineage_checkpoint(self, tmp_path: Path) -> None:
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.5, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        # A resume identity whose lineage names a DIFFERENT checkpoint id.
+        bogus = make_resume_identity(identity, parent_artifact_id="artifact-v1-sha256-" + "f" * 64)
+        with pytest.raises(CheckpointLineageError):
+            cp_store.load(aid, expected_identity=bogus)
+
+    def test_resolve_parent_verifies_registered_checkpoint(self, tmp_path: Path) -> None:
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.5, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        parent = cp_store.resolve_parent(aid, cp_store.artifact_store)
+        assert parent.artifact_id == aid
+        assert parent.category == "checkpoint"
+
+    def test_resolve_parent_rejects_unregistered(self, tmp_path: Path) -> None:
+        identity, _ = make_identity_and_provenance(tmp_path)
+        store = make_store(tmp_path, identity=identity)
+        cp_store = CheckpointStore(store)
+        with pytest.raises(CheckpointLineageError):
+            cp_store.resolve_parent("artifact-v1-sha256-" + "0" * 64, cp_store.artifact_store)
+
+
+class TestItem15Continuation:
+    def test_full_continuation_matches_uninterrupted_run(self, tmp_path: Path) -> None:
+        # An uninterrupted run vs. a save/resume continuation must produce
+        # identical model bytes, optimizer, scheduler, next data item, and
+        # counters — not just the RNG next-sample (item 15).
+        rng_a = _new_rng_manager()
+        rng_b = _new_rng_manager()
+        rng_a.generator.integers(0, 1000, size=10)
+        rng_b.generator.integers(0, 1000, size=10)
+        bundle_bytes = rng_a.capture_state().to_deterministic_json()
+        weight = 1.25
+        state = _reference_state(
+            weight_value=weight,
+            rng_bundle=bundle_bytes,
+            global_update=5,
+            accepted_samples=40,
+            position=40,
+        )
+        opt_bytes = state.optimizer_state
+        sched_bytes = state.scheduler_state
+
+        # (A) Uninterrupted baseline state.
+        expected_weight = state.parameters["layer.weight"]
+        expected_counters = state.counters
+        expected_cursor = cast("DataCursor", state.data_cursor)
+        expected_next_rng = rng_a.generator.integers(0, 1000, size=5).tolist()
+
+        # (B) Save/resume continuation.
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        factory = _FullRecordingFactory()
+        # A fresh, uninitialized manager for restore_state (restore requires the
+        # manager not be already initialized).
+        restored_rng = RngManager(root_seed=7, context=SeedContext(component="run"))
+        restored_rng.restore_state(RngStateBundle.from_json_bytes(archive.component("rng")))
+        txn = RestoreTransaction(
+            archive=archive,
+            factory=factory,
+            rng_bundle_loader=lambda: restored_rng.capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        txn.prepare()
+        txn.commit()
+
+        target = factory.target
+        # Model bytes round-trip exactly.
+        assert target["parameters"]["layer.weight"] == expected_weight
+        # Optimizer + scheduler state round-trip exactly.
+        assert target["optimizer"] == opt_bytes
+        assert target["scheduler"] == sched_bytes
+        # Counters + cursor round-trip exactly.
+        assert target["counters"] == expected_counters
+        restored_cursor = cast("DataCursor", target["cursor"])
+        assert restored_cursor.position == expected_cursor.position
+        assert restored_cursor.accepted_samples == expected_cursor.accepted_samples
+        # RNG continuation matches the uninterrupted run's next-sample.
+        actual_next_rng = restored_rng.generator.integers(0, 1000, size=5).tolist()
+        assert actual_next_rng == expected_next_rng
