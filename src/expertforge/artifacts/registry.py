@@ -32,15 +32,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from expertforge.artifacts.locks import AttemptLock, LockUnavailableError
 from expertforge.artifacts.models import (
     ARTIFACT_REGISTRY_FORMAT_VERSION,
     ArtifactConflictError,
+    ArtifactDescriptor,
     ArtifactRecord,
     ExternalReference,
     RegistryEntry,
     RegistryStatus,
+    RetentionStatus,
+    StorageClass,
+    _thaw,
     canonical_timestamp,
+    descriptor_to_artifact_id,
     is_legal_retention_transition,
     is_legal_storage_transition,
     validate_canonical_timestamp,
@@ -258,21 +265,123 @@ class _ArtifactHistory:
     external: ExternalReference | None = None
 
 
+def _payload_record(payload: Mapping[str, Any], *, strip_external: bool = False) -> ArtifactRecord:
+    """Strictly validate a payload (or sub-payload) as an :class:`ArtifactRecord`.
+
+    Validation is strict (``model_validate_json`` over re-canonicalized bytes) so
+    payloads are not coerced: types must match exactly. JSON-native structural
+    normalization (lists to tuples, datetimes) is performed by Pydantic's strict
+    mode only when reading from JSON. ``strict=False`` is never used.
+
+    ``strip_external`` removes the nested ``external_reference`` key that an
+    ``external_registration`` payload carries alongside the record fields; that
+    key is not part of the immutable record schema and must be validated
+    separately via :func:`_payload_external`.
+    """
+    record_payload: Mapping[str, Any] = payload
+    if strip_external and "external_reference" in payload:
+        record_payload = {k: v for k, v in payload.items() if k != "external_reference"}
+    try:
+        return ArtifactRecord.model_validate_json(
+            _canonical_json_bytes(record_payload), strict=True
+        )
+    except (ValidationError, ValueError, TypeError) as e:
+        raise RegistryError(f"payload is not a valid ArtifactRecord: {e}") from e
+
+
+def _payload_external(payload: Mapping[str, Any]) -> ExternalReference:
+    """Strictly validate a payload's nested ``external_reference`` object."""
+    ext = payload.get("external_reference")
+    if not isinstance(ext, Mapping):
+        raise RegistryError("external_registration payload missing external_reference.")
+    try:
+        return ExternalReference.model_validate_json(_canonical_json_bytes(ext), strict=True)
+    except (ValidationError, ValueError, TypeError) as e:
+        raise RegistryError(f"payload external_reference is invalid: {e}") from e
+
+
+def _canonical_json_bytes(obj: Any) -> bytes:
+    """Compact, sorted-key, UTF-8, non-finite-prohibiting JSON of a payload."""
+    return json.dumps(
+        _thaw(obj) if isinstance(obj, Mapping) else obj,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _identity_matches_envelope(record_or_ext: Any, entry: RegistryEntry) -> None:
+    """Validate the payload's identity binding matches the registry envelope."""
+    if record_or_ext.run_id != entry.run_id:
+        raise RegistryError(
+            f"payload run_id {record_or_ext.run_id!r} does not match envelope {entry.run_id!r}."
+        )
+    if record_or_ext.attempt_id != entry.attempt_id:
+        raise RegistryError(
+            f"payload attempt_id {record_or_ext.attempt_id!r} does not match "
+            f"envelope {entry.attempt_id!r}."
+        )
+    if record_or_ext.specification_fingerprint != entry.specification_fingerprint:
+        raise RegistryError("payload specification_fingerprint does not match envelope binding.")
+
+
+def _record_internally_consistent(rec: ArtifactRecord) -> None:
+    """Validate that an ArtifactRecord's immutable descriptor-derived fields are
+    internally consistent (recompute ``artifact_id`` and ``relative_path``)."""
+    descriptor = ArtifactDescriptor(
+        schema_version=rec.schema_version,
+        run_id=rec.run_id,
+        attempt_id=rec.attempt_id,
+        specification_fingerprint=rec.specification_fingerprint,
+        category=rec.category,
+        format=rec.format,
+        format_version=rec.format_version,
+        content_digest=rec.content_digest,
+        byte_size=rec.byte_size,
+        producing_component=rec.producing_component,
+        parent=rec.parent,
+    )
+    expected_id = descriptor_to_artifact_id(descriptor)
+    if rec.artifact_id != expected_id:
+        raise RegistryError(
+            f"payload artifact_id {rec.artifact_id!r} does not match the "
+            f"descriptor-derived id {expected_id!r}."
+        )
+    expected_rel = f"artifacts/{rec.category}/{rec.artifact_id}"
+    if rec.relative_path != expected_rel:
+        raise RegistryError(
+            f"payload relative_path {rec.relative_path!r} does not match the "
+            f"canonical path {expected_rel!r}."
+        )
+
+
 def _reduce_history(entries: list[RegistryEntry]) -> dict[str, _ArtifactHistory]:
-    """Reduce entries to the last-known state per artifact_id, validating transitions."""
+    """Reduce entries to the last-known state per artifact_id, validating transitions.
+
+    Every payload's identity binding (``run_id``/``attempt_id``/
+    ``specification_fingerprint``) must match the registry envelope that carries
+    it; every ArtifactRecord's immutable descriptor fields must be internally
+    consistent (amendment D strict binding).
+    """
     histories: dict[str, _ArtifactHistory] = {}
     for entry in entries:
         payload = entry.payload
         kind = entry.entry_kind
         if kind == "initial_publication":
             rec = _payload_record(payload)
+            _identity_matches_envelope(rec, entry)
+            _record_internally_consistent(rec)
             aid = rec.artifact_id
             if aid in histories:
                 raise RegistryError(f"duplicate initial_publication for artifact {aid!r}.")
             histories[aid] = _ArtifactHistory(artifact_id=aid, record=rec)
         elif kind == "external_registration":
-            rec = _payload_record(payload)
+            rec = _payload_record(payload, strip_external=True)
+            _identity_matches_envelope(rec, entry)
+            _record_internally_consistent(rec)
             ext = _payload_external(payload)
+            _identity_matches_envelope(ext, entry)
             aid = rec.artifact_id
             if ext.artifact_id != aid:
                 raise RegistryError(
@@ -297,8 +406,12 @@ def _reduce_history(entries: list[RegistryEntry]) -> dict[str, _ArtifactHistory]
             if aid not in histories:
                 raise RegistryError(f"{kind} for unknown artifact {aid!r} (no prior publication).")
             existing = histories[aid]
-            new_storage = payload.get("storage_class", existing.record.storage_class)
-            new_retention = payload.get("retention", existing.record.retention)
+            raw_storage = payload.get("storage_class", existing.record.storage_class)
+            raw_retention = payload.get("retention", existing.record.retention)
+            if not isinstance(raw_storage, str) or not isinstance(raw_retention, str):
+                raise RegistryError(f"{kind} payload has non-string storage/retention.")
+            new_storage: StorageClass = raw_storage  # type: ignore[assignment]
+            new_retention: RetentionStatus = raw_retention  # type: ignore[assignment]
             if not is_legal_storage_transition(existing.record.storage_class, new_storage):
                 raise RegistryError(
                     f"illegal storage transition {existing.record.storage_class!r} "
@@ -315,28 +428,9 @@ def _reduce_history(entries: list[RegistryEntry]) -> dict[str, _ArtifactHistory]
             histories[aid] = _ArtifactHistory(
                 artifact_id=aid, record=new_rec, external=existing.external
             )
+        else:
+            raise RegistryError(f"unknown entry_kind {kind!r}.")
     return histories
-
-
-def _payload_record(payload: Mapping[str, Any]) -> ArtifactRecord:
-    # An external_registration payload carries both the record fields and a
-    # nested ``external_reference`` object under a stable key. Strip that key
-    # before validating the immutable record portion.
-    record_payload = {k: v for k, v in payload.items() if k != "external_reference"}
-    try:
-        return ArtifactRecord.model_validate(record_payload, strict=False)
-    except Exception as e:
-        raise RegistryError(f"payload is not a valid ArtifactRecord: {e}") from e
-
-
-def _payload_external(payload: Mapping[str, Any]) -> ExternalReference:
-    ext = payload.get("external_reference")
-    if not isinstance(ext, dict):
-        raise RegistryError("external_registration payload missing external_reference.")
-    try:
-        return ExternalReference.model_validate(ext, strict=False)
-    except Exception as e:
-        raise RegistryError(f"payload external_reference is invalid: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -373,8 +467,11 @@ def load_registry(
 
     Raises :class:`RegistryError` on: missing file, invalid UTF-8, malformed or
     non-object JSON, unknown registry version, identity drift, non-contiguous
-    sequences, illegal transitions, oversized lines, or a truncated tail
-    (incomplete). Use :func:`scan_registry` for diagnostic outcomes.
+    sequences, payload schema or identity-binding failures, illegal transitions,
+    oversized lines, or a truncated tail (incomplete). The scan already performs
+    every validation that ``load`` requires; this entry point simply maps the
+    scan status to a raised error. Use :func:`scan_registry` for diagnostic
+    outcomes.
     """
     result = scan_registry(path)
     if result.status == "incomplete":
@@ -392,8 +489,6 @@ def load_registry(
             raise RegistryError(
                 "registry specification_fingerprint does not match expected identity."
             )
-    # Validate transitions across the whole history.
-    _reduce_history(result.accepted)
     return result.accepted
 
 
@@ -405,9 +500,14 @@ def load_registry(
 def scan_registry(path: Path) -> RegistryScanResult:
     """Return the accepted prefix and a ``complete``/``incomplete``/``corrupt`` status.
 
-    The first corrupt or out-of-order line stops acceptance. A truncated
-    (non-newline-terminated) tail yields ``incomplete``; otherwise the accepted
-    prefix is returned with its status.
+    The scanner is authoritative (amendment D): it validates every accepted line
+    against the strict shared validator, which covers envelope framing, strict
+    payload schemas (:class:`ArtifactRecord` / :class:`ExternalReference`),
+    identity binding between payload and envelope, internal descriptor
+    consistency, and per-artifact lifecycle transitions. The first line that
+    fails any of these stops acceptance; the rest of the file is the
+    corrupt/incomplete tail. All parsing is wrapped so a typed ``corrupt`` result
+    is always produced (no ``KeyError``/``ValidationError`` leaks).
     """
     try:
         raw = path.read_bytes()
@@ -433,23 +533,19 @@ def scan_registry(path: Path) -> RegistryScanResult:
     accepted: list[RegistryEntry] = []
 
     for idx, line in enumerate(lines):
+        # One try/except around the whole per-line acceptance so any failure
+        # (framing, schema, identity binding, transition) yields a typed corrupt
+        # result. The accepted prefix is retained (truncated-tail recovery).
         try:
             parsed = _parse_envelope(line)
-        except _ParseFailure as e:
-            return RegistryScanResult(
-                status="corrupt",
-                accepted=accepted,
-                reason=f"line {idx + 1}: {e}",
-            )
-        if run_id is None:
-            run_id = parsed["run_id"]
-            attempt_id = parsed["attempt_id"]
-            fingerprint = parsed["specification_fingerprint"]
-        # After the first line these are bound; assert to narrow for mypy.
-        assert run_id is not None
-        assert attempt_id is not None
-        assert fingerprint is not None
-        try:
+            if run_id is None:
+                run_id = parsed["run_id"]
+                attempt_id = parsed["attempt_id"]
+                fingerprint = parsed["specification_fingerprint"]
+            # After the first line these are bound; assert to narrow for mypy.
+            assert run_id is not None
+            assert attempt_id is not None
+            assert fingerprint is not None
             entry = _validate_envelope(
                 parsed,
                 raw_line=line,
@@ -458,13 +554,23 @@ def scan_registry(path: Path) -> RegistryScanResult:
                 expected_attempt_id=attempt_id,
                 expected_fingerprint=fingerprint,
             )
+            accepted.append(entry)
+            # Re-run the strict shared validator over the accepted prefix so the
+            # scanner is authoritative for payloads and transitions, not just
+            # envelope framing.
+            _reduce_history(accepted)
         except _ParseFailure as e:
             return RegistryScanResult(
                 status="corrupt",
                 accepted=accepted,
                 reason=f"line {idx + 1}: {e}",
             )
-        accepted.append(entry)
+        except RegistryError as e:
+            return RegistryScanResult(
+                status="corrupt",
+                accepted=accepted,
+                reason=f"line {idx + 1}: {e}",
+            )
 
     if truncated:
         return RegistryScanResult(
@@ -503,43 +609,81 @@ def allocate_and_append(
     happen while holding :class:`AttemptLock`. The append uses a full-write loop
     even though each entry is bounded (amendment E). ``O_APPEND`` is opened but
     not relied upon for cross-process atomicity.
+
+    Refuses to append when the current registry scan is not ``complete``: an
+    incomplete (truncated tail) or corrupt registry is never extended (item #1).
     """
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-    entry: RegistryEntry | None = None
     try:
         with AttemptLock(lock_path):
-            next_seq = scan_registry(registry_path).accepted_count
-            entry = RegistryEntry(
-                registry_format_version=ARTIFACT_REGISTRY_FORMAT_VERSION,
-                sequence=next_seq,
+            return _append_under_lock(
+                registry_path,
                 run_id=run_id,
                 attempt_id=attempt_id,
                 specification_fingerprint=specification_fingerprint,
-                recorded_at_utc=recorded_at_utc,
-                entry_kind=entry_kind,  # type: ignore[arg-type]
+                entry_kind=entry_kind,
                 payload=payload,
+                recorded_at_utc=recorded_at_utc,
+                transition_validator=transition_validator,
             )
-            # Transition validation across the whole history including this new
-            # entry, under the lock so concurrent appends cannot interleave.
-            existing = _reduce_history(scan_registry(registry_path).accepted)
-            trial = [*scan_registry(registry_path).accepted, entry]
-            try:
-                _reduce_history(trial)
-            except RegistryError as e:
-                raise ArtifactConflictError(str(e)) from e
-            if transition_validator is not None:
-                transition_validator(existing)
-            line = entry.to_deterministic_json() + b"\n"
-            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
-            fd = os.open(registry_path, flags, 0o600)
-            try:
-                _full_write(fd, line)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
     except LockUnavailableError as e:
         raise RegistryError(f"could not acquire registry lock: {e}") from e
-    assert entry is not None
+
+
+def _append_under_lock(
+    registry_path: Path,
+    *,
+    run_id: str,
+    attempt_id: str,
+    specification_fingerprint: str,
+    entry_kind: str,
+    payload: dict[str, Any],
+    recorded_at_utc: datetime,
+    transition_validator: Callable[[dict[str, _ArtifactHistory]], None] | None = None,
+) -> RegistryEntry:
+    """Append one envelope assuming the per-attempt lock is already held.
+
+    This is the lock-free inner body of :func:`allocate_and_append`, exposed so a
+    caller that already holds :class:`AttemptLock` (e.g. publish's critical
+    section) can append without re-acquiring the non-reentrant lock (item #6).
+    Refuses to append to a non-complete registry (item #1).
+    """
+    scan = scan_registry(registry_path)
+    if scan.status != "complete":
+        raise RegistryError(
+            f"registry {registry_path} is {scan.status} ({scan.reason}); "
+            "refusing to append to a non-complete registry."
+        )
+    accepted = scan.accepted
+    next_seq = len(accepted)
+    entry = RegistryEntry(
+        registry_format_version=ARTIFACT_REGISTRY_FORMAT_VERSION,
+        sequence=next_seq,
+        run_id=run_id,
+        attempt_id=attempt_id,
+        specification_fingerprint=specification_fingerprint,
+        recorded_at_utc=recorded_at_utc,
+        entry_kind=entry_kind,  # type: ignore[arg-type]
+        payload=payload,
+    )
+    # Transition validation across the whole history including this new entry,
+    # under the lock so concurrent appends cannot interleave.
+    existing = _reduce_history(accepted)
+    trial = [*accepted, entry]
+    try:
+        _reduce_history(trial)
+    except RegistryError as e:
+        raise ArtifactConflictError(str(e)) from e
+    if transition_validator is not None:
+        transition_validator(existing)
+    line = entry.to_deterministic_json() + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+    fd = os.open(registry_path, flags, 0o600)
+    try:
+        _full_write(fd, line)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     return entry
 
 

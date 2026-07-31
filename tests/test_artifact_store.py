@@ -332,12 +332,22 @@ class TestUpdateRetention:
         with pytest.raises(ArtifactConflictError):
             store.update_retention(aid, "externally_retained")
 
-    def test_transition_to_missing_moves_storage_class(self, tmp_path: Path) -> None:
+    def test_retention_transition_does_not_change_storage_class(self, tmp_path: Path) -> None:
+        # Item #8: a retention-only update must not change storage_class.
         store = make_store(tmp_path)
         aid = _publish_report(store)
-        rec = store.update_retention(aid, "missing")
-        assert rec.retention == "missing"
-        assert rec.storage_class == "metadata_only"
+        rec = store.update_retention(aid, "pending_transfer")
+        assert rec.retention == "pending_transfer"
+        # storage_class is unchanged from the published canonical_local.
+        assert rec.storage_class == "canonical_local"
+
+    def test_missing_refused_while_content_present(self, tmp_path: Path) -> None:
+        # Item #8: marking "missing" while canonical content is still present
+        # is refused with a typed error.
+        store = make_store(tmp_path)
+        aid = _publish_report(store)
+        with pytest.raises(ArtifactConflictError):
+            store.update_retention(aid, "missing")
 
     def test_update_unknown_artifact_rejected(self, tmp_path: Path) -> None:
         store = make_store(tmp_path)

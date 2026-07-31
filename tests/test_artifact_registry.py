@@ -51,28 +51,40 @@ def _lock_path(tmp_path: Path) -> Path:
 
 def _record_payload(
     *,
-    artifact_id: str = _VALID_ARTIFACT_ID,
     producing_component: str = "training",
     parent: ParentReference | None = None,
 ) -> dict[str, object]:
-    """A complete valid ArtifactRecord payload (JSON-serializable dict)."""
+    """A complete valid, internally-consistent ArtifactRecord payload.
+
+    The ``artifact_id`` is derived from a real descriptor so the record passes
+    the registry's strict internal-consistency validation (amendment D, item #3):
+    the descriptor-derived id and the canonical relative path must match.
+    """
     import json as _json
     from typing import cast
 
-    rec = ArtifactRecord(
-        artifact_id=artifact_id,
-        category="report",
-        format="json",
-        format_version=1,
-        byte_size=10,
-        content_digest=_VALID_DIGEST,
-        producing_component=producing_component,
+    from expertforge.artifacts.models import (
+        ArtifactDescriptor,
+        descriptor_to_artifact_id,
+    )
+
+    descriptor = ArtifactDescriptor(
         run_id=VALID_RUN,
         attempt_id=VALID_ATTEMPT,
         specification_fingerprint=VALID_FP,
+        category="report",
+        format="json",
+        format_version=1,
+        content_digest=_VALID_DIGEST,
+        byte_size=10,
+        producing_component=producing_component,
+        parent=parent,
+    )
+    artifact_id = descriptor_to_artifact_id(descriptor)
+    rec = ArtifactRecord.from_descriptor(
+        descriptor,
         created_at_utc=_VALID_TS,
         relative_path=f"artifacts/report/{artifact_id}",
-        parent=parent,
         storage_class="canonical_local",
         retention="retained",
     )
@@ -128,7 +140,6 @@ class TestScanLoad:
             tmp_path,
             sequence=1,
             payload=_record_payload(
-                artifact_id="artifact-v1-sha256-" + "b" * 64,
                 producing_component="eval",
             ),
         )
@@ -218,7 +229,6 @@ class TestCorruption:
             tmp_path,
             sequence=1,
             payload=_record_payload(
-                artifact_id="artifact-v1-sha256-" + "b" * 64,
                 producing_component="eval",
             ),
         )
@@ -346,7 +356,6 @@ class TestAllocateAppend:
             specification_fingerprint=VALID_FP,
             entry_kind="initial_publication",
             payload=_record_payload(
-                artifact_id="artifact-v1-sha256-" + "b" * 64,
                 producing_component="eval",
             ),
             recorded_at_utc=_VALID_TS,

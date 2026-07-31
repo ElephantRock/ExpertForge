@@ -28,6 +28,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -417,6 +418,28 @@ def _canonical_json_bytes(obj: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _deep_freeze(obj: Any) -> Any:
+    """Recursively wrap dict values in ``MappingProxyType`` for deep immutability.
+
+    Lists are copied to plain tuples so callers cannot mutate list-typed payload
+    fields in place. Scalars are returned unchanged.
+    """
+    if isinstance(obj, Mapping):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return tuple(_deep_freeze(v) for v in obj)
+    return obj
+
+
+def _thaw(obj: Any) -> Any:
+    """Inverse of :func:`_deep_freeze`: return plain JSON-serializable structures."""
+    if isinstance(obj, Mapping):
+        return {k: _thaw(v) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return [_thaw(v) for v in obj]
+    return obj
+
+
 def descriptor_to_artifact_id(descriptor: ArtifactDescriptor) -> str:
     """Compute the canonical ``artifact-v1-sha256-<64hex>`` ID from a descriptor."""
     digest = hashlib.sha256(descriptor.canonical_bytes()).hexdigest()
@@ -709,6 +732,16 @@ class RegistryEntry(_FrozenModel):
     entry_kind: EntryKind
     payload: Mapping[str, Any]
 
+    @field_validator("payload")
+    @classmethod
+    def _validate_payload(cls, v: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not isinstance(v, Mapping):
+            raise ValueError("payload must be a JSON object.")
+        # Deep-freeze: materialize to a plain dict, then wrap every nested dict
+        # value in a MappingProxyType so the envelope is fully immutable and no
+        # caller can mutate registry state in place (amendment D deep-freeze).
+        return MappingProxyType(_deep_freeze(v))
+
     @field_validator("registry_format_version")
     @classmethod
     def _validate_registry_version(cls, v: int) -> int:
@@ -728,15 +761,6 @@ class RegistryEntry(_FrozenModel):
             raise ValueError("recorded_at_utc must be UTC (offset 0).")
         return v
 
-    @field_validator("payload")
-    @classmethod
-    def _validate_payload(cls, v: Mapping[str, Any]) -> Mapping[str, Any]:
-        if not isinstance(v, Mapping):
-            raise ValueError("payload must be a JSON object.")
-        # Materialize to a plain dict so the envelope is JSON-serializable and
-        # not a mutable alias of caller state.
-        return dict(v)
-
     def to_deterministic_json(self) -> bytes:
         """Compact, sorted-key, UTF-8, non-finite-prohibiting JSON (one line)."""
         return _canonical_json_bytes(self.to_envelope_dict())
@@ -750,7 +774,7 @@ class RegistryEntry(_FrozenModel):
             "specification_fingerprint": self.specification_fingerprint,
             "recorded_at_utc": canonical_timestamp(self.recorded_at_utc),
             "entry_kind": self.entry_kind,
-            "payload": dict(self.payload),
+            "payload": _thaw(self.payload),
         }
 
 

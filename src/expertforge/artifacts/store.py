@@ -24,12 +24,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from expertforge.artifacts.external import ExternalLocationError
+from expertforge.artifacts.locks import AttemptLock, LockUnavailableError
 from expertforge.artifacts.models import (
     ARTIFACT_BUNDLE_SCHEMA_VERSION,
     ArtifactConflictError,
@@ -43,7 +45,6 @@ from expertforge.artifacts.models import (
     VerificationResult,
     descriptor_to_artifact_id,
     is_legal_retention_transition,
-    is_legal_storage_transition,
 )
 from expertforge.artifacts.paths import (
     artifact_bundle_dir,
@@ -53,6 +54,7 @@ from expertforge.artifacts.paths import (
 )
 from expertforge.artifacts.registry import (
     RegistryError,
+    _append_under_lock,
     _reduce_history,
     allocate_and_append,
     load_registry,
@@ -140,6 +142,78 @@ def _is_symlink(path: Path) -> bool:
     return _stat.S_ISLNK(st.st_mode)
 
 
+def _verify_no_symlinks_in_chain(root: Path, target: Path) -> None:
+    """Reject symlinks anywhere in the path chain from ``root`` to ``target``.
+
+    Walks the lexical components of ``target`` starting at ``root`` and lstat's
+    each intermediate component. Any symlink component (including a symlinked
+    parent directory, or a symlinked final element) is rejected (item #5).
+    """
+    import stat as _stat
+
+    try:
+        target_rel = target.relative_to(root)
+    except ValueError as e:
+        raise ArtifactConflictError(f"target {target} is not within artifact root {root}") from e
+    current = root
+    # Verify root itself is not a symlink.
+    try:
+        root_st = os.lstat(root)
+    except OSError as e:
+        raise ArtifactConflictError(f"cannot lstat artifact root {root}: {e}") from e
+    if _stat.S_ISLNK(root_st.st_mode):
+        raise ArtifactConflictError(f"artifact root {root} is a symlink; rejected.")
+    for part in target_rel.parts:
+        current = current / part
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError as e:
+            raise ArtifactNotFoundError(f"path component {current} does not exist.") from e
+        except OSError as e:
+            raise ArtifactConflictError(f"cannot lstat path component {current}: {e}") from e
+        if _stat.S_ISLNK(st.st_mode):
+            raise ArtifactConflictError(
+                f"path component {current} is a symlink; refused (amendment H)."
+            )
+
+
+def _open_read_no_follow(path: Path) -> int:
+    """Open a file for reading without following a symlink final element.
+
+    Uses ``O_NOFOLLOW`` where available (POSIX). On all platforms the open is
+    followed by an ``fstat`` to confirm the descriptor is still a regular file,
+    closing the TOCTOU window between an ``lstat`` and an ``open`` (item #5).
+    """
+    import stat as _stat
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+    except OSError as e:
+        os.close(fd)
+        raise ArtifactConflictError(f"cannot fstat {path}: {e}") from e
+    if _stat.S_ISLNK(st.st_mode):  # pragma: no cover - O_NOFOLLOW already rejects
+        os.close(fd)
+        raise ArtifactConflictError(f"{path} is a symlink; refused.")
+    if not _stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise ArtifactConflictError(f"{path} is not a regular file; refused.")
+    return fd
+
+
+def _read_bytes_no_follow(path: Path) -> bytes:
+    """Read a file's bytes via :func:`_open_read_no_follow` (symlink-safe)."""
+    fd = _open_read_no_follow(path)
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            return fh.read()
+    finally:
+        # fdopen owns the fd; closing the file object closes the fd.
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Canonical artifact.json
 # ---------------------------------------------------------------------------
@@ -156,20 +230,93 @@ def _record_canonical_json(record: ArtifactRecord) -> bytes:
     ).encode("utf-8")
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ArtifactStoreError(f"duplicate JSON key {key!r} in artifact.json.")
+        result[key] = value
+    return result
+
+
 def _record_from_bundle_bytes(raw: bytes) -> ArtifactRecord:
+    """Parse artifact.json requiring canonical compact sorted JSON.
+
+    Re-parses with a duplicate-key-rejecting hook, rejects NaN/Infinity
+    constants, validates the ``created_at_utc`` is fixed-width canonical UTC,
+    re-derives the artifact_id from the immutable descriptor and requires a
+    match, and validates the canonical relative_path and category. Non-canonical
+    or tampered metadata is rejected (item #4).
+    """
     try:
         text = raw.decode("utf-8")
-        data = json.loads(text)
     except UnicodeDecodeError as e:
         raise ArtifactStoreError(f"artifact.json is not valid UTF-8: {e}") from e
+    try:
+        data = json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_float=float)
     except json.JSONDecodeError as e:
         raise ArtifactStoreError(f"artifact.json is not valid JSON: {e}") from e
     if not isinstance(data, dict):
         raise ArtifactStoreError("artifact.json must be a JSON object.")
+    # The created_at_utc must be a fixed-width canonical UTC string in its raw
+    # stored form (Pydantic parses ISO datetimes leniently, so we check the
+    # stored string before model validation).
+    raw_ts = data.get("created_at_utc")
+    if not isinstance(raw_ts, str) or not _CANONICAL_TS_RE.fullmatch(raw_ts):
+        raise ArtifactStoreError("artifact.json created_at_utc is not fixed-width canonical UTC.")
+    # Strict model validation from the canonical re-encoded bytes so types are
+    # not coerced.
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     try:
-        return ArtifactRecord.model_validate(data, strict=False)
+        record = ArtifactRecord.model_validate_json(canonical.encode("utf-8"), strict=True)
     except Exception as e:
         raise ArtifactStoreError(f"artifact.json failed validation: {e}") from e
+    # Require the stored bytes are exactly the canonical compact sorted form: the
+    # original raw text must equal the canonical rendering. Any whitespace, key
+    # ordering, or number-formatting drift is rejected (item #4).
+    expected = _record_canonical_json(record).decode("utf-8")
+    if text != expected:
+        raise ArtifactStoreError("artifact.json is not canonical compact sorted JSON.")
+    _validate_bundle_record(record)
+    return record
+
+
+def _validate_bundle_record(record: ArtifactRecord) -> None:
+    """Recompute the immutable artifact_id and validate relative_path/category.
+
+    The bundle's recorded metadata must be self-consistent: the descriptor
+    derived from the record's immutable fields must hash back to the recorded
+    artifact_id, the relative_path must be the canonical path derived from the
+    artifact_id, and the category must match (item #4).
+    """
+    descriptor = ArtifactDescriptor(
+        schema_version=record.schema_version,
+        run_id=record.run_id,
+        attempt_id=record.attempt_id,
+        specification_fingerprint=record.specification_fingerprint,
+        category=record.category,
+        format=record.format,
+        format_version=record.format_version,
+        content_digest=record.content_digest,
+        byte_size=record.byte_size,
+        producing_component=record.producing_component,
+        parent=record.parent,
+    )
+    expected_id = descriptor_to_artifact_id(descriptor)
+    if record.artifact_id != expected_id:
+        raise ArtifactStoreError(
+            f"artifact.json artifact_id {record.artifact_id!r} does not match the "
+            f"descriptor-derived id {expected_id!r}."
+        )
+    expected_rel = f"artifacts/{record.category}/{record.artifact_id}"
+    if record.relative_path != expected_rel:
+        raise ArtifactStoreError(
+            f"artifact.json relative_path {record.relative_path!r} does not match "
+            f"the canonical path {expected_rel!r}."
+        )
+
+
+_CANONICAL_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 
 
 _IMMUTABLE_IDENTITY_FIELDS = (
@@ -372,27 +519,38 @@ class ArtifactStore:
                 category,
                 artifact_id,
             )
-            if final_bundle.exists() or _is_symlink(final_bundle):
-                # Idempotency vs. conflict. The existing bundle's recorded
-                # timestamp is authoritative; preserve it (do not overwrite
-                # with this publish's created_at_utc).
-                self._assert_idempotent(final_bundle, record)
-                # Remove the temp bundle; do not append a duplicate entry.
-                self._remove_tree(tmp_bundle)
-                # The existing bundle's record (with its original timestamp) is
-                # the authoritative immutable metadata; index using it so the
-                # registry entry and the bundle agree on created_at_utc.
-                existing_record = _record_from_bundle_bytes(
-                    (final_bundle / "artifact.json").read_bytes()
-                )
-                self._ensure_indexed(existing_record, entry_kind="initial_publication")
-                return existing_record
-            # Atomic directory rename (no os.replace for directories per amendment).
-            os.rename(tmp_bundle, final_bundle)
-            _fsync_dir(cdir)
-            # Registry append.
-            self._ensure_indexed(record, entry_kind="initial_publication")
-            return record
+            # Hold the attempt lock for the entire publish critical section
+            # (pre-existence check, temp-dir creation already done above, rename,
+            # and registry append) so two concurrent publishers of the same
+            # semantic artifact are idempotent: the second sees the first's
+            # bundle with matching immutable metadata and returns it (item #6).
+            try:
+                with AttemptLock(self._lock_path):
+                    if final_bundle.exists() or _is_symlink(final_bundle):
+                        # Idempotency vs. conflict. The existing bundle's recorded
+                        # timestamp is authoritative; preserve it (do not overwrite
+                        # with this publish's created_at_utc).
+                        self._assert_idempotent(final_bundle, record)
+                        # Remove the temp bundle; do not append a duplicate entry.
+                        self._remove_tree(tmp_bundle)
+                        # The existing bundle's record (with its original
+                        # timestamp) is the authoritative immutable metadata;
+                        # index using it so the registry entry and the bundle
+                        # agree on created_at_utc.
+                        meta_bytes = _read_bytes_no_follow(final_bundle / "artifact.json")
+                        existing_record = _record_from_bundle_bytes(meta_bytes)
+                        self._ensure_indexed(
+                            existing_record, entry_kind="initial_publication", hold_lock=True
+                        )
+                        return existing_record
+                    # Atomic directory rename (no os.replace for directories).
+                    os.rename(tmp_bundle, final_bundle)
+                    _fsync_dir(cdir)
+                    # Registry append (lock-free path: the lock is held above).
+                    self._ensure_indexed(record, entry_kind="initial_publication", hold_lock=True)
+                    return record
+            except LockUnavailableError as e:
+                raise ArtifactStoreError(f"could not acquire publish lock: {e}") from e
         except Exception:
             # On any failure after temp creation: remove the temp bundle, do
             # not write a registry record, do not leave partial canonical dirs.
@@ -405,23 +563,37 @@ class ArtifactStore:
         return Path(tempfile.mkdtemp(prefix=".tmp-bundle-", dir=parent))
 
     def _write_content(self, content_path: Path, content: bytes | Path) -> tuple[str, int]:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        # The canonical content file is created fresh beneath a store-owned temp
+        # directory; O_NOFOLLOW is applied where available so a replaced path
+        # cannot be a symlink (item #5).
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_TRUNC
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
         fd = os.open(content_path, flags, 0o600)
         h = hashlib.sha256()
         total = 0
         try:
             if isinstance(content, Path):
-                # Source must be a regular file, not a symlink (amendment H).
-                self._assert_regular_source(content)
-                with open(content, "rb") as src:
-                    while True:
-                        chunk = src.read(BLOCK_SIZE)
-                        if not chunk:
-                            break
-                        _full_write(fd, chunk)
-                        h.update(chunk)
-                        total += len(chunk)
+                # Source must be a regular file, opened without following a
+                # symlink (amendment H, item #5). The fd is fstat-verified inside
+                # _open_read_no_follow.
+                src_fd = _open_read_no_follow(content)
+                try:
+                    with os.fdopen(src_fd, "rb") as src:
+                        while True:
+                            chunk = src.read(BLOCK_SIZE)
+                            if not chunk:
+                                break
+                            _full_write(fd, chunk)
+                            h.update(chunk)
+                            total += len(chunk)
+                finally:
+                    # fdopen owns src_fd; closing the file object closes it.
+                    pass
             else:
                 if not isinstance(content, (bytes, bytearray, memoryview)):
                     raise ArtifactStoreError("content must be bytes or a Path.")
@@ -431,18 +603,33 @@ class ArtifactStore:
             os.fsync(fd)
         finally:
             os.close(fd)
-        # Silence the nofollow flag var lint (kept for clarity / future use).
-        _ = nofollow
         return f"sha256:{h.hexdigest()}", total
 
     def _assert_regular_source(self, path: Path) -> None:
-        try:
-            st = os.lstat(path)
-        except FileNotFoundError as e:
-            raise ArtifactStoreError(f"source file not found: {path}") from e
+        """Reject symlinked/non-regular source files before copying (item #5).
+
+        Opens with ``O_NOFOLLOW`` where available and ``fstat``s the descriptor
+        so a TOCTOU swap between this check and the copy cannot inject a
+        symlink. :meth:`_write_content` re-opens via the same safe path.
+        """
         import stat as _stat
 
-        if _stat.S_ISLNK(st.st_mode):
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0))
+        except FileNotFoundError as e:
+            raise ArtifactStoreError(f"source file not found: {path}") from e
+        except OSError as e:
+            # O_NOFOLLOW raises ELOOP on Linux when the final component is a
+            # symlink; treat that as a rejected symlink source.
+            raise ArtifactConflictError(
+                f"source {path} could not be opened without following a symlink: {e}"
+            ) from e
+        try:
+            st = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if _stat.S_ISLNK(st.st_mode):  # pragma: no cover - O_NOFOLLOW already rejects
             raise ArtifactConflictError(
                 f"source {path} is a symlink; register_existing/publish refuses "
                 "to follow symlinks (amendment H)."
@@ -455,7 +642,15 @@ class ArtifactStore:
 
     def _write_artifact_json(self, path: Path, record: ArtifactRecord) -> None:
         payload = _record_canonical_json(record)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        # O_NOFOLLOW where available prevents a symlinked artifact.json from
+        # being written through (item #5).
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_TRUNC
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
         fd = os.open(path, flags, 0o600)
         try:
             _full_write(fd, payload)
@@ -477,26 +672,62 @@ class ArtifactStore:
         """
         meta_path = final_bundle / "artifact.json"
         content_path = final_bundle / "content"
-        if not meta_path.exists() or not content_path.exists():
-            raise ArtifactConflictError(
-                f"existing bundle {final_bundle} is incomplete (missing content/artifact.json)."
-            )
-        # Reject a symlinked bundle outright.
+        # Reject a symlinked bundle outright and verify the full path chain
+        # before opening anything (item #5 TOCTOU defense).
         if _is_symlink(final_bundle) or _is_symlink(content_path) or _is_symlink(meta_path):
             raise ArtifactConflictError(
                 f"existing bundle {final_bundle} contains a symlink; rejected."
             )
-        existing = _record_from_bundle_bytes(meta_path.read_bytes())
-        if _immutable_identity(existing) != _immutable_identity(record):
+        try:
+            meta_bytes = _read_bytes_no_follow(meta_path)
+        except ArtifactNotFoundError as e:
             raise ArtifactConflictError(
-                f"artifact {record.artifact_id} exists with different immutable metadata."
-            )
-        # Verify payload matches the record's digest + size.
-        digest, size = _hash_path(content_path)
+                f"existing bundle {final_bundle} is incomplete (missing artifact.json)."
+            ) from e
+        try:
+            content_fd = _open_read_no_follow(content_path)
+        except ArtifactNotFoundError as e:
+            raise ArtifactConflictError(
+                f"existing bundle {final_bundle} is incomplete (missing content)."
+            ) from e
+        try:
+            try:
+                existing = _record_from_bundle_bytes(meta_bytes)
+            except ArtifactStoreError as e:
+                # Tampered or non-canonical metadata is a conflict (item #4): the
+                # existing bundle cannot be treated as idempotent.
+                raise ArtifactConflictError(
+                    f"existing bundle {final_bundle} has invalid metadata: {e}"
+                ) from e
+            if _immutable_identity(existing) != _immutable_identity(record):
+                raise ArtifactConflictError(
+                    f"artifact {record.artifact_id} exists with different immutable metadata."
+                )
+            # Verify payload matches the record's digest + size by streaming the
+            # already-open, fstat-verified descriptor.
+            digest, size = self._hash_fd(content_fd)
+        finally:
+            os.close(content_fd)
         if digest != record.content_digest or size != record.byte_size:
             raise ArtifactConflictError(
                 f"artifact {record.artifact_id} content does not match its record."
             )
+
+    @staticmethod
+    def _hash_fd(fd: int) -> tuple[str, int]:
+        """Hash a file descriptor in 64 KiB blocks without taking fd ownership.
+
+        The caller owns the descriptor and is responsible for closing it.
+        """
+        h = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(fd, BLOCK_SIZE)
+            if not chunk:
+                break
+            h.update(chunk)
+            total += len(chunk)
+        return f"sha256:{h.hexdigest()}", total
 
     # -- register_existing -------------------------------------------------
 
@@ -517,7 +748,18 @@ class ArtifactStore:
         only; Issue #11 produces tar archives). The source path is never made
         the canonical artifact; subsequent source-path mutation does not change
         canonical bytes.
+
+        Telemetry streams may not be registered through this method: the
+        ``telemetry`` category is reserved for :meth:`register_telemetry`, which
+        verifies completeness through the public Issue #9 loader before copying
+        bytes into a canonical telemetry bundle (item #9).
         """
+        if category == "telemetry":
+            raise ArtifactStoreError(
+                "telemetry artifacts must be registered via register_telemetry(), "
+                "which verifies the stream through the public telemetry loader "
+                "before canonical registration (item #9)."
+            )
         self._validate_category_format(category, format)
         self._validate_parent(parent)
         self._assert_regular_source(path)
@@ -528,6 +770,49 @@ class ArtifactStore:
             category=category,
             format=format,
             format_version=format_version,
+            producing_component=producing_component,
+            parent=parent,
+        )
+
+    # -- register_telemetry ------------------------------------------------
+
+    def register_telemetry(
+        self,
+        path: Path,
+        *,
+        process_context: Any,
+        producing_component: str,
+        parent: ParentReference | None = None,
+    ) -> ArtifactRecord:
+        """Register a verified telemetry stream as a canonical telemetry artifact.
+
+        The stream is first verified end-to-end through the public Issue #9
+        loader (:func:`load_telemetry_stream`), which enforces canonical JSON,
+        identity/process binding, sequence/monotonicity, and stream closure.
+        Only the verified bytes are then copied into a canonical telemetry
+        bundle (item #9). A stream that fails verification is rejected with a
+        typed :class:`ArtifactStoreError`.
+        """
+        from expertforge.telemetry.loader import TelemetryLoadError, load_telemetry_stream
+
+        try:
+            load_telemetry_stream(
+                path,
+                expected_identity=self._identity,
+                expected_process_context=process_context,
+            )
+        except TelemetryLoadError as e:
+            raise ArtifactStoreError(f"telemetry stream failed canonical verification: {e}") from e
+        # The verified bytes are copied into store ownership. register_existing
+        # is bypassed for the telemetry category (it would reject it), so call
+        # publish directly with the verified file path.
+        self._validate_parent(parent)
+        self._assert_regular_source(path)
+        return self.publish(
+            path,
+            category="telemetry",
+            format="jsonl",
+            format_version=1,
             producing_component=producing_component,
             parent=parent,
         )
@@ -640,10 +925,12 @@ class ArtifactStore:
         cdir.mkdir(parents=True, exist_ok=True)
         tmp_bundle = self._make_temp_bundle_dir(cdir)
         try:
-            # artifact.json carries the immutable record; the external reference
-            # is recorded only in the registry (not in the self-contained
-            # bundle, which describes local-ownership metadata).
+            # artifact.json carries the immutable record. The external.json
+            # sidecar carries the ExternalReference so external bundles remain
+            # recoverable from the bundle alone, independent of the registry
+            # (item #7).
             self._write_artifact_json(tmp_bundle / "artifact.json", record)
+            self._write_external_json(tmp_bundle / "external.json", ext)
             # No content file for metadata_only bundles.
             os.rename(tmp_bundle, bdir)
             _fsync_dir(cdir)
@@ -652,17 +939,66 @@ class ArtifactStore:
                 self._remove_tree(tmp_bundle)
             raise
 
+    def _write_external_json(self, path: Path, ext: ExternalReference) -> None:
+        payload = json.dumps(
+            ext.model_dump(mode="json", by_alias=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_TRUNC
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
+        fd = os.open(path, flags, 0o600)
+        try:
+            _full_write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _fsync_dir(path.parent)
+
     def _assert_idempotent_external(
         self, bdir: Path, record: ArtifactRecord, ext: ExternalReference
     ) -> None:
         meta_path = bdir / "artifact.json"
+        ext_path = bdir / "external.json"
         if not meta_path.exists():
             raise ArtifactConflictError(f"existing bundle {bdir} is missing artifact.json.")
-        existing = _record_from_bundle_bytes(meta_path.read_bytes())
+        existing = _record_from_bundle_bytes(_read_bytes_no_follow(meta_path))
         if _immutable_identity(existing) != _immutable_identity(record):
             raise ArtifactConflictError(
                 f"external artifact {record.artifact_id} exists with different immutable metadata."
             )
+        # The external.json sidecar must be present and match (item #7).
+        if not ext_path.exists():
+            raise ArtifactConflictError(f"existing bundle {bdir} is missing external.json.")
+        existing_ext = self._load_external_sidecar(ext_path)
+        if existing_ext.model_dump(mode="json") != ext.model_dump(mode="json"):
+            raise ArtifactConflictError(
+                f"external artifact {record.artifact_id} exists with a different "
+                "external reference."
+            )
+
+    def _load_external_sidecar(self, path: Path) -> ExternalReference:
+        """Parse and strictly validate an external.json sidecar (item #7)."""
+        raw = _read_bytes_no_follow(path)
+        try:
+            text = raw.decode("utf-8")
+            data = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+        except UnicodeDecodeError as e:
+            raise ArtifactStoreError(f"external.json is not valid UTF-8: {e}") from e
+        except json.JSONDecodeError as e:
+            raise ArtifactStoreError(f"external.json is not valid JSON: {e}") from e
+        canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        try:
+            return ExternalReference.model_validate_json(canonical.encode("utf-8"), strict=True)
+        except Exception as e:
+            raise ArtifactStoreError(f"external.json failed validation: {e}") from e
 
     def _external_registration_payload(
         self, record: ArtifactRecord, ext: ExternalReference
@@ -675,16 +1011,40 @@ class ArtifactStore:
 
     # -- registry index ----------------------------------------------------
 
-    def _ensure_indexed(self, record: ArtifactRecord, *, entry_kind: str) -> None:
-        """Append an entry for ``record`` if it is not already indexed (idempotent)."""
+    def _ensure_indexed(
+        self, record: ArtifactRecord, *, entry_kind: str, hold_lock: bool = False
+    ) -> None:
+        """Append an entry for ``record`` if it is not already indexed (idempotent).
+
+        Authoritative read of the registry (no silent fallback): a corrupt or
+        incomplete registry is surfaced as :class:`ArtifactStoreError` rather
+        than treated as empty (item #1). When ``hold_lock`` is set the caller
+        already holds :class:`AttemptLock` (e.g. publish's critical section) and
+        the lock-free append path is used to avoid a non-reentrant deadlock
+        (item #6).
+        """
         existing = self._indexed_artifact_ids()
         if record.artifact_id in existing:
             return
         payload = json.loads(record.model_dump_json(by_alias=True))
-        self._append_registry(entry_kind, payload)
+        self._append_registry(entry_kind, payload, hold_lock=hold_lock)
 
-    def _append_registry(self, entry_kind: str, payload: dict[str, Any]) -> RegistryEntry:
+    def _append_registry(
+        self, entry_kind: str, payload: dict[str, Any], *, hold_lock: bool = False
+    ) -> RegistryEntry:
         try:
+            if hold_lock:
+                # Caller already holds the attempt lock; use the lock-free inner
+                # append to avoid re-acquiring the non-reentrant lock.
+                return _append_under_lock(
+                    self._registry_path,
+                    run_id=self._identity.run_id,
+                    attempt_id=self._identity.attempt_id,
+                    specification_fingerprint=self.specification_fingerprint,
+                    entry_kind=entry_kind,
+                    payload=payload,
+                    recorded_at_utc=datetime.now(UTC),
+                )
             return allocate_and_append(
                 self._registry_path,
                 lock_path=self._lock_path,
@@ -699,19 +1059,17 @@ class ArtifactStore:
             raise ArtifactStoreError(f"registry append failed: {e}") from e
 
     def _indexed_artifact_ids(self) -> set[str]:
-        entries = self._load_registry_safe()
+        entries = self._load_registry()
         return {e.payload["artifact_id"] for e in entries if "artifact_id" in e.payload}
 
-    def _load_registry_safe(self) -> list[RegistryEntry]:
-        try:
-            return load_registry(
-                self._registry_path,
-                expected_run_id=self._identity.run_id,
-                expected_attempt_id=self._identity.attempt_id,
-                expected_fingerprint=self.specification_fingerprint,
-            )
-        except RegistryError:
-            return []
+    def _load_registry(self) -> list[RegistryEntry]:
+        """Authoritative registry read. Propagates :class:`RegistryError` (item #1)."""
+        return load_registry(
+            self._registry_path,
+            expected_run_id=self._identity.run_id,
+            expected_attempt_id=self._identity.attempt_id,
+            expected_fingerprint=self.specification_fingerprint,
+        )
 
     # -- locate / list / inspect ------------------------------------------
 
@@ -740,25 +1098,25 @@ class ArtifactStore:
         return content if content.exists() else None
 
     def _current_record(self, artifact_id: str) -> ArtifactRecord | None:
-        """The last-known registry state for ``artifact_id`` (None if unindexed)."""
-        entries = self._load_registry_safe()
-        try:
-            histories = _reduce_history(entries)
-        except RegistryError:
-            return None
+        """The last-known registry state for ``artifact_id`` (None if unindexed).
+
+        Authoritative read: a corrupt/incomplete registry propagates
+        :class:`RegistryError` (mapped to :class:`ArtifactStoreError` by callers
+        that need a typed store error).
+        """
+        entries = self._load_registry()
+        histories = _reduce_history(entries)
         hist = histories.get(artifact_id)
         return hist.record if hist else None
 
     def list_artifacts(self, *, category: str | None = None) -> list[ArtifactRecord]:
         """All indexed artifacts, optionally filtered by category.
 
-        Returns the last-known registry state per artifact_id.
+        Returns the last-known registry state per artifact_id. An authoritative
+        registry read that propagates registry corruption (item #1).
         """
-        entries = self._load_registry_safe()
-        try:
-            histories = _reduce_history(entries)
-        except RegistryError:
-            return []
+        entries = self._load_registry()
+        histories = _reduce_history(entries)
         out: list[ArtifactRecord] = []
         for hist in histories.values():
             if category is not None and hist.record.category != category:
@@ -769,7 +1127,7 @@ class ArtifactStore:
 
     def inspect(self, artifact_id: str) -> ArtifactRecord | ExternalReference:
         """The registry-indexed record (or external reference) for ``artifact_id``."""
-        entries = self._load_registry_safe()
+        entries = self._load_registry()
         try:
             histories = _reduce_history(entries)
         except RegistryError as e:
@@ -805,13 +1163,31 @@ class ArtifactStore:
                 artifact_id=artifact_id,
                 diagnostic_code="bundle_metadata_mismatch",
             )
-        if _is_symlink(content) or _is_symlink(bdir):
+        if _is_symlink(content) or _is_symlink(bdir) or _is_symlink(meta_path):
             return VerificationResult(
                 status=False,
                 artifact_id=artifact_id,
                 diagnostic_code="not_regular_file",
             )
-        record = _record_from_bundle_bytes(meta_path.read_bytes())
+        # Read artifact.json through a symlink-safe open (item #5).
+        try:
+            meta_bytes = _read_bytes_no_follow(meta_path)
+        except ArtifactConflictError:
+            return VerificationResult(
+                status=False,
+                artifact_id=artifact_id,
+                diagnostic_code="not_regular_file",
+            )
+        try:
+            record = _record_from_bundle_bytes(meta_bytes)
+        except ArtifactStoreError:
+            # Non-canonical or semantically-inconsistent metadata (item #4) is a
+            # bundle metadata mismatch, surfaced as a typed verification result.
+            return VerificationResult(
+                status=False,
+                artifact_id=artifact_id,
+                diagnostic_code="bundle_metadata_mismatch",
+            )
         if record.artifact_id != artifact_id:
             return VerificationResult(
                 status=False,
@@ -832,24 +1208,20 @@ class ArtifactStore:
                 artifact_id=artifact_id,
                 diagnostic_code="missing_content",
             )
-        # Regular file check.
+        # Open content via the symlink-safe path and fstat-verify it is a regular
+        # file before hashing (item #5).
         try:
-            st = os.stat(content)
-        except OSError:
-            return VerificationResult(
-                status=False,
-                artifact_id=artifact_id,
-                diagnostic_code="missing_content",
-            )
-        import stat as _stat
-
-        if not _stat.S_ISREG(st.st_mode):
+            content_fd = _open_read_no_follow(content)
+        except ArtifactConflictError:
             return VerificationResult(
                 status=False,
                 artifact_id=artifact_id,
                 diagnostic_code="not_regular_file",
             )
-        digest, size = _hash_path(content)
+        try:
+            digest, size = self._hash_fd(content_fd)
+        finally:
+            os.close(content_fd)
         if digest != record.content_digest:
             return VerificationResult(
                 status=False,
@@ -875,11 +1247,8 @@ class ArtifactStore:
         )
 
     def _current_external(self, artifact_id: str) -> ExternalReference | None:
-        entries = self._load_registry_safe()
-        try:
-            histories = _reduce_history(entries)
-        except RegistryError:
-            return None
+        entries = self._load_registry()
+        histories = _reduce_history(entries)
         hist = histories.get(artifact_id)
         return hist.external if hist else None
 
@@ -894,6 +1263,14 @@ class ArtifactStore:
 
         Legal transitions are validated by the registry loader; illegal
         transitions raise :class:`ArtifactConflictError`.
+
+        This is a retention-only update: the artifact's ``storage_class`` is
+        **not** changed here (item #8). Marking an artifact ``missing`` or
+        ``expired`` is a retention-status change only; moving bytes out of the
+        canonical store requires a separate, explicit storage-class transition
+        with its own validation. When marking ``missing``, the content file must
+        actually be absent (no canonical bytes) — if it is still present, the
+        transition is refused with a typed error.
         """
         current = self._current_record(artifact_id)
         if current is None:
@@ -902,18 +1279,22 @@ class ArtifactStore:
             raise ArtifactConflictError(
                 f"illegal retention transition {current.retention!r} -> {retention!r}."
             )
-        # Storage class is unchanged on a pure retention transition unless the
-        # target retention requires a different storage class.
+        # Storage class is unchanged on a pure retention transition. The payload
+        # carries the unchanged storage_class so the registry's transition
+        # validation sees a no-op storage transition (item #8).
         new_storage = current.storage_class
-        # ``metadata_only`` is required when content becomes missing/expired
-        # and no local/external bytes back it.
-        if retention in ("missing", "expired") and new_storage == "canonical_local":
-            new_storage = "metadata_only"
-        if not is_legal_storage_transition(current.storage_class, new_storage):
-            raise ArtifactConflictError(
-                f"illegal storage transition {current.storage_class!r} -> {new_storage!r}."
-            )
-        # Validate the resulting (storage, retention) combination via the
+        # When marking missing, require the canonical content file to be absent
+        # (otherwise the "missing" retention would assert a false physical
+        # state). External/metadata_only artifacts have no local content, so
+        # they may be marked missing without a content check.
+        if retention == "missing":
+            content = self.locate(artifact_id)
+            if content is not None:
+                raise ArtifactConflictError(
+                    f"cannot mark artifact {artifact_id!r} missing: canonical content "
+                    f"is still present at {content} (item #8)."
+                )
+        # Validate the resulting (storage_class, retention) combination via the
         # record constructor (raises on illegal combos).
         current.model_copy(update={"storage_class": new_storage, "retention": retention})
         # Re-validate cross-field invariants explicitly.
@@ -957,10 +1338,11 @@ class ArtifactStore:
                 # Strictly validate the bundle before appending.
                 meta_path = bundle / "artifact.json"
                 content_path = bundle / "content"
+                ext_path = bundle / "external.json"
                 try:
                     if not meta_path.exists():
                         raise ValueError("missing artifact.json")
-                    record = _record_from_bundle_bytes(meta_path.read_bytes())
+                    record = _record_from_bundle_bytes(_read_bytes_no_follow(meta_path))
                     if record.artifact_id != artifact_id:
                         raise ValueError("artifact_id mismatch")
                     if record.category != category:
@@ -971,16 +1353,39 @@ class ArtifactStore:
                         raise ValueError("attempt_id mismatch")
                     if record.specification_fingerprint != self.specification_fingerprint:
                         raise ValueError("fingerprint mismatch")
-                    # Verify content if present (external bundles have none).
-                    if content_path.exists():
-                        if _is_symlink(content_path):
-                            raise ValueError("content is a symlink")
-                        digest, size = _hash_path(content_path)
-                        if digest != record.content_digest:
-                            raise ValueError("content digest mismatch")
-                        if size != record.byte_size:
-                            raise ValueError("content size mismatch")
-                except (ValueError, ArtifactStoreError) as e:
+                    has_content = content_path.exists()
+                    has_external = ext_path.exists()
+                    # A bundle with neither content nor an external.json sidecar
+                    # carries no recoverable bytes and cannot be reconciled
+                    # (item #7: unrecoverable).
+                    if not has_content and not has_external:
+                        raise ValueError("bundle has neither content nor external.json")
+                    if has_external:
+                        # External bundle: validate the external.json sidecar and
+                        # reconstruct the external_registration payload.
+                        ext = self._load_external_sidecar(ext_path)
+                        if ext.artifact_id != artifact_id:
+                            raise ValueError("external.json artifact_id mismatch")
+                        if ext.run_id != self._identity.run_id:
+                            raise ValueError("external.json run_id mismatch")
+                        if ext.attempt_id != self._identity.attempt_id:
+                            raise ValueError("external.json attempt_id mismatch")
+                        if ext.specification_fingerprint != self.specification_fingerprint:
+                            raise ValueError("external.json fingerprint mismatch")
+                        payload = self._external_registration_payload(record, ext)
+                        self._append_registry("external_registration", payload)
+                        appended.append(artifact_id)
+                        indexed.add(artifact_id)
+                        continue
+                    # Local bundle with content: verify the payload.
+                    if _is_symlink(content_path):
+                        raise ValueError("content is a symlink")
+                    digest, size = _hash_path(content_path)
+                    if digest != record.content_digest:
+                        raise ValueError("content digest mismatch")
+                    if size != record.byte_size:
+                        raise ValueError("content size mismatch")
+                except (ValueError, ArtifactStoreError, ArtifactConflictError) as e:
                     skipped.append((artifact_id, str(e)))
                     continue
                 payload = json.loads(record.model_dump_json(by_alias=True))

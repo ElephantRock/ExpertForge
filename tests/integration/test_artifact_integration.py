@@ -232,23 +232,17 @@ class TestTelemetryRegistration:
         return w.path
 
     def test_complete_telemetry_registered_as_artifact(self, tmp_path: Path) -> None:
-        from expertforge.telemetry.loader import load_telemetry_stream
         from expertforge.telemetry.models import ProcessContext
 
         store = make_store(tmp_path)
         stream_path = self._write_stream(store)
-        # Use the public loader to verify the stream is complete.
         ctx = ProcessContext(rank=0, world_size=1, local_rank=0)
-        records = load_telemetry_stream(
-            stream_path, expected_identity=store.identity, expected_process_context=ctx
-        )
-        assert len(records) >= 2  # opened + at least one record + closed
-        # Register the verified stream byte-for-byte as a telemetry artifact.
-        rec = store.register_existing(
+        # Register the verified stream through the enforced telemetry path: the
+        # public loader verifies completeness, then the bytes are copied into a
+        # canonical telemetry bundle (item #9).
+        rec = store.register_telemetry(
             stream_path,
-            category="telemetry",
-            format="jsonl",
-            format_version=1,
+            process_context=ctx,
             producing_component="logging",
         )
         assert rec.category == "telemetry"
@@ -258,7 +252,7 @@ class TestTelemetryRegistration:
         assert content.read_bytes() == stream_path.read_bytes()
 
     def test_incomplete_telemetry_rejected_for_canonical_registration(self, tmp_path: Path) -> None:
-        from expertforge.telemetry.loader import TelemetryLoadError, load_telemetry_stream
+        from expertforge.artifacts.store import ArtifactStoreError
         from expertforge.telemetry.models import ProcessContext
 
         store = make_store(tmp_path)
@@ -267,11 +261,13 @@ class TestTelemetryRegistration:
         # Truncate the stream to simulate an incomplete stream.
         raw = stream_path.read_bytes()
         stream_path.write_bytes(raw[:-5])
-        # The public loader rejects the incomplete stream: this is the boundary
-        # a caller must pass before canonical registration.
-        with pytest.raises(TelemetryLoadError):
-            load_telemetry_stream(
-                stream_path, expected_identity=store.identity, expected_process_context=ctx
+        # register_telemetry enforces canonical verification end-to-end: an
+        # incomplete stream is rejected with a typed store error (item #9).
+        with pytest.raises(ArtifactStoreError):
+            store.register_telemetry(
+                stream_path,
+                process_context=ctx,
+                producing_component="logging",
             )
 
 

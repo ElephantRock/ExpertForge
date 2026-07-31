@@ -119,7 +119,10 @@ class AttemptLock(AbstractContextManager["AttemptLock"]):
                 "Windows advisory locks (msvcrt) are unavailable on this platform."
             )
         self._ensure_parent()
-        flags = os.O_RDWR | os.O_CREAT | os.O_BINARY
+        # ``os.O_BINARY`` only exists on Windows; guard with ``getattr`` so mypy
+        # is clean on both Linux and Windows typesheds (the Linux stub does not
+        # declare O_BINARY even though this branch only runs on Windows).
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
         fd = os.open(self._lock_path, flags, 0o600)
         # Lock byte 0 exclusively. Retry briefly to avoid spurious failures
         # under contention (msvcrt.locking raises on contention rather than
