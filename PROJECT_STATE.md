@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #9 complete, #10 available next, #13 Phase A CI foundation active.
+Last updated: Milestone 0 in progress; #10 complete, #11 available next, #13 Phase A CI foundation active.
 
 ## Current milestone
 
@@ -41,15 +41,13 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#10 — M0.7 artifact management and content hashing — available next.** Its
-  #6 and #9 dependencies are complete; its completion unlocks #11.
+- **#11 — M0.8 checkpoint serialization and exact restoration — available next.**
+  Its #5/#6/#8/#10 dependencies are complete; its completion unlocks #12.
 - **#13 — M0.10 test/CI harness — in progress.** Phase A merged via PR #21,
   squash commit `aaa31187d5d6b63671ee96df14a85a75b125f068`: permanent read-only CI,
   strict fast/integration/smoke/accelerator tiers, pinned toolchain, and
   repository-native policy checks are active. #13 remains open until the full
   Milestone 0 component and integration suite is present.
-- **#11 — checkpoint serialization and exact restoration** has its #5/#6/#8
-  dependencies satisfied, but still waits for #10 artifact management.
 - **#12 — experiment manifests** follows #5/#6/#7/#9/#10/#11; **#14 — smoke and
   recovery gate** remains last.
 - #3 umbrella remains open.
@@ -69,6 +67,12 @@ order (see #3 for the full graph):
   durable writer lifecycle, authoritative loading/diagnostic scanning, structural
   redaction, severity filtering, and permanent fast/integration coverage are in
   place.
+- **#10 — M0.7 artifact management and content hashing — completed** via PR #32,
+  squash commit `fa4a82d1da1f49a29ebe310bb6d531144a12fa6a`. Strict immutable artifact,
+  registry, and external-reference schemas; deterministic content-addressed
+  bundles; atomic publication; lock-serialized append-only registry mutation;
+  typed verification; telemetry registration; external recovery; retention
+  transitions; path safety; and permanent fast/integration coverage are in place.
 
 ## Open pull requests
 
@@ -76,12 +80,13 @@ order (see #3 for the full graph):
 
 ## Known blockers
 
-- #10 has no remaining dependency blocker and may proceed. Its PR must extend the
-  permanent #13 fast/integration tiers with artifact component coverage.
-- #11 waits for #10.
+- #11 has no remaining dependency blocker and may proceed. Its PR must publish
+  checkpoint artifacts through #10 and extend the permanent #13 fast/integration
+  tiers with exact-restoration, corruption, compatibility, lineage, and
+  deterministic-continuation coverage.
 - #13 remains open as a cross-cutting integration responsibility, not a blocker
-  to beginning #10.
-- #12 waits for #10/#11; #14 waits for the complete Milestone 0 substrate.
+  to beginning #11.
+- #12 waits for #11; #14 waits for the complete Milestone 0 substrate.
 
 ## Latest accepted experiment
 
@@ -92,13 +97,12 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#10 (artifact management and content hashing)** — the sole next
-   implementation issue on the persistence critical path.
-2. After #10, implement **#11 (checkpoint serialization and exact restoration)**.
-3. Continue **#13** incrementally as #10–#12 land; do not close it until the full
+1. Begin **#11 (checkpoint serialization and exact restoration)** — the sole
+   next implementation issue on the persistence critical path.
+2. After #11, implement **#12 (experiment manifests)**.
+3. Continue **#13** incrementally as #11–#12 land; do not close it until the full
    Milestone 0 suite, schema checks, and exact commands satisfy its issue contract.
-4. After #11, implement **#12 (manifests)**, then complete **#14
-   (smoke-and-recovery gate)** last.
+4. Complete **#14 (smoke-and-recovery gate)** strictly last.
 5. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
 
