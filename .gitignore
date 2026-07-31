@@ -35,6 +35,13 @@ coverage.xml
 runs/
 outputs/
 artifacts/
+# Track the Issue #10 artifact-management source package: the broad `artifacts/`
+# rule above is meant for generated run-output directories, not the versioned
+# `src/expertforge/artifacts/` import package. Re-exclude Python caches so the
+# negation does not pull __pycache__ back in.
+!src/expertforge/artifacts/
+!src/expertforge/artifacts/**
+src/expertforge/artifacts/__pycache__/
 checkpoints/
 *.ckpt
 *.pt
