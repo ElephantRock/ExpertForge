@@ -1254,6 +1254,12 @@ class ArtifactStore:
                 artifact_id=artifact_id,
                 diagnostic_code="missing_bundle",
             )
+        except ArtifactConflictError:
+            return VerificationResult(
+                status=False,
+                artifact_id=artifact_id,
+                diagnostic_code="identity_binding_mismatch",
+            )
         content = bdir / "content"
         meta_path = bdir / "artifact.json"
         if not meta_path.exists():
