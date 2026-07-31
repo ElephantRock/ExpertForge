@@ -167,12 +167,7 @@ def test_initial_validation_failure_removes_exclusive_path(tmp_path: Path) -> No
             monotonic_clock=_Clock(),
         )
     path = (
-        tmp_path
-        / _RUN_ID
-        / "attempts"
-        / _ATTEMPT_ID
-        / "logs"
-        / "telemetry-rank-0000000000.jsonl"
+        tmp_path / _RUN_ID / "attempts" / _ATTEMPT_ID / "logs" / "telemetry-rank-0000000000.jsonl"
     )
     assert not path.exists()
     retry = _writer(tmp_path)
@@ -385,9 +380,7 @@ def test_scan_enforces_open_record_and_constant_internal_binding(tmp_path: Path)
     switched = json.loads(raw_lines[1])
     switched["attempt_id"] = "attempt-switched"
     switched_path = tmp_path / "switched.jsonl"
-    switched_path.write_bytes(
-        raw_lines[0] + b"\n" + _canonical(switched) + raw_lines[-1] + b"\n"
-    )
+    switched_path.write_bytes(raw_lines[0] + b"\n" + _canonical(switched) + raw_lines[-1] + b"\n")
     assert scan_telemetry_stream(switched_path).status == "corrupt"
 
 
