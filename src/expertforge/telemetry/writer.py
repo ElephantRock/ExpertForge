@@ -186,8 +186,7 @@ class TelemetryWriter:
         if fields_redacted or message_redacted:
             if diagnostic_code not in {None, "redacted_sensitive_value"}:
                 raise ValueError(
-                    "redaction cannot replace an unrelated diagnostic_code; "
-                    "emit separate events."
+                    "redaction cannot replace an unrelated diagnostic_code; emit separate events."
                 )
             diagnostic_code = "redacted_sensitive_value"
 
@@ -512,9 +511,7 @@ class TelemetryWriter:
         if self._closed:
             raise WriterClosedError("telemetry writer is closed.")
 
-    def _terminal_failure(
-        self, message: str, cause: BaseException | None = None
-    ) -> NoReturn:
+    def _terminal_failure(self, message: str, cause: BaseException | None = None) -> NoReturn:
         self._failed = True
         self._close_fd_silently()
         error = WriterFailedError(message)

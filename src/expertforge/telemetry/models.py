@@ -261,9 +261,7 @@ def sanitize_persisted_string(value: str, *, truncate: bool = False) -> tuple[st
         raise ValueError("persisted string contains forbidden control characters.")
     original = value
     sanitized = _RE_URL.sub(_sanitize_url, value)
-    sanitized = _RE_KV_SECRET.sub(
-        lambda match: f"{match.group(1)}=[redacted]", sanitized
-    )
+    sanitized = _RE_KV_SECRET.sub(lambda match: f"{match.group(1)}=[redacted]", sanitized)
     sanitized = _RE_IPV4.sub("[redacted]", sanitized)
     sanitized = _RE_IPV6.sub("[redacted]", sanitized)
     sanitized = _RE_HOME_PATH.sub("[redacted]", sanitized)
@@ -271,8 +269,7 @@ def sanitize_persisted_string(value: str, *, truncate: bool = False) -> tuple[st
     sanitized = _RE_UNIX_ABS_PATH.sub("[redacted]", sanitized)
     sanitized = _RE_DEVICE_UUID.sub("[redacted]", sanitized)
     sanitized = _RE_HOST_ASSIGNMENT.sub(
-        lambda match: match.group(0).split("=", 1)[0].split(":", 1)[0]
-        + "=[redacted]",
+        lambda match: match.group(0).split("=", 1)[0].split(":", 1)[0] + "=[redacted]",
         sanitized,
     )
     if truncate and len(sanitized) > MAX_PERSISTED_STRING:
@@ -468,13 +465,11 @@ class EventRecord(_RecordBase):
         replacement_present = (
             self.operator_message is not None and "[redacted]" in self.operator_message
         ) or any(
-            isinstance(field.value, str) and "[redacted]" in field.value
-            for field in self.fields
+            isinstance(field.value, str) and "[redacted]" in field.value for field in self.fields
         )
         if replacement_present and self.diagnostic_code != "redacted_sensitive_value":
             raise ValueError(
-                "redacted persisted strings require diagnostic_code "
-                "'redacted_sensitive_value'."
+                "redacted persisted strings require diagnostic_code 'redacted_sensitive_value'."
             )
 
         if self.event_name == "logging.stream_opened":
@@ -597,9 +592,7 @@ def metric_semantic_key(
 
 
 class MetricRecord(_RecordBase):
-    schema_name: Literal["expertforge.metric-record"] = Field(
-        default=METRIC_SCHEMA, alias="schema"
-    )
+    schema_name: Literal["expertforge.metric-record"] = Field(default=METRIC_SCHEMA, alias="schema")
     schema_version: int = Field(default=METRIC_SCHEMA_VERSION)
     observations: tuple[MetricObservation, ...] = Field(..., min_length=1)
 
@@ -613,9 +606,7 @@ class MetricRecord(_RecordBase):
     @model_validator(mode="after")
     def _observation_invariants(self) -> MetricRecord:
         if len(self.observations) > MAX_METRIC_OBSERVATIONS:
-            raise ValueError(
-                f"metric observations exceed max {MAX_METRIC_OBSERVATIONS}."
-            )
+            raise ValueError(f"metric observations exceed max {MAX_METRIC_OBSERVATIONS}.")
         keys = tuple(metric_semantic_key(observation) for observation in self.observations)
         if keys != tuple(sorted(keys)):
             raise ValueError("metric observations must use canonical semantic order.")

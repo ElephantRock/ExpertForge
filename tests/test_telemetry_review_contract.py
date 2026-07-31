@@ -96,20 +96,31 @@ def _records(path: Path) -> list[dict[str, Any]]:
 
 
 def _canonical(data: dict[str, Any]) -> bytes:
-    return json.dumps(
-        data,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8") + b"\n"
+    return (
+        json.dumps(
+            data,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
 
 
 def test_writer_cannot_append_elapsed_regression(tmp_path: Path) -> None:
     writer = _writer(tmp_path, monotonic=_Clock(0, 10, 5))
-    writer.emit_event(component="training", severity="INFO", event_name="training.update")
+    writer.emit_event(
+        component="training",
+        severity="INFO",
+        event_name="training.update",
+    )
     before = writer.path.read_bytes()
     with pytest.raises(WriterFailedError, match="regressed"):
-        writer.emit_event(component="training", severity="INFO", event_name="training.update")
+        writer.emit_event(
+            component="training",
+            severity="INFO",
+            event_name="training.update",
+        )
     assert writer.path.read_bytes() == before
     loaded = load_telemetry_stream(
         writer.path,
@@ -187,7 +198,11 @@ def test_terminal_console_failure_does_not_append_after_close(tmp_path: Path) ->
 def test_console_short_write_degrades_once(tmp_path: Path) -> None:
     console = _Console(1, short=True)
     writer = _writer(tmp_path, console=console)
-    writer.emit_event(component="training", severity="INFO", event_name="training.update")
+    writer.emit_event(
+        component="training",
+        severity="INFO",
+        event_name="training.update",
+    )
     writer.close("normal")
     diagnostics = [
         record
@@ -199,10 +214,12 @@ def test_console_short_write_degrades_once(tmp_path: Path) -> None:
 
 
 def test_context_manager_records_unhandled_exception_as_failed(tmp_path: Path) -> None:
+    path: Path | None = None
     with pytest.raises(RuntimeError):
         with _writer(tmp_path) as writer:
             path = writer.path
             raise RuntimeError("not persisted")
+    assert path is not None
     loaded = load_telemetry_stream(
         path,
         expected_identity=_identity(),
@@ -216,8 +233,16 @@ def test_context_manager_records_unhandled_exception_as_failed(tmp_path: Path) -
 
 def test_severity_filter_preserves_metrics_and_sequence(tmp_path: Path) -> None:
     writer = _writer(tmp_path, level="WARNING")
-    writer.emit_event(component="training", severity="DEBUG", event_name="training.debug")
-    writer.emit_event(component="training", severity="INFO", event_name="training.info")
+    writer.emit_event(
+        component="training",
+        severity="DEBUG",
+        event_name="training.debug",
+    )
+    writer.emit_event(
+        component="training",
+        severity="INFO",
+        event_name="training.info",
+    )
     writer.emit_metric(
         component="training",
         observations=(
@@ -269,7 +294,10 @@ def test_complete_metric_semantic_key_allows_distinct_meanings(tmp_path: Path) -
         ),
     )
     writer = _writer(tmp_path)
-    writer.emit_metric(component="training", observations=tuple(reversed(observations)))
+    writer.emit_metric(
+        component="training",
+        observations=tuple(reversed(observations)),
+    )
     writer.close("normal")
     loaded = load_telemetry_stream(
         writer.path,
@@ -308,7 +336,9 @@ def test_query_bearing_url_uses_explicit_redaction_marker() -> None:
     assert sanitized == "[redacted]"
 
 
-def test_loader_rejects_noncanonical_timestamp_and_oversized_line(tmp_path: Path) -> None:
+def test_loader_rejects_noncanonical_timestamp_and_oversized_line(
+    tmp_path: Path,
+) -> None:
     writer = _writer(tmp_path)
     writer.close("normal")
     raw_lines = writer.path.read_bytes().splitlines()
@@ -337,7 +367,11 @@ def test_loader_rejects_noncanonical_timestamp_and_oversized_line(tmp_path: Path
 
 def test_scan_enforces_open_record_and_constant_internal_binding(tmp_path: Path) -> None:
     writer = _writer(tmp_path)
-    writer.emit_event(component="training", severity="INFO", event_name="training.update")
+    writer.emit_event(
+        component="training",
+        severity="INFO",
+        event_name="training.update",
+    )
     writer.close("normal")
     raw_lines = writer.path.read_bytes().splitlines()
 
@@ -377,4 +411,5 @@ def test_loader_rejects_malformed_close_shape(tmp_path: Path) -> None:
 def test_zero_microseconds_are_serialized_fixed_width(tmp_path: Path) -> None:
     writer = _writer(tmp_path)
     writer.close("normal")
-    assert b'"timestamp_utc":"2026-01-01T00:00:00.000000Z"' in writer.path.read_bytes()
+    expected = b'"timestamp_utc":"2026-01-01T00:00:00.000000Z"'
+    assert expected in writer.path.read_bytes()

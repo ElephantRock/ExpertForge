@@ -28,9 +28,7 @@ Binding: TypeAlias = tuple[str, str, str, int, int | None, int]
 
 _OPEN_EVENT = "logging.stream_opened"
 _CLOSE_EVENT = "logging.stream_closed"
-_CANONICAL_TIMESTAMP = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$"
-)
+_CANONICAL_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 _PROGRESS_FIELDS = ("step", "update", "processed_tokens")
 
 
@@ -95,9 +93,7 @@ def _split_records(raw: bytes) -> tuple[list[bytes], bool]:
 
 def _parse_line(line: bytes) -> Record:
     if len(line) + 1 > MAX_RECORD_BYTES:
-        raise _ParseFailure(
-            f"record size {len(line) + 1} exceeds {MAX_RECORD_BYTES} bytes."
-        )
+        raise _ParseFailure(f"record size {len(line) + 1} exceeds {MAX_RECORD_BYTES} bytes.")
     try:
         text = line.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -144,9 +140,7 @@ def _binding(record: Record) -> Binding:
     )
 
 
-def _expected_binding(
-    identity: AttemptIdentityRecord, process_context: ProcessContext
-) -> Binding:
+def _expected_binding(identity: AttemptIdentityRecord, process_context: ProcessContext) -> Binding:
     return (
         identity.run_id,
         identity.attempt_id,
@@ -240,9 +234,7 @@ def load_telemetry_stream(
         try:
             record = _parse_line(line)
         except _ParseFailure as exc:
-            raise TelemetryLoadError(
-                f"telemetry stream line {line_number}: {exc}"
-            ) from exc
+            raise TelemetryLoadError(f"telemetry stream line {line_number}: {exc}") from exc
         if line_number == 1 and not _is_open(record):
             raise TelemetryLoadError("first record must be logging.stream_opened.")
         if _binding(record) != expected:
