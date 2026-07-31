@@ -40,9 +40,7 @@ def validate_id_component(value: str, kind: str) -> None:
         raise PathSafetyError(f"{kind} must be non-empty.")
     bad_chars = {os.sep, "/", "\\"}
     if any(ch in value for ch in bad_chars) or ".." in value or value in {".", ".."}:
-        raise PathSafetyError(
-            f"{kind} {value!r} contains a path separator or traversal component."
-        )
+        raise PathSafetyError(f"{kind} {value!r} contains a path separator or traversal component.")
 
 
 def attempt_dir(artifact_root: Path, run_id: str, attempt_id: str) -> Path:
@@ -121,7 +119,5 @@ def resolve_within_root(root: Path, *parts: str) -> Path:
     try:
         cand_norm.relative_to(root_norm)
     except ValueError as e:
-        raise PathSafetyError(
-            f"resolved path {candidate} escapes root {root}"
-        ) from e
+        raise PathSafetyError(f"resolved path {candidate} escapes root {root}") from e
     return candidate

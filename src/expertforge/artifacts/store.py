@@ -24,37 +24,28 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from expertforge.artifacts.external import ExternalLocationError
-from expertforge.artifacts.locks import AttemptLock, LockUnavailableError
 from expertforge.artifacts.models import (
-    ARTIFACT_BUNDLE_SCHEMA,
     ARTIFACT_BUNDLE_SCHEMA_VERSION,
     ArtifactConflictError,
     ArtifactDescriptor,
-    ArtifactFormat,
     ArtifactNotFoundError,
     ArtifactRecord,
-    EntryKind,
-    ExternalLocationType,
     ExternalReference,
     ParentReference,
     RegistryEntry,
     RetentionStatus,
-    VerificationDiagnosticCode,
     VerificationResult,
-    canonical_timestamp,
     descriptor_to_artifact_id,
     is_legal_retention_transition,
     is_legal_storage_transition,
 )
 from expertforge.artifacts.paths import (
-    PathSafetyError,
     artifact_bundle_dir,
     attempt_dir,
     category_dir,
@@ -64,7 +55,6 @@ from expertforge.artifacts.registry import (
     RegistryError,
     _reduce_history,
     allocate_and_append,
-    compute_next_sequence,
     load_registry,
     registry_path_for_attempt,
 )
@@ -258,9 +248,7 @@ class ArtifactStore:
     def __init__(self, artifact_root: Path, identity: AttemptIdentityRecord) -> None:
         self._artifact_root = Path(artifact_root)
         self._identity = identity
-        self._attempt_dir = attempt_dir(
-            self._artifact_root, identity.run_id, identity.attempt_id
-        )
+        self._attempt_dir = attempt_dir(self._artifact_root, identity.run_id, identity.attempt_id)
         self._registry_path = registry_path_for_attempt(
             self._artifact_root, identity.run_id, identity.attempt_id
         )
@@ -366,9 +354,7 @@ class ArtifactStore:
                 parent=parent,
             )
             artifact_id = descriptor_to_artifact_id(descriptor)
-            relative_path = (
-                f"artifacts/{category}/{artifact_id}"
-            )
+            relative_path = f"artifacts/{category}/{artifact_id}"
             record = ArtifactRecord.from_descriptor(
                 descriptor,
                 created_at_utc=datetime.now(UTC),
@@ -416,9 +402,7 @@ class ArtifactStore:
 
     def _make_temp_bundle_dir(self, parent: Path) -> Path:
         # Unique temp bundle directory beneath the category directory.
-        return Path(
-            tempfile.mkdtemp(prefix=".tmp-bundle-", dir=parent)
-        )
+        return Path(tempfile.mkdtemp(prefix=".tmp-bundle-", dir=parent))
 
     def _write_content(self, content_path: Path, content: bytes | Path) -> tuple[str, int]:
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
@@ -635,9 +619,7 @@ class ArtifactStore:
         self._append_registry("external_registration", payload)
         return ext
 
-    def _write_metadata_only_bundle(
-        self, record: ArtifactRecord, ext: ExternalReference
-    ) -> None:
+    def _write_metadata_only_bundle(self, record: ArtifactRecord, ext: ExternalReference) -> None:
         bdir = artifact_bundle_dir(
             self._artifact_root,
             self._identity.run_id,
@@ -675,9 +657,7 @@ class ArtifactStore:
     ) -> None:
         meta_path = bdir / "artifact.json"
         if not meta_path.exists():
-            raise ArtifactConflictError(
-                f"existing bundle {bdir} is missing artifact.json."
-            )
+            raise ArtifactConflictError(f"existing bundle {bdir} is missing artifact.json.")
         existing = _record_from_bundle_bytes(meta_path.read_bytes())
         if _immutable_identity(existing) != _immutable_identity(record):
             raise ArtifactConflictError(
@@ -909,9 +889,7 @@ class ArtifactStore:
 
     # -- update_retention --------------------------------------------------
 
-    def update_retention(
-        self, artifact_id: str, retention: RetentionStatus
-    ) -> ArtifactRecord:
+    def update_retention(self, artifact_id: str, retention: RetentionStatus) -> ArtifactRecord:
         """Append a retention_transition entry (amendment F closed matrix).
 
         Legal transitions are validated by the registry loader; illegal
@@ -937,9 +915,7 @@ class ArtifactStore:
             )
         # Validate the resulting (storage, retention) combination via the
         # record constructor (raises on illegal combos).
-        new_record = current.model_copy(
-            update={"storage_class": new_storage, "retention": retention}
-        )
+        current.model_copy(update={"storage_class": new_storage, "retention": retention})
         # Re-validate cross-field invariants explicitly.
         ArtifactRecord._check_storage_retention(new_storage, retention)
         payload = {
@@ -966,9 +942,7 @@ class ArtifactStore:
         orphans: list[str] = []
         skipped: list[tuple[str, str]] = []
         if not arts.exists():
-            return RegistryReconciliation(
-                appended=appended, orphans=orphans, skipped=skipped
-            )
+            return RegistryReconciliation(appended=appended, orphans=orphans, skipped=skipped)
         for cat_dir in sorted(arts.iterdir()):
             if not cat_dir.is_dir():
                 continue
@@ -995,10 +969,7 @@ class ArtifactStore:
                         raise ValueError("run_id mismatch")
                     if record.attempt_id != self._identity.attempt_id:
                         raise ValueError("attempt_id mismatch")
-                    if (
-                        record.specification_fingerprint
-                        != self.specification_fingerprint
-                    ):
+                    if record.specification_fingerprint != self.specification_fingerprint:
                         raise ValueError("fingerprint mismatch")
                     # Verify content if present (external bundles have none).
                     if content_path.exists():
@@ -1016,9 +987,7 @@ class ArtifactStore:
                 self._append_registry("initial_publication", payload)
                 appended.append(artifact_id)
                 indexed.add(artifact_id)
-        return RegistryReconciliation(
-            appended=appended, orphans=orphans, skipped=skipped
-        )
+        return RegistryReconciliation(appended=appended, orphans=orphans, skipped=skipped)
 
     # -- validation helpers ------------------------------------------------
 

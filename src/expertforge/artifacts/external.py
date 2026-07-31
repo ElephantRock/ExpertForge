@@ -69,8 +69,7 @@ def reject_credential_bearing_location(
             )
         if fragment:
             raise ExternalLocationError(
-                "URI fragments are forbidden in external locations; "
-                "rejected, not sanitized."
+                "URI fragments are forbidden in external locations; rejected, not sanitized."
             )
         return
 
@@ -111,17 +110,11 @@ def reject_credential_bearing_location(
             )
         components = normalized.split("/")
         if any(part in ("..", ".") for part in components):
-            raise ExternalLocationError(
-                "filesystem_path must not contain '.' or '..' components."
-            )
+            raise ExternalLocationError("filesystem_path must not contain '.' or '..' components.")
         if any(part == "" for part in components):
-            raise ExternalLocationError(
-                "filesystem_path must not contain empty components."
-            )
+            raise ExternalLocationError("filesystem_path must not contain empty components.")
         if not _REL_PATH_PATTERN.fullmatch(normalized):
-            raise ExternalLocationError(
-                "filesystem_path must be canonical portable relative form."
-            )
+            raise ExternalLocationError("filesystem_path must be canonical portable relative form.")
         return
 
     raise ExternalLocationError(f"unknown location_type {location_type!r}.")

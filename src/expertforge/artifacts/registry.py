@@ -50,6 +50,7 @@ __all__ = [
     "RegistryError",
     "RegistryScanResult",
     "allocate_and_append",
+    "canonical_timestamp",
     "compute_next_sequence",
     "load_registry",
     "registry_path_for_attempt",
@@ -205,8 +206,12 @@ def _validate_envelope(
     # the parsed envelope back and confirm it round-trips byte-for-byte. This
     # catches key ordering drift, whitespace injection, and number reformatting.
     entry_kind = parsed["entry_kind"]
-    if entry_kind not in ("initial_publication", "external_registration",
-                          "retention_transition", "verification_transition"):
+    if entry_kind not in (
+        "initial_publication",
+        "external_registration",
+        "retention_transition",
+        "verification_transition",
+    ):
         raise _ParseFailure(f"unknown entry_kind {entry_kind!r}.")
 
     recorded_dt = _parse_canonical_dt(recorded)
@@ -236,13 +241,10 @@ def _validate_envelope(
 
 def _parse_canonical_dt(value: str) -> datetime:
     # Fixed-width canonical UTC: YYYY-MM-DDTHH:MM:SS.ffffffZ
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
-        tzinfo=_UTC
-    )
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=_UTC)
 
 
 from datetime import UTC as _UTC  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Transition validation across an artifact's history
@@ -266,9 +268,7 @@ def _reduce_history(entries: list[RegistryEntry]) -> dict[str, _ArtifactHistory]
             rec = _payload_record(payload)
             aid = rec.artifact_id
             if aid in histories:
-                raise RegistryError(
-                    f"duplicate initial_publication for artifact {aid!r}."
-                )
+                raise RegistryError(f"duplicate initial_publication for artifact {aid!r}.")
             histories[aid] = _ArtifactHistory(artifact_id=aid, record=rec)
         elif kind == "external_registration":
             rec = _payload_record(payload)
@@ -292,14 +292,10 @@ def _reduce_history(entries: list[RegistryEntry]) -> dict[str, _ArtifactHistory]
         elif kind in ("retention_transition", "verification_transition"):
             raw_aid: Any = payload.get("artifact_id")
             if not isinstance(raw_aid, str):
-                raise RegistryError(
-                    f"{kind} payload missing artifact_id."
-                )
+                raise RegistryError(f"{kind} payload missing artifact_id.")
             aid = raw_aid
             if aid not in histories:
-                raise RegistryError(
-                    f"{kind} for unknown artifact {aid!r} (no prior publication)."
-                )
+                raise RegistryError(f"{kind} for unknown artifact {aid!r} (no prior publication).")
             existing = histories[aid]
             new_storage = payload.get("storage_class", existing.record.storage_class)
             new_retention = payload.get("retention", existing.record.retention)
@@ -382,9 +378,7 @@ def load_registry(
     """
     result = scan_registry(path)
     if result.status == "incomplete":
-        raise RegistryError(
-            f"registry {path} has a truncated tail: {result.reason}"
-        )
+        raise RegistryError(f"registry {path} has a truncated tail: {result.reason}")
     if result.status == "corrupt":
         raise RegistryError(f"registry {path} is corrupt: {result.reason}")
     # Re-bind identity: scan_registry already enforces binding, but assert again
@@ -559,5 +553,5 @@ def _full_write(fd: int, data: bytes) -> None:
         total += written
 
 
-# Re-export canonical_timestamp for callers building payloads.
+# canonical_timestamp is already imported from models; re-export for callers.
 __all__.append("canonical_timestamp")

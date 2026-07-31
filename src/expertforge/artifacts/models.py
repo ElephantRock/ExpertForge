@@ -84,7 +84,9 @@ ARTIFACT_BUNDLE_SCHEMA_VERSION: int = 1
 # canonical value.
 ARTIFACT_RECORD_SCHEMA: Literal["expertforge.artifact-record"] = ARTIFACT_BUNDLE_SCHEMA
 ARTIFACT_RECORD_SCHEMA_VERSION: int = ARTIFACT_BUNDLE_SCHEMA_VERSION
-EXTERNAL_REFERENCE_SCHEMA: Literal["expertforge.external-reference"] = "expertforge.external-reference"
+EXTERNAL_REFERENCE_SCHEMA: Literal["expertforge.external-reference"] = (
+    "expertforge.external-reference"
+)
 EXTERNAL_REFERENCE_SCHEMA_VERSION: int = 1
 
 # A single registry entry must fit in this many bytes (excluding the newline).
@@ -185,9 +187,7 @@ def validate_artifact_id(value: str) -> None:
 def validate_sha256_digest(value: str) -> None:
     """Raise ValueError unless ``value`` is ``sha256:<64 lowercase hex>``."""
     if not _SHA256_DIGEST_PATTERN.fullmatch(value):
-        raise ValueError(
-            f"digest must be 'sha256:<64 lowercase hex>'; got {value!r}."
-        )
+        raise ValueError(f"digest must be 'sha256:<64 lowercase hex>'; got {value!r}.")
 
 
 def canonical_timestamp(value: datetime) -> str:
@@ -238,8 +238,14 @@ _RETENTION_TRANSITIONS: dict[RetentionStatus, frozenset[RetentionStatus]] = {
         {"retained", "pending_transfer", "expired", "missing", "verification_failed"}
     ),
     "pending_transfer": frozenset(
-        {"pending_transfer", "retained", "externally_retained", "expired", "missing",
-         "verification_failed"}
+        {
+            "pending_transfer",
+            "retained",
+            "externally_retained",
+            "expired",
+            "missing",
+            "verification_failed",
+        }
     ),
     "externally_retained": frozenset(
         {"externally_retained", "expired", "missing", "verification_failed"}
@@ -309,9 +315,7 @@ class ParentReference(_FrozenModel):
         return v
 
     @classmethod
-    def same_attempt(
-        cls, *, run_id: str, attempt_id: str, artifact_id: str
-    ) -> ParentReference:
+    def same_attempt(cls, *, run_id: str, attempt_id: str, artifact_id: str) -> ParentReference:
         """Build a parent reference within the same run/attempt."""
         return cls(run_id=run_id, attempt_id=attempt_id, artifact_id=artifact_id)
 
@@ -434,9 +438,7 @@ class ArtifactRecord(_FrozenModel):
     descriptor that produced them.
     """
 
-    schema_name: str = Field(
-        default=ARTIFACT_BUNDLE_SCHEMA, alias="schema"
-    )
+    schema_name: str = Field(default=ARTIFACT_BUNDLE_SCHEMA, alias="schema")
     schema_version: int = Field(default=ARTIFACT_BUNDLE_SCHEMA_VERSION)
     artifact_id: str = Field(..., min_length=1)
     category: ArtifactCategory
@@ -458,9 +460,7 @@ class ArtifactRecord(_FrozenModel):
     @classmethod
     def _validate_schema_name(cls, v: str) -> str:
         if v != ARTIFACT_BUNDLE_SCHEMA:
-            raise ValueError(
-                f"schema must be {ARTIFACT_BUNDLE_SCHEMA!r}; got {v!r}."
-            )
+            raise ValueError(f"schema must be {ARTIFACT_BUNDLE_SCHEMA!r}; got {v!r}.")
         return v
 
     @field_validator("schema_version")
@@ -553,10 +553,7 @@ class ArtifactRecord(_FrozenModel):
             ("metadata_only", "verification_failed"),
         }
         if (storage, retention) not in legal:
-            raise ValueError(
-                f"illegal storage/retention combination "
-                f"({storage!r}, {retention!r})."
-            )
+            raise ValueError(f"illegal storage/retention combination ({storage!r}, {retention!r}).")
 
     @classmethod
     def from_descriptor(
@@ -634,9 +631,7 @@ class ExternalReference(_FrozenModel):
     @classmethod
     def _validate_schema_name(cls, v: str) -> str:
         if v != EXTERNAL_REFERENCE_SCHEMA:
-            raise ValueError(
-                f"schema must be {EXTERNAL_REFERENCE_SCHEMA!r}; got {v!r}."
-            )
+            raise ValueError(f"schema must be {EXTERNAL_REFERENCE_SCHEMA!r}; got {v!r}.")
         return v
 
     @field_validator("schema_version")
