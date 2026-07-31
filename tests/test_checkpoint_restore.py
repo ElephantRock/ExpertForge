@@ -103,6 +103,24 @@ class _RecordingFactory:
     def apply_optimizer(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
         target["optimizer"] = tensor.raw_bytes if tensor else None
 
+    def apply_optimizer_state(
+        self,
+        target: dict[str, Any],
+        state_tensor: CapturedTensor | None,
+        slots: dict[tuple[int, str, str], CapturedTensor],
+        scalar_state: Any,
+    ) -> None:
+        # Item 3: record the full multi-slot optimizer state. Prefer the legacy
+        # single tensor; otherwise join the slot tensors.
+        if state_tensor is not None:
+            target["optimizer"] = state_tensor.raw_bytes
+        elif slots:
+            target["optimizer_slots"] = {key: t.raw_bytes for key, t in slots.items()}
+            target["optimizer"] = next(iter(slots.values())).raw_bytes
+        else:
+            target["optimizer"] = None
+        target["optimizer_scalar_state"] = scalar_state
+
     def apply_scheduler(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
         target["scheduler"] = tensor.raw_bytes if tensor else None
 
@@ -154,6 +172,7 @@ def _make_txn(
 
     txn = RestoreTransaction(
         archive=archive,
+        expected_descriptor=archive.manifest.compatibility,
         factory=factory,
         rng_bundle_loader=load_bundle,
         rng_consumer=consume,

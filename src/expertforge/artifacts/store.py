@@ -1310,6 +1310,58 @@ class ArtifactStore:
             return None
         return content
 
+    def open_verified_content(self, artifact_id: str) -> tuple[int, ArtifactRecord]:
+        """Public, descriptor-bound, parent-race-safe content read primitive.
+
+        Returns ``(fd, record)`` where ``fd`` is an open file descriptor on the
+        canonical content that is guaranteed to be a regular file (verified via
+        ``fstat`` on the SAME descriptor), and ``record`` is the registry-indexed
+        :class:`ArtifactRecord` describing it. The caller owns the descriptor and
+        must :func:`os.close` it.
+
+        This closes the TOCTOU window that a path-based ``open`` (``locate`` +
+        ``os.open``) leaves open between chain verification and the final open:
+        the full parent chain from the artifact root to the bundle is verified
+        symlink-free, then the content is opened with ``O_NOFOLLOW`` (where
+        available) and ``fstat``-verified on the resulting descriptor. Any
+        component in the chain — including an intermediate directory — being a
+        symlink is rejected.
+
+        This is the public boundary consumers (Issue #11) MUST use instead of
+        importing underscored path helpers (:func:`_open_read_no_follow`,
+        :func:`_verify_no_symlinks_in_chain`), which remain module-private.
+
+        Raises :class:`ArtifactNotFoundError` if the artifact or its content is
+        absent, and :class:`ArtifactConflictError` if any path component (root,
+        intermediate directory, bundle, or final content) is a symlink or not a
+        regular file.
+        """
+        bdir = self._bundle_path(artifact_id)
+        # Verify the full chain from the artifact root to the bundle directory
+        # (including every intermediate directory) is symlink-free before opening
+        # anything. This is the parent-race defense: O_NOFOLLOW only protects the
+        # final element, so a symlinked intermediate directory must be rejected
+        # here.
+        _verify_no_symlinks_in_chain(self._artifact_root, bdir)
+        content = bdir / "content"
+        if not content.exists():
+            raise ArtifactNotFoundError(
+                f"artifact {artifact_id!r} has no canonical content to open."
+            )
+        # _open_read_no_follow applies O_NOFOLLOW + fstat regular-file check on
+        # the returned descriptor, so a TOCTOU swap between locate and open
+        # cannot inject a symlinked or non-regular content file.
+        fd = _open_read_no_follow(content)
+        # Bind the descriptor to the registry-indexed record so the caller has a
+        # single authoritative description of the bytes it is about to read.
+        record = self._current_record(artifact_id)
+        if record is None:
+            os.close(fd)
+            raise ArtifactNotFoundError(
+                f"artifact {artifact_id!r} is not indexed; cannot bind a content record."
+            )
+        return fd, record
+
     def _current_record(self, artifact_id: str) -> ArtifactRecord | None:
         """The last-known registry state for ``artifact_id`` (None if unindexed).
 

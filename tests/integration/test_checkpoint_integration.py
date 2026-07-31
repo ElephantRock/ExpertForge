@@ -29,7 +29,11 @@ from expertforge.checkpoints.reference_adapter import (
     ReferenceState,
     ReferenceStateProvider,
 )
-from expertforge.checkpoints.restore import RestoreError, RestoreTransaction
+from expertforge.checkpoints.restore import (
+    RestoreError,
+    RestoreTransaction,
+    build_restored_tensors,
+)
 from expertforge.checkpoints.store import (
     CheckpointCorruptError,
     CheckpointLineageError,
@@ -39,6 +43,7 @@ from expertforge.checkpoints.store import (
 from expertforge.config.resolve import resolve_config
 from expertforge.identity.ids import attempt_id
 from expertforge.identity.record import AttemptIdentityRecord
+from expertforge.provenance.record import ProvenanceRecord
 from expertforge.rng.derivation import SeedContext
 from expertforge.rng.manager import RngManager
 from expertforge.rng.state import RngStateBundle
@@ -113,6 +118,23 @@ class _RecordingFactory:
     def apply_optimizer(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
         target["optimizer"] = tensor.raw_bytes if tensor else None
 
+    def apply_optimizer_state(
+        self,
+        target: dict[str, Any],
+        state_tensor: CapturedTensor | None,
+        slots: dict[tuple[int, str, str], CapturedTensor],
+        scalar_state: Any,
+    ) -> None:
+        # Item 3: record the full multi-slot optimizer state.
+        if state_tensor is not None:
+            target["optimizer"] = state_tensor.raw_bytes
+        elif slots:
+            target["optimizer_slots"] = {key: t.raw_bytes for key, t in slots.items()}
+            target["optimizer"] = next(iter(slots.values())).raw_bytes
+        else:
+            target["optimizer"] = None
+        target["optimizer_scalar_state"] = scalar_state
+
     def apply_scheduler(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
         target["scheduler"] = tensor.raw_bytes if tensor else None
 
@@ -179,6 +201,7 @@ class TestSavePublishLoadRestore:
         live_rng = _new_rng_manager()
         txn = RestoreTransaction(
             archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
             factory=factory,
             rng_bundle_loader=lambda: live_rng.capture_state(),
             rng_consumer=lambda b: None,  # tested below
@@ -426,6 +449,23 @@ class _FullRecordingFactory:
     def apply_optimizer(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
         target["optimizer"] = tensor.raw_bytes if tensor else None
 
+    def apply_optimizer_state(
+        self,
+        target: dict[str, Any],
+        state_tensor: CapturedTensor | None,
+        slots: dict[tuple[int, str, str], CapturedTensor],
+        scalar_state: Any,
+    ) -> None:
+        # Item 3: record the full multi-slot optimizer state.
+        if state_tensor is not None:
+            target["optimizer"] = state_tensor.raw_bytes
+        elif slots:
+            target["optimizer_slots"] = {key: t.raw_bytes for key, t in slots.items()}
+            target["optimizer"] = next(iter(slots.values())).raw_bytes
+        else:
+            target["optimizer"] = None
+        target["optimizer_scalar_state"] = scalar_state
+
     def apply_scheduler(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
         target["scheduler"] = tensor.raw_bytes if tensor else None
 
@@ -462,6 +502,7 @@ class TestItem1TwoPhaseCommit:
         pre_rng = live_rng.capture_state()
         txn = RestoreTransaction(
             archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
             factory=factory,
             rng_bundle_loader=lambda: live_rng.capture_state(),
             rng_consumer=lambda b: None,
@@ -494,6 +535,7 @@ class TestItem2BuffersRestored:
         factory = _FullRecordingFactory()
         txn = RestoreTransaction(
             archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
             factory=factory,
             rng_bundle_loader=lambda: _new_rng_manager().capture_state(),
             rng_consumer=lambda b: None,
@@ -525,6 +567,7 @@ class TestItem3AliasRestoresEveryName:
         factory = _FullRecordingFactory()
         txn = RestoreTransaction(
             archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
             factory=factory,
             rng_bundle_loader=lambda: _new_rng_manager().capture_state(),
             rng_consumer=lambda b: None,
@@ -589,7 +632,13 @@ class TestItem9NativeLineage:
         bundle_bytes = rng.capture_state().to_deterministic_json()
         state = _reference_state(weight_value=0.5, rng_bundle=bundle_bytes)
         cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
-        parent = cp_store.resolve_parent(aid, cp_store.artifact_store)
+        # Item 2: resolve_parent takes a fully-qualified ParentReference.
+        parent_ref = ParentReference(
+            run_id=identity.run_id,
+            attempt_id=identity.attempt_id,
+            artifact_id=aid,
+        )
+        parent = cp_store.resolve_parent(parent_ref)
         assert parent.artifact_id == aid
         assert parent.category == "checkpoint"
 
@@ -597,8 +646,13 @@ class TestItem9NativeLineage:
         identity, _ = make_identity_and_provenance(tmp_path)
         store = make_store(tmp_path, identity=identity)
         cp_store = CheckpointStore(store)
+        parent_ref = ParentReference(
+            run_id=identity.run_id,
+            attempt_id=identity.attempt_id,
+            artifact_id="artifact-v1-sha256-" + "0" * 64,
+        )
         with pytest.raises(CheckpointLineageError):
-            cp_store.resolve_parent("artifact-v1-sha256-" + "0" * 64, cp_store.artifact_store)
+            cp_store.resolve_parent(parent_ref)
 
 
 class TestItem15Continuation:
@@ -640,6 +694,7 @@ class TestItem15Continuation:
         restored_rng.restore_state(RngStateBundle.from_json_bytes(archive.component("rng")))
         txn = RestoreTransaction(
             archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
             factory=factory,
             rng_bundle_loader=lambda: restored_rng.capture_state(),
             rng_consumer=lambda b: None,
@@ -660,4 +715,332 @@ class TestItem15Continuation:
         assert restored_cursor.accepted_samples == expected_cursor.accepted_samples
         # RNG continuation matches the uninterrupted run's next-sample.
         actual_next_rng = restored_rng.generator.integers(0, 1000, size=5).tolist()
+        assert actual_next_rng == expected_next_rng
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review regressions (review 4832590514): items 2, 3, 4, 8, 9, 11, 12.
+# ---------------------------------------------------------------------------
+
+
+class TestRound2Item2LineageRequired:
+    def test_load_rejects_missing_lineage(self, tmp_path: Path) -> None:
+        # Item 2: a resume identity WITHOUT a lineage is rejected (no ungated
+        # resume path). Build an identity that shares run/fingerprint but has
+        # no ResumeLineage.
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.5, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        no_lineage = identity.model_copy(
+            update={"attempt_id": identity.attempt_id + "x", "lineage": None}
+        )
+        from expertforge.checkpoints.store import CheckpointLineageError
+
+        with pytest.raises(CheckpointLineageError):
+            cp_store.load(aid, expected_identity=no_lineage)
+
+    def test_load_auto_resolves_parent(self, tmp_path: Path) -> None:
+        # Item 2: load authoritatively resolves the parent through the public
+        # artifact-store boundary. A valid resume loads; the parent must be
+        # registered (it is, by the save).
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.7, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        # This exercises _resolve_resume_parent -> resolve_parent internally.
+        archive = cp_store.load(aid, expected_identity=resume)
+        assert archive.artifact_id == aid
+
+    def test_load_rejects_unregistered_parent(self, tmp_path: Path) -> None:
+        # Item 2: a lineage naming a checkpoint that was never registered (e.g.
+        # deleted from the registry) is rejected by the auto-resolve.
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.7, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        # A resume whose lineage names a DIFFERENT (unregistered) checkpoint id.
+        bogus_aid = "artifact-v1-sha256-" + "e" * 64
+        bogus = make_resume_identity(identity, parent_artifact_id=bogus_aid)
+        from expertforge.checkpoints.store import CheckpointLineageError
+
+        with pytest.raises(CheckpointLineageError):
+            cp_store.load(aid, expected_identity=bogus)
+
+
+class TestRound2Item3MultiSlotOptimizer:
+    def test_multi_slot_optimizer_round_trips(self, tmp_path: Path) -> None:
+        # Item 3: a real multi-slot optimizer (two slots: momentum + velocity)
+        # survives encode -> load -> restore with every slot materialized.
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        momentum = np.full((2, 3), 0.1, dtype="<f4").tobytes()
+        velocity = np.full((2, 3), 0.2, dtype="<f4").tobytes()
+        state = _reference_state(weight_value=1.0, rng_bundle=bundle_bytes)
+        # Replace the single optimizer tensor with two named slots.
+        from expertforge.checkpoints.models import (
+            CapturedTensor,
+            OptimizerDescriptor,
+            OptimizerParamGroup,
+            OptimizerStateSlot,
+        )
+        from expertforge.checkpoints.reference_adapter import (
+            ReferenceStateProvider,
+        )
+
+        captured = ReferenceStateProvider(state).capture_checkpoint_snapshot()
+        slot_a = CapturedTensor(
+            logical_name="optimizer.momentum.layer.weight",
+            dtype="float32",
+            shape=(2, 3),
+            raw_bytes=momentum,
+        )
+        slot_b = CapturedTensor(
+            logical_name="optimizer.velocity.layer.weight",
+            dtype="float32",
+            shape=(2, 3),
+            raw_bytes=velocity,
+        )
+        opt_desc = OptimizerDescriptor(
+            optimizer_type="SGD",
+            param_groups=(
+                OptimizerParamGroup(group_index=0, param_names=("layer.weight",), options=()),
+            ),
+            state_slots=(
+                OptimizerStateSlot(
+                    group_index=0,
+                    param_name="layer.weight",
+                    slot_name="momentum",
+                    shape=(2, 3),
+                    dtype="float32",
+                ),
+                OptimizerStateSlot(
+                    group_index=0,
+                    param_name="layer.weight",
+                    slot_name="velocity",
+                    shape=(2, 3),
+                    dtype="float32",
+                ),
+            ),
+        )
+        captured = captured.model_copy(
+            update={
+                "optimizer": None,
+                "optimizer_slots": (slot_a, slot_b),
+                "optimizer_descriptor": opt_desc,
+            }
+        )
+        from expertforge.config.resolve import resolve_config
+
+        envelope = resolve_config(CONFIGS / "smoke.yaml")
+        identity, provenance = make_identity_and_provenance(tmp_path)
+        store = make_store(tmp_path, identity=identity)
+        cp_store = CheckpointStore(store)
+        record = cp_store.save(
+            identity=identity,
+            captured=captured,
+            configuration_envelope=envelope,
+            provenance=provenance,
+            rng_bundle=RngStateBundle.from_json_bytes(bundle_bytes),
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
+        archive = cp_store.load(record.artifact_id, expected_identity=resume)
+
+        # The restore path must materialize BOTH slots.
+        _, _, _, optimizer_bundle, _ = build_restored_tensors(archive)
+        _legacy, slots, _scalar = optimizer_bundle
+        assert (0, "layer.weight", "momentum") in slots
+        assert (0, "layer.weight", "velocity") in slots
+        assert slots[(0, "layer.weight", "momentum")].raw_bytes == momentum
+        assert slots[(0, "layer.weight", "velocity")].raw_bytes == velocity
+
+
+class TestRound2Item4CommitNonRngRollback:
+    def test_failure_at_commit_non_rng_rolls_back(self, tmp_path: Path) -> None:
+        # Item 4: a failure injected at the commit_non_rng stage (AFTER
+        # commit_to_live succeeded) must roll back the non-RNG swap so
+        # pre-restore live state is authoritative.
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.42, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        factory = _FullRecordingFactory()
+        live_rng = _new_rng_manager()
+        pre = live_rng.capture_state()
+        txn = RestoreTransaction(
+            archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
+            factory=factory,
+            rng_bundle_loader=lambda: live_rng.capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        txn.prepare()
+        txn.fail_after = "commit_non_rng"
+        with pytest.raises(RestoreError):
+            txn.commit()
+        # The non-RNG swap was committed then reverted by the rollback handler.
+        assert factory.reverted
+        assert not factory.committed
+        # RNG was never mutated (captured but not consumed).
+        assert live_rng.capture_state() == pre
+
+    def test_cleanup_diagnostics_attached_not_replacing(self, tmp_path: Path) -> None:
+        # Item 4: when rollback itself partially fails, diagnostics are recorded
+        # on cleanup_diagnostics and the ORIGINAL exception is preserved (the
+        # raised RestoreError chains from the original via __cause__).
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.42, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        class _FailingRevertFactory(_FullRecordingFactory):
+            def revert_commit_to_live(self, target: dict[str, Any]) -> None:
+                raise RuntimeError("revert failed")
+
+        factory = _FailingRevertFactory()
+        live_rng = _new_rng_manager()
+        txn = RestoreTransaction(
+            archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
+            factory=factory,
+            rng_bundle_loader=lambda: live_rng.capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        txn.prepare()
+        txn.fail_after = "commit_non_rng"
+        with pytest.raises(RestoreError) as exc_info:
+            txn.commit()
+        # The original failure is the __cause__; diagnostics recorded.
+        assert exc_info.value.__cause__ is not None
+        assert any("non-rng revert failed" in d for d in txn.cleanup_diagnostics)
+
+
+class TestRound2Item9OpenVerifiedContent:
+    def test_open_verified_content_returns_fd_and_record(self, tmp_path: Path) -> None:
+        # Item 9: the public open_verified_content boundary returns an open fd
+        # plus the binding record; the fd reads the canonical bytes.
+        import os
+
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.3, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        fd, record = cp_store.artifact_store.open_verified_content(aid)
+        try:
+            assert record.artifact_id == aid
+            data = os.read(fd, 1024 * 1024)
+            assert len(data) == record.byte_size
+        finally:
+            os.close(fd)
+
+
+class TestRound2Item11MismatchedSaveIdentity:
+    def test_mismatched_save_identity_rejected(self, tmp_path: Path) -> None:
+        # Item 11: a save whose identity argument diverges from the store's
+        # bound identity is rejected before the record is returned.
+        from expertforge.checkpoints.store import CheckpointCorruptError
+
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.3, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        # Save again at a DIFFERENT attempt dir with a mismatched identity
+        # argument (different run_id). The store is bound to its own identity,
+        # so passing a foreign identity to save() must be rejected.
+        foreign = identity.model_copy(
+            update={"run_id": "run-20260101t000000z-000000000000-99999999999999999999"}
+        )
+        envelope = resolve_config(CONFIGS / "smoke.yaml")
+        with pytest.raises(CheckpointCorruptError):
+            cp_store.save(
+                identity=foreign,
+                captured=ReferenceStateProvider(state).capture_checkpoint_snapshot(),
+                configuration_envelope=envelope,
+                provenance=provenance_for(tmp_path),
+                rng_bundle=RngStateBundle.from_json_bytes(bundle_bytes),
+            )
+
+
+def provenance_for(tmp_path: Path) -> ProvenanceRecord:
+    from tests._checkpoint_fixtures import make_identity_and_provenance
+
+    _ident, provenance = make_identity_and_provenance(tmp_path / "prov")
+    return provenance
+
+
+class TestRound2Item12TransactionRngContinuation:
+    def test_transaction_restored_rng_matches_uninterrupted(self, tmp_path: Path) -> None:
+        # Item 12: RNG restored THROUGH the RestoreTransaction (via a real
+        # rng_consumer that swaps the live manager) must produce the exact next
+        # fixture sequence as the uninterrupted run. Compare the next item, the
+        # next RNG sequence, model output, optimizer, scheduler, and counters.
+        rng_a = _new_rng_manager()
+        rng_b = _new_rng_manager()
+        # Advance both identically to the save point (consume 10 samples).
+        rng_a.generator.integers(0, 1000, size=10)
+        rng_b.generator.integers(0, 1000, size=10)
+        bundle_bytes = rng_a.capture_state().to_deterministic_json()
+        weight = 2.5
+        state = _reference_state(
+            weight_value=weight,
+            rng_bundle=bundle_bytes,
+            global_update=4,
+            accepted_samples=32,
+            position=32,
+        )
+        opt_bytes = state.optimizer_state
+        sched_bytes = state.scheduler_state
+        expected_weight = state.parameters["layer.weight"]
+        expected_counters = state.counters
+        expected_cursor = cast("DataCursor", state.data_cursor)
+
+        # (A) Uninterrupted: the next RNG sequence from rng_a.
+        expected_next_rng = rng_a.generator.integers(0, 1000, size=5).tolist()
+
+        # (B) Save/resume via the transaction with a REAL rng_consumer.
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        factory = _FullRecordingFactory()
+        # rng_b is the live manager; the consumer restores the archived bundle
+        # into a fresh manager and swaps it in as the new live manager.
+        live: dict[str, RngManager] = {"m": rng_b}
+
+        def consume(bundle: RngStateBundle) -> None:
+            fresh = RngManager(
+                root_seed=bundle.root_seed,
+                context=bundle.context,
+                determinism_mode=bundle.determinism_mode,
+                unsupported_determinism=bundle.unsupported_determinism,
+            )
+            fresh.restore_state(bundle)
+            live["m"] = fresh
+
+        txn = RestoreTransaction(
+            archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
+            factory=factory,
+            rng_bundle_loader=lambda: live["m"].capture_state(),
+            rng_consumer=consume,
+        )
+        txn.prepare()
+        txn.commit()
+
+        target = factory.target
+        # Exact model/optimizer/scheduler/counters round-trip.
+        assert target["parameters"]["layer.weight"] == expected_weight
+        assert target["optimizer"] == opt_bytes
+        assert target["scheduler"] == sched_bytes
+        assert target["counters"] == expected_counters
+        restored_cursor = cast("DataCursor", target["cursor"])
+        assert restored_cursor.position == expected_cursor.position
+        # The transaction-restored RNG stream matches the uninterrupted run.
+        actual_next_rng = live["m"].generator.integers(0, 1000, size=5).tolist()
         assert actual_next_rng == expected_next_rng

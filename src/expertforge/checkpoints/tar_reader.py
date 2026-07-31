@@ -28,6 +28,8 @@ _PREFIX_LIMIT = 155
 _MAX_ARCHIVE_BYTES_DEFAULT = 64 * 1024 * 1024 * 1024
 _MAX_MEMBER_COUNT_DEFAULT = 10_000
 _MAX_TENSOR_COUNT_DEFAULT = 10_000
+_MAX_MEMBER_BYTES_DEFAULT = 256 * 1024 * 1024  # per-component-member fallback
+_MAX_TENSOR_BYTES_DEFAULT = 32 * 1024 * 1024 * 1024  # total-tensor fallback
 
 # Canonical member-name patterns for the fixed component/tensor order (item 11).
 _STATE_MEMBER_RE = re.compile(r"^state/[A-Za-z0-9_]+\.json$")
@@ -175,6 +177,26 @@ def _parse_header(buf: bytes, offset: int) -> tuple[str, bytes, int, int]:
     gname = header[297:329]
     if uname.strip(b"\x00") or gname.strip(b"\x00"):
         raise TarParseError("uname/gname must be empty")
+    # Item 7: validate ALL remaining fixed header fields for byte-canonical
+    # v1 archives. linkname (157:257, 100 bytes) must be all-NUL because every
+    # checkpoint member is a regular file with no link target.
+    linkname = header[157:257]
+    if linkname.strip(b"\x00"):
+        raise TarParseError("linkname must be empty for regular-file members")
+    # devmajor (329:337) and devminor (337:345) must decode to canonical zero.
+    # The writer emits the octal form ``0000000\\0``; both that and the all-NUL
+    # form parse to zero. Any nonzero value or alternative encoding is rejected
+    # by _parse_numeric (it rejects base-256 and non-canonical octal).
+    devmajor = _parse_numeric(header[329:337], label="devmajor")
+    devminor = _parse_numeric(header[337:345], label="devminor")
+    if devmajor != 0 or devminor != 0:
+        raise TarParseError(
+            f"devmajor/devminor must be zero; got devmajor={devmajor} devminor={devminor}"
+        )
+    # The trailing reserved/padding area (500:512) must be all-NUL.
+    reserved = header[500:512]
+    if reserved.strip(b"\x00"):
+        raise TarParseError("trailing header reserved bytes must be zero")
 
     return name, typeflag, size, offset + USTAR_BLOCK_SIZE
 
@@ -205,11 +227,15 @@ def parse_ustar_archive(
         )
     member_limit = max_member_count or _get_limit("MAX_MEMBER_COUNT", _MAX_MEMBER_COUNT_DEFAULT)
     tensor_limit = max_tensor_count or _get_limit("MAX_TENSOR_COUNT", _MAX_TENSOR_COUNT_DEFAULT)
+    component_member_limit = _get_limit("MAX_COMPONENT_MEMBER_BYTES", _MAX_MEMBER_BYTES_DEFAULT)
+    tensor_member_limit = _get_limit("MAX_TENSOR_MEMBER_BYTES", _MAX_MEMBER_BYTES_DEFAULT)
+    total_tensor_limit = _get_limit("MAX_TENSOR_BYTES", _MAX_TENSOR_BYTES_DEFAULT)
     members: list[ParsedMember] = []
     seen: set[str] = set()
     n_blocks = len(buf) // USTAR_BLOCK_SIZE
     block_idx = 0
     terminator_seen = False
+    total_tensor_bytes = 0
     while block_idx < n_blocks:
         base = block_idx * USTAR_BLOCK_SIZE
         block = buf[base : base + USTAR_BLOCK_SIZE]
@@ -226,6 +252,30 @@ def parse_ustar_archive(
         # Read size bytes, then skip padding.
         if size < 0:
             raise TarParseError(f"negative size for member {name!r}")
+        # Item 7: enforce per-member byte limits DURING parsing. manifest.json
+        # and state/<role>.json components share the component-member bound;
+        # tensors/<n>.bin members use the (larger) tensor-member bound, and a
+        # running total tensor bound catches an aggregate overflow.
+        is_state = bool(_STATE_MEMBER_RE.fullmatch(name))
+        is_tensor = bool(_TENSOR_MEMBER_RE.fullmatch(name))
+        if name == "manifest.json" or is_state:
+            if size > component_member_limit:
+                raise TarParseError(
+                    f"member {name!r} size {size} exceeds MAX_COMPONENT_MEMBER_BYTES "
+                    f"({component_member_limit})"
+                )
+        elif is_tensor:
+            if size > tensor_member_limit:
+                raise TarParseError(
+                    f"member {name!r} size {size} exceeds MAX_TENSOR_MEMBER_BYTES "
+                    f"({tensor_member_limit})"
+                )
+            total_tensor_bytes += size
+            if total_tensor_bytes > total_tensor_limit:
+                raise TarParseError(
+                    f"total tensor bytes {total_tensor_bytes} exceed MAX_TENSOR_BYTES "
+                    f"({total_tensor_limit})"
+                )
         data_end = data_start + size
         if data_end > len(buf):
             raise TarParseError(f"truncated data for member {name!r}")
@@ -275,16 +325,32 @@ def _get_limit(name: str, default: int) -> int:
 
 
 def _validate_checkpoint_member_order(members: list[ParsedMember], tensor_limit: int) -> None:
-    """Enforce the fixed checkpoint member order (item 11).
+    """Enforce the EXACT fixed checkpoint member order (item 7/11).
 
-    The ratified canonical order is: ``manifest.json`` first, then all
-    ``state/<role>.json`` components (any order among roles), then all
-    ``tensors/<n>.bin`` members in contiguous ascending index order. No other
-    member names are permitted. Tensor indices must be contiguous from 0 and the
-    count must not exceed ``tensor_limit``.
+    The ratified canonical order is byte-canonical: ``manifest.json`` first,
+    then the ``state/<role>.json`` components in the EXACT fixed role order
+    (identity, configuration, provenance, rng, data_cursor, counters, model,
+    optimizer, scheduler, scaler — scaler optional, all others required), then
+    all ``tensors/<n>.bin`` members in contiguous ascending index order. No other
+    member names are permitted and roles may not be reordered. Tensor indices
+    must be contiguous from 0 and the count must not exceed ``tensor_limit``.
     """
     if not members:
         return
+    # The exact fixed role order (amendment B / item 7). scaler is optional and
+    # last; every other role is required and must appear in this exact sequence.
+    _REQUIRED_ROLE_ORDER: tuple[str, ...] = (
+        "identity",
+        "configuration",
+        "provenance",
+        "rng",
+        "data_cursor",
+        "counters",
+        "model",
+        "optimizer",
+        "scheduler",
+    )
+    _OPTIONAL_TRAILING_ROLE = "scaler"
     phases: list[list[str]] = [[], [], []]
     for m in members:
         if m.name == "manifest.json":
@@ -298,6 +364,24 @@ def _validate_checkpoint_member_order(members: list[ParsedMember], tensor_limit:
     # manifest.json exactly once, first.
     if phases[0] != ["manifest.json"]:
         raise TarParseError("manifest.json must be present exactly once as the first member")
+    # Item 7: the state components must appear in the EXACT fixed role order.
+    state_names = phases[1]
+    expected_state: list[str] = [f"state/{role}.json" for role in _REQUIRED_ROLE_ORDER]
+    if state_names[: len(expected_state)] != expected_state:
+        raise TarParseError(
+            "state components must appear in the exact fixed order "
+            "(identity, configuration, provenance, rng, data_cursor, counters, "
+            "model, optimizer, scheduler); got "
+            f"{state_names!r}"
+        )
+    # scaler, if present, must come immediately after scheduler and at most once.
+    remainder = state_names[len(expected_state) :]
+    if remainder:
+        if remainder != [f"state/{_OPTIONAL_TRAILING_ROLE}.json"]:
+            raise TarParseError(
+                f"unexpected state components after the fixed order: {remainder!r} "
+                "(only state/scaler.json may trail, exactly once)"
+            )
     # No state component may appear after the first tensor (fixed phase order).
     seen_tensor = False
     for m in members[1:]:

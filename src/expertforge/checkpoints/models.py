@@ -728,12 +728,21 @@ class CapturedCheckpointState(_FrozenModel):
                     f"captured parameter/buffer {name!r} is not declared in the model descriptor"
                 )
 
-        # Optimizer descriptor slots <-> captured optimizer state.
+        # Optimizer descriptor slots <-> captured optimizer state (item 10:
+        # exact 1:1 binding). Every declared slot has exactly one captured
+        # tensor of matching shape/dtype, and every captured slot tensor
+        # corresponds to exactly one declared slot — no extras in either
+        # direction, and a legacy single tensor cannot satisfy multiple slots.
         slot_tensors = {t.logical_name: t for t in self.optimizer_slots}
         # Build the expected logical name for each declared slot.
-        for slot in self.optimizer_descriptor.state_slots:
-            expected_name = f"optimizer.{slot.slot_name}.{slot.param_name}"
-            if self.optimizer_slots:
+        expected_slot_names = {
+            f"optimizer.{slot.slot_name}.{slot.param_name}"
+            for slot in (self.optimizer_descriptor.state_slots)
+        }
+        if self.optimizer_slots:
+            # Multi-slot path: every declared slot has a tensor...
+            for slot in self.optimizer_descriptor.state_slots:
+                expected_name = f"optimizer.{slot.slot_name}.{slot.param_name}"
                 t = slot_tensors.get(expected_name)
                 if t is None:
                     raise ValueError(
@@ -750,19 +759,39 @@ class CapturedCheckpointState(_FrozenModel):
                         f"optimizer slot {expected_name!r} dtype {t.dtype!r} "
                         f"!= declared {slot.dtype!r}"
                     )
-            elif self.optimizer is not None:
-                # Legacy single-tensor optimizer: must match exactly one slot's
-                # shape/dtype. The slot's param_name is the canonical member.
-                if tuple(self.optimizer.shape) != tuple(slot.shape):
-                    raise ValueError(
-                        f"optimizer tensor shape {tuple(self.optimizer.shape)!r} "
-                        f"!= declared slot {tuple(slot.shape)!r}"
-                    )
-                if self.optimizer.dtype != slot.dtype:
-                    raise ValueError(
-                        f"optimizer tensor dtype {self.optimizer.dtype!r} "
-                        f"!= declared slot dtype {slot.dtype!r}"
-                    )
+            # ...and every captured slot tensor maps to a declared slot (no extras).
+            extra = set(slot_tensors) - expected_slot_names
+            if extra:
+                raise ValueError(
+                    f"captured optimizer_slot tensors not declared in the descriptor: "
+                    f"{sorted(extra)!r}"
+                )
+        elif self.optimizer is not None:
+            # Legacy single-tensor optimizer (item 10): must correspond to
+            # EXACTLY one declared slot. One tensor cannot satisfy multiple
+            # slots by shape/dtype.
+            if len(self.optimizer_descriptor.state_slots) != 1:
+                raise ValueError(
+                    "legacy single optimizer tensor requires exactly one declared "
+                    "state_slot; multiple slots cannot be satisfied by one tensor"
+                )
+            slot = self.optimizer_descriptor.state_slots[0]
+            if tuple(self.optimizer.shape) != tuple(slot.shape):
+                raise ValueError(
+                    f"optimizer tensor shape {tuple(self.optimizer.shape)!r} "
+                    f"!= declared slot {tuple(slot.shape)!r}"
+                )
+            if self.optimizer.dtype != slot.dtype:
+                raise ValueError(
+                    f"optimizer tensor dtype {self.optimizer.dtype!r} "
+                    f"!= declared slot dtype {slot.dtype!r}"
+                )
+        elif self.optimizer_descriptor.state_slots:
+            # Slots are declared but no state was captured (neither legacy nor
+            # multi-slot). That is an incomplete capture.
+            raise ValueError(
+                "optimizer descriptor declares state_slots but no optimizer state was captured"
+            )
         # If multi-slot tensors are present, the descriptor must declare them.
         if self.optimizer_slots and not self.optimizer_descriptor.state_slots:
             raise ValueError("optimizer_slots present but descriptor declares no state_slots")
@@ -783,9 +812,48 @@ class CapturedCheckpointState(_FrozenModel):
         if dc.accepted_samples > di.identity.length and di.identity.length > 0:
             raise ValueError("data_cursor accepted_samples exceeds data identity length")
 
-        # RNG: the captured bytes must be present and decodable.
+        # RNG (item 10): the captured bytes must be present AND strictly decode
+        # to a :class:`RngStateBundle`, and that bundle's descriptor must agree
+        # with the captured RNG descriptor (adapter set + schema version). A
+        # non-decodable or descriptor-mismatched bundle is rejected rather than
+        # accepted on non-emptiness alone.
         if not self.rng_bundle_bytes:
             raise ValueError("rng_bundle_bytes must be present (non-empty) at capture")
+        try:
+            from expertforge.rng.state import RngStateBundle
+
+            bundle = RngStateBundle.from_json_bytes(self.rng_bundle_bytes)
+        except (ValueError, Exception) as e:
+            raise ValueError(f"rng_bundle_bytes must decode to a valid RngStateBundle: {e}") from e
+        if bundle.rng_state_schema_version != self.rng_descriptor.rng_state_schema_version:
+            raise ValueError(
+                "rng_bundle rng_state_schema_version != rng_descriptor rng_state_schema_version"
+            )
+        # The bundle's framework adapter providers must match the descriptor's
+        # adapter set exactly (each persisted framework state has a provider in
+        # the descriptor, and vice versa).
+        bundle_providers = tuple(sorted(state.provider for state in bundle.framework_states))
+        if bundle_providers != tuple(self.rng_descriptor.adapter_set):
+            raise ValueError("rng_bundle framework providers != rng_descriptor adapter_set")
+
+        # Item 10: alias groups must share IDENTICAL dtype, shape, AND raw_bytes
+        # before they are deduplicated to one canonical tensor. A group whose
+        # members disagree on any of these is not a true alias/tie group and
+        # must not collapse to a single member.
+        tensors_by_name = {t.logical_name: t for t in (*self.parameters, *self.buffers)}
+        for group in self.alias_groups:
+            members = [tensors_by_name[n] for n in group if n in tensors_by_name]
+            if len(members) < 2:
+                continue
+            first = members[0]
+            for m in members[1:]:
+                if m.dtype != first.dtype or tuple(m.shape) != tuple(first.shape):
+                    raise ValueError(f"alias group {tuple(group)!r} members must share dtype/shape")
+                if m.raw_bytes != first.raw_bytes:
+                    raise ValueError(
+                        f"alias group {tuple(group)!r} members must share identical "
+                        "raw_bytes (true alias/tie group)"
+                    )
 
     @model_validator(mode="after")
     def _check_quiescent(self) -> CapturedCheckpointState:

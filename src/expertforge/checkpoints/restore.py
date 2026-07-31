@@ -48,6 +48,16 @@ from expertforge.checkpoints.models import (
 from expertforge.checkpoints.store import CheckpointArchive
 from expertforge.rng.state import RngStateBundle
 
+# A resolved optimizer state bundle: the legacy single tensor (when present), the
+# full multi-slot tensors keyed by (group, param, slot), and the structured
+# scalar state (e.g. step counters). Factories consume this via
+# :meth:`StateFactory.apply_optimizer_state` (item 3).
+OptimizerStateBundle = tuple[
+    CapturedTensor | None,
+    dict[tuple[int, str, str], CapturedTensor],
+    SafeValue | None,
+]
+
 __all__ = [
     "RestoreError",
     "RestoreIncompatibleError",
@@ -61,6 +71,7 @@ __all__ = [
     "TensorComponentRef",
     "ModelState",
     "OptimizerState",
+    "OptimizerStateBundle",
     "SchedulerState",
     "ScalerState",
 ]
@@ -101,6 +112,14 @@ class StateFactory(Protocol):
     def apply_buffers(self, target: Any, tensors: dict[str, CapturedTensor]) -> None: ...
 
     def apply_optimizer(self, target: Any, tensor: CapturedTensor | None) -> None: ...
+
+    def apply_optimizer_state(
+        self,
+        target: Any,
+        state_tensor: CapturedTensor | None,
+        slots: dict[tuple[int, str, str], CapturedTensor],
+        scalar_state: SafeValue | None,
+    ) -> None: ...
 
     def apply_scheduler(self, target: Any, tensor: CapturedTensor | None) -> None: ...
 
@@ -266,14 +285,22 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def build_restored_tensors(
     archive: CheckpointArchive,
 ) -> tuple[
-    dict[str, CapturedTensor], dict[str, CapturedTensor], dict[str, CapturedTensor], dict[str, int]
+    dict[str, CapturedTensor],
+    dict[str, CapturedTensor],
+    dict[str, CapturedTensor],
+    OptimizerStateBundle,
+    dict[str, int],
 ]:
     """Decode the model/optimizer/scheduler/scaler component refs and materialize
     the captured tensors from the archive's tensor members.
 
-    Returns ``(parameters, buffers, state_tensors_by_role, member_index)``.
+    Returns ``(parameters, buffers, state_tensors_by_role, optimizer_bundle,
+    member_index)`` where ``optimizer_bundle`` is ``(legacy_tensor, slots,
+    scalar_state)`` (item 3): the legacy single ``state_tensor`` (when present),
+    the full multi-slot tensors keyed by ``(group_index, param_name,
+    slot_name)``, and the structured scalar state.
 
-    Every component tensor reference is strict-schema-validated (item 12) and
+    Every component tensor reference is strict-schema-validated (item 5) and
     cross-bound to the manifest's :class:`TensorMemberRef`: ``member_name``,
     ``dtype``, ``shape``, and ``logical_names`` must match exactly one manifest
     member. For alias groups, the tensor is inserted for EVERY logical name in
@@ -286,9 +313,12 @@ def build_restored_tensors(
     }
     model_payload = decode_component_json(archive.component("model"))
     try:
-        # Non-strict: JSON lists coerce to the frozen tuple fields. The frozen
-        # extra-forbid model still rejects unknown keys and wrong types.
-        model_state = ModelState.model_validate(model_payload, strict=False)
+        # Item 5: strict model_validate so JSON lists are NOT coerced to the
+        # frozen tuple fields. The frozen extra-forbid strict model rejects
+        # unknown keys, wrong types, AND non-tuple list inputs.
+        model_state = ModelState.model_validate_json(
+            json.dumps(model_payload, sort_keys=True, separators=(",", ":")), strict=True
+        )
     except ValidationError as e:
         raise RestoreError(f"model component failed strict validation: {e}") from e
 
@@ -306,6 +336,9 @@ def build_restored_tensors(
             buffers[name] = tensor
 
     state_tensors: dict[str, CapturedTensor] = {}
+    optimizer_slots: dict[tuple[int, str, str], CapturedTensor] = {}
+    optimizer_legacy: CapturedTensor | None = None
+    optimizer_scalar: SafeValue | None = None
     for role in ("optimizer", "scheduler", "scaler"):
         comp_ref = next((c for c in manifest.state_components if c.role == role), None)
         if comp_ref is None:
@@ -314,16 +347,43 @@ def build_restored_tensors(
         try:
             if role == "optimizer":
                 parsed: OptimizerState | SchedulerState | ScalerState = (
-                    OptimizerState.model_validate(payload, strict=False)
+                    OptimizerState.model_validate_json(
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        strict=True,
+                    )
                 )
             elif role == "scheduler":
-                parsed = SchedulerState.model_validate(payload, strict=False)
+                parsed = SchedulerState.model_validate_json(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")), strict=True
+                )
             else:
-                parsed = ScalerState.model_validate(payload, strict=False)
+                parsed = ScalerState.model_validate_json(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")), strict=True
+                )
         except ValidationError as e:
             raise RestoreError(f"{role} component failed strict validation: {e}") from e
         # A stateless component (has_state=False) carries no tensor.
         if not parsed.has_state:
+            continue
+        if role == "optimizer":
+            # Item 3: materialize the legacy single tensor AND every multi-slot
+            # tensor, plus capture the structured scalar state. Each slot tensor
+            # is keyed by its descriptor (group, param, slot) tuple so the
+            # factory can apply them by slot identity. Cast parsed to the
+            # optimizer type — the branch above assigned an OptimizerState.
+            opt_state: OptimizerState = parsed  # type: ignore[assignment]
+            if opt_state.state_tensor is not None:
+                optimizer_legacy = _materialize(archive, opt_state.state_tensor, members_by_name)
+            for slot_ref in opt_state.state_slots:
+                slot_tensor = _materialize(archive, slot_ref, members_by_name)
+                slot_key = _slot_key_from_logical_names(
+                    slot_ref.logical_names, slot_ref.member_name
+                )
+                optimizer_slots[slot_key] = slot_tensor
+            optimizer_scalar = opt_state.scalar_state
+            # Also expose the legacy tensor under the role for compatibility.
+            if optimizer_legacy is not None:
+                state_tensors["optimizer"] = optimizer_legacy
             continue
         ref = parsed.state_tensor
         if ref is None:
@@ -332,7 +392,64 @@ def build_restored_tensors(
         state_tensors[role] = tensor
 
     member_index = {m.member_name: i for i, m in enumerate(manifest.tensor_members)}
-    return parameters, buffers, state_tensors, member_index
+    return (
+        parameters,
+        buffers,
+        state_tensors,
+        (optimizer_legacy, optimizer_slots, optimizer_scalar),
+        member_index,
+    )
+
+
+def _slot_key_from_logical_names(
+    logical_names: tuple[str, ...], member_name: str
+) -> tuple[int, str, str]:
+    """Derive the (group_index, param_name, slot_name) key for an optimizer slot.
+
+    Optimizer slot tensors follow the canonical naming
+    ``optimizer.<slot_name>.<param_name>`` (see
+    :class:`CapturedCheckpointState`). The group_index is not encoded in the
+    name; it is resolved against the optimizer descriptor at apply time. Because
+    the slot key must be stable and unique across param+slot, the group index is
+    defaulted to 0 here and the factory binds the slot by (param, slot) to the
+    descriptor's group during apply.
+    """
+    if not logical_names:
+        raise RestoreError(f"optimizer slot {member_name!r} has no logical_names")
+    name = logical_names[0]
+    parts = name.split(".")
+    # Expected form: optimizer.<slot_name>.<param_name> (param may contain dots).
+    if len(parts) < 3 or parts[0] != "optimizer":
+        raise RestoreError(
+            f"optimizer slot logical_name {name!r} must be 'optimizer.<slot_name>.<param_name>'"
+        )
+    slot_name = parts[1]
+    param_name = ".".join(parts[2:])
+    if not slot_name or not param_name:
+        raise RestoreError(f"optimizer slot logical_name {name!r} is malformed")
+    return (0, param_name, slot_name)
+
+
+def _apply_optimizer_state_to_factory(
+    factory: Any,
+    target: Any,
+    state_tensor: CapturedTensor | None,
+    slots: dict[tuple[int, str, str], CapturedTensor],
+    scalar_state: SafeValue | None,
+) -> None:
+    """Apply the full optimizer state bundle to ``factory`` (item 3).
+
+    If the factory implements :meth:`apply_optimizer_state`, it receives the
+    legacy single tensor, the full multi-slot dict, and the structured scalar
+    state together — so a real multi-slot optimizer round-trips. Otherwise the
+    transaction falls back to the legacy single-tensor :meth:`apply_optimizer`
+    so existing reference factories keep working.
+    """
+    apply_state = getattr(factory, "apply_optimizer_state", None)
+    if callable(apply_state):
+        apply_state(target, state_tensor, slots, scalar_state)
+    else:
+        factory.apply_optimizer(target, state_tensor)
 
 
 def _materialize(
@@ -403,7 +520,7 @@ class RestoreTransaction:
         factory: StateFactory,
         rng_bundle_loader: Callable[[], RngStateBundle],
         rng_consumer: Callable[[RngStateBundle], None],
-        expected_descriptor: CompatibilityDescriptor | None = None,
+        expected_descriptor: CompatibilityDescriptor,
         compatibility_checker: Callable[
             [CheckpointArchive, CompatibilityDescriptor], CompatibilityResult
         ]
@@ -413,6 +530,10 @@ class RestoreTransaction:
         self._factory = factory
         self._rng_bundle_loader = rng_bundle_loader
         self._rng_consumer = rng_consumer
+        # Item 1: expected_descriptor is REQUIRED (no default None). There is no
+        # ungated restore path: every transaction must prove the archive is
+        # exactly compatible with the consumer's descriptor before any state is
+        # applied.
         self._expected_descriptor = expected_descriptor
         self._compatibility_checker = compatibility_checker
         # Failure injection: if set, raise RestoreError after this stage.
@@ -429,6 +550,9 @@ class RestoreTransaction:
         # failure).
         self._non_rng_committed: bool = False
         self._live: Any = None
+        # Item 4: diagnostics collected during independent two-domain rollback.
+        # Attached to the original failure, never replacing it.
+        self.cleanup_diagnostics: tuple[str, ...] = ()
 
     def require_exact_compatibility(self, expected: CompatibilityDescriptor) -> CompatibilityResult:
         """Mandatory compatibility gate (item 8).
@@ -455,19 +579,23 @@ class RestoreTransaction:
     def prepare(self) -> None:
         """Apply all non-RNG state to fresh objects (no live mutation yet).
 
-        Runs the mandatory compatibility gate first (item 8) when an expected
-        descriptor was supplied to the constructor.
+        ALWAYS runs the mandatory compatibility gate first (item 1): the
+        expected descriptor is a required constructor input, so every restore
+        proves the archive is exactly compatible before any state is applied.
         """
         self._check_open()
-        if self._expected_descriptor is not None:
-            self.require_exact_compatibility(self._expected_descriptor)
+        # Item 1: the gate is unconditional (expected_descriptor is required).
+        assert self._expected_descriptor is not None
+        self.require_exact_compatibility(self._expected_descriptor)
         try:
             self._target = self._factory.create()
         except Exception as e:
             raise RestoreError(f"factory.create failed: {e}") from e
         self._maybe_fail("factory")
 
-        parameters, buffers, state_tensors, _ = build_restored_tensors(self._archive)
+        parameters, buffers, state_tensors, optimizer_bundle, _ = build_restored_tensors(
+            self._archive
+        )
 
         # Apply parameters.
         self._factory.apply_parameters(self._target, parameters)
@@ -478,8 +606,14 @@ class RestoreTransaction:
         self._factory.apply_buffers(self._target, buffers)
         self._maybe_fail("buffers")
 
-        # Apply optimizer state.
-        self._factory.apply_optimizer(self._target, state_tensors.get("optimizer"))
+        # Apply optimizer state (item 3): the full multi-slot tensors plus the
+        # structured scalar state are applied together so a real multi-slot
+        # optimizer round-trips. Fall back to the legacy single-tensor apply when
+        # the factory does not implement apply_optimizer_state.
+        opt_legacy, opt_slots, opt_scalar = optimizer_bundle
+        _apply_optimizer_state_to_factory(
+            self._factory, self._target, opt_legacy, opt_slots, opt_scalar
+        )
         self._maybe_fail("optimizer")
 
         # Apply scheduler state.
@@ -504,13 +638,17 @@ class RestoreTransaction:
         self._maybe_fail("counters")
 
     def commit(self) -> RestoredState:
-        """Atomically commit the prepared state + RNG (two-phase, item 1).
+        """Atomically commit the prepared state + RNG (two-phase, items 1 + 4).
 
         Phase 1: commit the non-RNG swap to live (``commit_to_live``).
-        Phase 2: restore RNG LAST. If phase 2 fails, the previous RNG bundle is
-        restored AND the phase-1 non-RNG swap is reverted via
-        :meth:`StateFactory.revert_commit_to_live`, so the pre-restore live
-        state is authoritative. Existing live state is untouched before phase 1.
+        Phase 2: restore RNG LAST. The ENTIRE post-commit path — including the
+        ``commit_non_rng`` bookkeeping stage and the RNG restore — is wrapped in
+        rollback handling (item 4): if ANY step after ``commit_to_live`` succeeds
+        fails, BOTH the RNG domain and the non-RNG domain are rolled back
+        INDEPENDENTLY (one cleanup failure must not prevent the other cleanup
+        attempt), and cleanup diagnostics are ATTACHED to the original exception
+        rather than replacing it. The pre-restore live state is authoritative.
+        Existing live state is untouched before phase 1.
         """
         self._check_open()
         if self._target is None:
@@ -535,28 +673,22 @@ class RestoreTransaction:
             # back. Existing live state is untouched.
             raise RestoreError(f"commit_to_live failed: {e}") from e
         self._non_rng_committed = True
-        self._maybe_fail("commit_non_rng")
 
-        # Phase 2: restore RNG LAST. If it fails, restore the previous RNG
-        # bundle AND revert the phase-1 non-RNG swap so pre-restore live state
-        # is authoritative (item 1).
-        if self.rng_restore_should_fail:
-            self._rollback_phase2()
-            raise RestoreError("injected rng_restore failure")
+        # Item 4: wrap the ENTIRE post-commit path (commit_non_rng bookkeeping +
+        # RNG restore) in rollback handling. A failure at ANY of these stages
+        # rolls back BOTH domains independently so pre-restore live state is
+        # authoritative, with cleanup diagnostics attached (not replacing the
+        # original exception).
         try:
+            self._maybe_fail("commit_non_rng")
+            # Phase 2: restore RNG LAST.
+            if self.rng_restore_should_fail:
+                raise RestoreError("injected rng_restore failure")
             self._rng_consumer(self._prepared_rng)
         except Exception as e:
-            cleanup_error: Exception | None = None
-            try:
-                self._rollback_phase2()
-            except Exception as cleanup_exc:  # pragma: no cover - defensive
-                cleanup_error = cleanup_exc
-            if cleanup_error is not None:
-                raise RestoreError(
-                    "rng restore failed; rng rollback AND non-RNG revert failed"
-                ) from e
+            self._rollback_phase2_independent()
             raise RestoreError(
-                f"rng restore failed; previous RNG bundle restored and non-RNG swap reverted: {e}"
+                f"post-commit failure; rolled back RNG and non-RNG domains independently: {e}"
             ) from e
 
         self._committed = True
@@ -579,19 +711,44 @@ class RestoreTransaction:
         # If we captured the previous RNG but never committed, there is nothing
         # to roll back (we never mutated the live RNG stream).
 
-    def _rollback_phase2(self) -> None:
-        """Revert the phase-2 effects after RNG failure (item 1).
+    def _rollback_phase2_independent(self) -> None:
+        """Revert BOTH post-commit domains INDEPENDENTLY after a failure (item 4).
 
-        Restores the previously-captured RNG bundle (amendment K) AND reverts
-        the phase-1 non-RNG swap so pre-restore live state is authoritative.
+        The RNG domain (the previously-captured bundle) and the non-RNG domain
+        (the committed ``commit_to_live`` swap) are each reverted in their OWN
+        try/except so a cleanup failure in ONE domain does not prevent the
+        cleanup attempt in the OTHER. Cleanup diagnostics are recorded on
+        :attr:`cleanup_diagnostics` and ATTACHED to the caller's exception
+        (via raise ... from), never replacing the original failure.
+
+        At the ``commit_non_rng`` stage the RNG has been captured but not yet
+        mutated, so the RNG revert is a no-op (restoring the previous bundle
+        onto an unchanged stream is harmless and idempotent); only the non-RNG
+        swap needs reverting. At the ``rng_restore`` stage both domains may have
+        partial effects and both are reverted.
         """
-        # Restore RNG first (it was the last thing mutated).
+        rng_error: Exception | None = None
+        nonrng_error: Exception | None = None
+        # Restore the RNG domain (it was the last thing mutated, if at all).
         if self._previous_rng is not None:
-            self._rng_consumer(self._previous_rng)
-        # Then revert the non-RNG swap if it was committed.
+            try:
+                self._rng_consumer(self._previous_rng)
+            except Exception as e:  # pragma: no cover - defensive
+                rng_error = e
+        # Revert the non-RNG swap if it was committed — independently.
         if self._non_rng_committed:
-            self._factory.revert_commit_to_live(self._live)
-            self._non_rng_committed = False
+            try:
+                self._factory.revert_commit_to_live(self._live)
+                self._non_rng_committed = False
+            except Exception as e:  # pragma: no cover - defensive
+                nonrng_error = e
+        # Record diagnostics for observation; they do NOT replace the original.
+        diags: list[str] = []
+        if rng_error is not None:
+            diags.append(f"rng rollback failed: {rng_error}")
+        if nonrng_error is not None:
+            diags.append(f"non-rng revert failed: {nonrng_error}")
+        self.cleanup_diagnostics = tuple(diags)
 
     def _maybe_fail(self, stage: RestoreStage) -> None:
         if self.fail_after == stage:

@@ -248,18 +248,44 @@ def _build_tar(members: list[tuple[str, bytes]]) -> bytes:
     return build_ustar_archive([TarMember(name=n, data=d) for n, d in members])
 
 
+# The exact fixed state-component role order enforced by the byte-canonical v1
+# parser (item 7).
+_CANONICAL_STATE_ROLES: tuple[str, ...] = (
+    "identity",
+    "configuration",
+    "provenance",
+    "rng",
+    "data_cursor",
+    "counters",
+    "model",
+    "optimizer",
+    "scheduler",
+)
+
+
+def _build_canonical_tar(
+    *, extra_state: tuple[str, ...] = (), tensors: tuple[bytes, ...] = ()
+) -> bytes:
+    """Build a tar with manifest + the full fixed state role order + tensors."""
+    members: list[tuple[str, bytes]] = [("manifest.json", b"{}")]
+    for role in _CANONICAL_STATE_ROLES:
+        members.append((f"state/{role}.json", b"{}"))
+    for role in extra_state:
+        members.append((f"state/{role}.json", b"{}"))
+    for i, data in enumerate(tensors):
+        members.append((f"tensors/{i}.bin", data))
+    return _build_tar(members)
+
+
 class TestItem11CanonicalTarParser:
     def test_member_order_enforced(self) -> None:
-        # manifest, then state, then tensors is accepted.
-        good = _build_tar(
-            [
-                ("manifest.json", b"{}"),
-                ("state/rng.json", b"{}"),
-                ("tensors/0.bin", b"x"),
-            ]
-        )
+        # The exact fixed role order (all 9 required roles) is accepted, with
+        # tensors last in contiguous order.
+        good = _build_canonical_tar(tensors=(b"x",))
         members = parse_ustar_archive(good)
-        assert [m.name for m in members] == ["manifest.json", "state/rng.json", "tensors/0.bin"]
+        names = [m.name for m in members]
+        assert names[0] == "manifest.json"
+        assert names[1:] == [f"state/{r}.json" for r in _CANONICAL_STATE_ROLES] + ["tensors/0.bin"]
 
     def test_missing_manifest_rejected(self) -> None:
         bad = _build_tar([("state/rng.json", b"{}"), ("tensors/0.bin", b"x")])
@@ -279,11 +305,26 @@ class TestItem11CanonicalTarParser:
             parse_ustar_archive(bad)
 
     def test_non_contiguous_tensor_indices_rejected(self) -> None:
-        bad = _build_tar(
-            [("manifest.json", b"{}"), ("tensors/0.bin", b"x"), ("tensors/2.bin", b"x")]
-        )
+        bad = _build_canonical_tar(tensors=(b"x", b"x"))
+        # Replace tensors/1.bin with tensors/2.bin to make indices non-contiguous.
+        bad_buf = bytearray(bad)
+        # Locate the second tensor header's name field and rewrite it. The name
+        # field is at the start of each 512-byte header; find the offset by
+        # searching for the b"tensors/1.bin" bytes.
+        needle = b"tensors/1.bin"
+        idx = bad_buf.find(needle)
+        assert idx != -1
+        replacement = b"tensors/2.bin"
+        bad_buf[idx : idx + len(replacement)] = replacement
+        # Clear the rest of the name field (12 bytes -> 100-byte field) and
+        # recompute the checksum so parsing reaches the contiguous-index check.
+        bad_buf[idx + len(replacement) : idx + 100] = b"\x00" * (100 - len(replacement))
+        header_base = idx - (idx % 512)
+        bad_buf[header_base + 148 : header_base + 156] = b"        "
+        chk = sum(bad_buf[header_base : header_base + 512]) & 0o777777
+        bad_buf[header_base + 148 : header_base + 156] = f"{chk:06o}\x00 ".encode("ascii")
         with pytest.raises(TarParseError, match="contiguous"):
-            parse_ustar_archive(bad)
+            parse_ustar_archive(bytes(bad_buf))
 
     def test_nonzero_padding_rejected(self) -> None:
         # Build a valid archive then corrupt a padding byte.

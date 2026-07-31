@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from expertforge.checkpoints.models import (
+    AliasGroup,
     CapturedCheckpointState,
     CapturedTensor,
     CounterSnapshot,
@@ -171,10 +172,18 @@ class ReferenceStateProvider:
                 raw_bytes=s.scaler_state,
             )
 
+        # Item 10: model descriptor MUST separate parameters from buffers
+        # (buffers were previously classified as parameters) and MUST include the
+        # declared alias groups so the descriptor round-trips the full graph.
         param_desc = tuple(
             ModelParameterDescriptor(name=t.logical_name, shape=tuple(t.shape), dtype=t.dtype)
-            for t in (*parameters, *buffers)
+            for t in parameters
         )
+        buffer_desc = tuple(
+            ModelParameterDescriptor(name=t.logical_name, shape=tuple(t.shape), dtype=t.dtype)
+            for t in buffers
+        )
+        alias_group_desc = _build_alias_groups(s.alias_groups)
         optimizer_desc = _build_optimizer_descriptor(s, parameters)
         scheduler_desc = SchedulerDescriptor(
             scheduler_type=s.scheduler_type,
@@ -208,7 +217,11 @@ class ReferenceStateProvider:
             rng_bundle_bytes=s.rng_bundle_bytes,
             data_cursor=s.data_cursor,
             counters=s.counters,
-            model_descriptor=ModelDescriptor(parameters=param_desc, buffers=()),
+            model_descriptor=ModelDescriptor(
+                parameters=param_desc,
+                buffers=buffer_desc,
+                alias_groups=alias_group_desc,
+            ),
             optimizer_descriptor=optimizer_desc,
             scheduler_descriptor=scheduler_desc,
             scaler_descriptor=scaler_desc,
@@ -239,6 +252,28 @@ def _build_optimizer_descriptor(
         param_groups=(OptimizerParamGroup(group_index=0, param_names=names, options=()),),
         state_slots=slots,
     )
+
+
+def _build_alias_groups(raw: tuple[tuple[str, ...], ...]) -> tuple[AliasGroup, ...]:
+    """Build typed AliasGroup entries from the raw alias-group tuples (item 10).
+
+    Each raw group is a tuple of aliased logical names; the canonical member is
+    the lexicographically smallest name and all names appear in
+    ``aliased_names``. Groups are sorted by canonical_member (the
+    :class:`ModelDescriptor` requires canonical ordering).
+    """
+    out: list[AliasGroup] = []
+    for group in raw:
+        members = tuple(sorted(set(group)))
+        if len(members) < 2:
+            continue
+        canonical = members[0]
+        # AliasGroup stores canonical_member separately from aliased_names; the
+        # model validator unions them. Keep canonical_member OUT of aliased_names
+        # to avoid a duplicate-member validation error.
+        out.append(AliasGroup(canonical_member=canonical, aliased_names=members[1:]))
+    out.sort(key=lambda g: g.canonical_member)
+    return tuple(out)
 
 
 def _reference_data_identity() -> DataIdentity:

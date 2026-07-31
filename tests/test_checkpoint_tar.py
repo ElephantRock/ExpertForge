@@ -114,7 +114,9 @@ class TestTarWriter:
 class TestTarReader:
     def test_round_trip(self) -> None:
         out = _build([("manifest.json", b'{"k":1}'), ("state/x.json", b'{"y":2}')])
-        members = parse_ustar_archive(out)
+        # Generic framing round-trip: the checkpoint member-order gate is strict
+        # (it requires the full fixed role order), so disable it here.
+        members = parse_ustar_archive(out, validate_member_order=False)
         assert [m.name for m in members] == ["manifest.json", "state/x.json"]
         assert members[0].data == b'{"k":1}'
         assert members[1].data == b'{"y":2}'

@@ -487,12 +487,18 @@ def build_archive(
 
 
 def all_tensors_dtype(name: str, captured: CapturedCheckpointState) -> str:
+    """Resolve the dtype of any captured tensor by logical name (item 3).
+
+    Searches parameters, buffers, the legacy optimizer/scheduler/scaler tensors,
+    AND the multi-slot ``optimizer_slots`` (the previously-missed case).
+    """
     for t in (
         *captured.parameters,
         *captured.buffers,
         captured.optimizer,
         captured.scheduler,
         captured.scaler,
+        *captured.optimizer_slots,
     ):
         if t is not None and t.logical_name == name:
             return t.dtype
@@ -500,12 +506,18 @@ def all_tensors_dtype(name: str, captured: CapturedCheckpointState) -> str:
 
 
 def all_tensors_shape(name: str, captured: CapturedCheckpointState) -> list[int]:
+    """Resolve the shape of any captured tensor by logical name (item 3).
+
+    Searches parameters, buffers, the legacy optimizer/scheduler/scaler tensors,
+    AND the multi-slot ``optimizer_slots`` (the previously-missed case).
+    """
     for t in (
         *captured.parameters,
         *captured.buffers,
         captured.optimizer,
         captured.scheduler,
         captured.scaler,
+        *captured.optimizer_slots,
     ):
         if t is not None and t.logical_name == name:
             return list(t.shape)
