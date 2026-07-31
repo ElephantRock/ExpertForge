@@ -143,6 +143,7 @@ VerificationDiagnosticCode = Literal[
     "not_regular_file",
     "bundle_metadata_mismatch",
     "external_reference_not_verified",
+    "identity_binding_mismatch",
 ]
 
 # ---------------------------------------------------------------------------

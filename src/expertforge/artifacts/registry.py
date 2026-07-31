@@ -326,6 +326,44 @@ def _identity_matches_envelope(record_or_ext: Any, entry: RegistryEntry) -> None
         raise RegistryError("payload specification_fingerprint does not match envelope binding.")
 
 
+def _external_matches_record(ext: ExternalReference, rec: ArtifactRecord) -> None:
+    """Validate the external reference describes the same artifact as the record.
+
+    The external reference's content/addressing fields must match the
+    accompanying record exactly: ``expected_digest`` == record's
+    ``content_digest``, ``expected_byte_size`` == record's ``byte_size``,
+    ``category`` == record's ``category``, ``format`` == record's ``format``,
+    ``format_version`` == record's ``format_version`` (item #1). A mismatch
+    means the external reference does not describe the same artifact the record
+    declares, so the registry entry is internally inconsistent.
+    """
+    if ext.expected_digest != rec.content_digest:
+        raise RegistryError(
+            f"external_registration expected_digest {ext.expected_digest!r} does not match "
+            f"record content_digest {rec.content_digest!r}."
+        )
+    if ext.expected_byte_size != rec.byte_size:
+        raise RegistryError(
+            f"external_registration expected_byte_size {ext.expected_byte_size!r} does not "
+            f"match record byte_size {rec.byte_size!r}."
+        )
+    if ext.category != rec.category:
+        raise RegistryError(
+            f"external_registration category {ext.category!r} does not match "
+            f"record category {rec.category!r}."
+        )
+    if ext.format != rec.format:
+        raise RegistryError(
+            f"external_registration format {ext.format!r} does not match "
+            f"record format {rec.format!r}."
+        )
+    if ext.format_version != rec.format_version:
+        raise RegistryError(
+            f"external_registration format_version {ext.format_version!r} does not match "
+            f"record format_version {rec.format_version!r}."
+        )
+
+
 def _record_internally_consistent(rec: ArtifactRecord) -> None:
     """Validate that an ArtifactRecord's immutable descriptor-derived fields are
     internally consistent (recompute ``artifact_id`` and ``relative_path``)."""
@@ -388,6 +426,12 @@ def _reduce_history(entries: list[RegistryEntry]) -> dict[str, _ArtifactHistory]
                     f"external_registration payload artifact_id mismatch "
                     f"({ext.artifact_id!r} vs {aid!r})."
                 )
+            # The external reference's content/addressing fields must match the
+            # accompanying record: the descriptor is content-addressed, so a
+            # mismatched expected_digest/expected_byte_size/category/format/
+            # format_version means the external reference does not describe the
+            # same artifact as the record (item #1).
+            _external_matches_record(ext, rec)
             if aid in histories:
                 # External registration may augment an existing artifact only
                 # if it is a fresh external reference record (not a duplicate
@@ -422,9 +466,23 @@ def _reduce_history(entries: list[RegistryEntry]) -> dict[str, _ArtifactHistory]
                     f"illegal retention transition {existing.record.retention!r} "
                     f"-> {new_retention!r} for artifact {aid!r}."
                 )
-            new_rec = existing.record.model_copy(
-                update={"storage_class": new_storage, "retention": new_retention}
-            )
+            # Re-validate the COMBINED (storage_class, retention) state through
+            # the Pydantic constructor: model_copy(update=...) bypasses model
+            # validators, so an illegal combination (e.g. canonical_local +
+            # externally_retained) would slip through. Constructing a fresh
+            # ArtifactRecord re-runs every validator, including the cross-field
+            # storage/retention matrix (item #2).
+            updated_dict = {
+                **existing.record.model_dump(by_alias=True),
+                "storage_class": new_storage,
+                "retention": new_retention,
+            }
+            try:
+                new_rec = ArtifactRecord.model_validate(updated_dict, strict=True)
+            except ValidationError as e:
+                raise RegistryError(
+                    f"illegal combined storage/retention state for artifact {aid!r}: {e}"
+                ) from e
             histories[aid] = _ArtifactHistory(
                 artifact_id=aid, record=new_rec, external=existing.external
             )
@@ -533,15 +591,32 @@ def scan_registry(path: Path) -> RegistryScanResult:
     accepted: list[RegistryEntry] = []
 
     for idx, line in enumerate(lines):
-        # One try/except around the whole per-line acceptance so any failure
-        # (framing, schema, identity binding, transition) yields a typed corrupt
-        # result. The accepted prefix is retained (truncated-tail recovery).
+        # One try/except around the whole per-line acceptance so ANY failure
+        # (framing, schema, identity binding, transition, model construction,
+        # KeyError, ValidationError) yields a typed corrupt result rather than
+        # leaking an untyped exception. The accepted prefix is retained
+        # (truncated-tail recovery) and is guaranteed consistent because the
+        # history validator runs BEFORE the new entry is appended (item #3).
         try:
             parsed = _parse_envelope(line)
             if run_id is None:
-                run_id = parsed["run_id"]
-                attempt_id = parsed["attempt_id"]
-                fingerprint = parsed["specification_fingerprint"]
+                # Use .get() so a missing identity key produces a typed corrupt
+                # result instead of a bare KeyError (item #3).
+                first_run = parsed.get("run_id")
+                first_attempt = parsed.get("attempt_id")
+                first_fp = parsed.get("specification_fingerprint")
+                if (
+                    not isinstance(first_run, str)
+                    or not isinstance(first_attempt, str)
+                    or not isinstance(first_fp, str)
+                ):
+                    raise _ParseFailure(
+                        "first envelope is missing required identity keys "
+                        "(run_id/attempt_id/specification_fingerprint)."
+                    )
+                run_id = first_run
+                attempt_id = first_attempt
+                fingerprint = first_fp
             # After the first line these are bound; assert to narrow for mypy.
             assert run_id is not None
             assert attempt_id is not None
@@ -554,11 +629,14 @@ def scan_registry(path: Path) -> RegistryScanResult:
                 expected_attempt_id=attempt_id,
                 expected_fingerprint=fingerprint,
             )
+            # Validate the accepted prefix INCLUDING this candidate entry BEFORE
+            # appending it: only if the full history (payloads, identity binding,
+            # and transitions) validates successfully does the entry join the
+            # accepted prefix. This guarantees a corrupt line is never part of
+            # the accepted prefix (item #3b).
+            trial = [*accepted, entry]
+            _reduce_history(trial)
             accepted.append(entry)
-            # Re-run the strict shared validator over the accepted prefix so the
-            # scanner is authoritative for payloads and transitions, not just
-            # envelope framing.
-            _reduce_history(accepted)
         except _ParseFailure as e:
             return RegistryScanResult(
                 status="corrupt",
@@ -570,6 +648,15 @@ def scan_registry(path: Path) -> RegistryScanResult:
                 status="corrupt",
                 accepted=accepted,
                 reason=f"line {idx + 1}: {e}",
+            )
+        except (KeyError, IndexError, TypeError, ValueError, ValidationError) as e:
+            # Defensive: dict key access, model construction, or stray type
+            # errors must never leak as untyped exceptions; map to corrupt
+            # (item #3a). ValidationError is imported from pydantic.
+            return RegistryScanResult(
+                status="corrupt",
+                accepted=accepted,
+                reason=f"line {idx + 1}: unexpected parsing failure: {e}",
             )
 
     if truncated:

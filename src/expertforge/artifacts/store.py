@@ -42,6 +42,7 @@ from expertforge.artifacts.models import (
     ParentReference,
     RegistryEntry,
     RetentionStatus,
+    VerificationDiagnosticCode,
     VerificationResult,
     descriptor_to_artifact_id,
     is_legal_retention_transition,
@@ -484,7 +485,11 @@ class ArtifactStore:
             self._identity.attempt_id,
             category,
         )
+        # Verify no symlinked parent directory in the chain from the artifact
+        # root to the category directory BEFORE creating any temp bundle (item
+        # #4). This rejects a symlinked run/attempts/artifacts/category ancestor.
         cdir.mkdir(parents=True, exist_ok=True)
+        _verify_no_symlinks_in_chain(self._artifact_root, cdir)
 
         # Stream content into a temp bundle, hashing as we go.
         tmp_bundle = self._make_temp_bundle_dir(cdir)
@@ -786,36 +791,90 @@ class ArtifactStore:
     ) -> ArtifactRecord:
         """Register a verified telemetry stream as a canonical telemetry artifact.
 
-        The stream is first verified end-to-end through the public Issue #9
-        loader (:func:`load_telemetry_stream`), which enforces canonical JSON,
-        identity/process binding, sequence/monotonicity, and stream closure.
-        Only the verified bytes are then copied into a canonical telemetry
-        bundle (item #9). A stream that fails verification is rejected with a
-        typed :class:`ArtifactStoreError`.
+        The source bytes are copied into a store-owned temporary buffer FIRST,
+        then verified end-to-end through the public Issue #9 loader
+        (:func:`load_telemetry_stream`) against the COPY, and only then
+        published as a canonical telemetry bundle (item #9). This binds
+        validation and the published bytes to the same copy, closing the TOCTOU
+        window where the source path could be mutated between validation and the
+        later reopen performed by :meth:`publish` (item #5). A stream that
+        fails verification is rejected with a typed
+        :class:`ArtifactStoreError` and the owned copy is removed.
         """
         from expertforge.telemetry.loader import TelemetryLoadError, load_telemetry_stream
 
-        try:
-            load_telemetry_stream(
-                path,
-                expected_identity=self._identity,
-                expected_process_context=process_context,
-            )
-        except TelemetryLoadError as e:
-            raise ArtifactStoreError(f"telemetry stream failed canonical verification: {e}") from e
-        # The verified bytes are copied into store ownership. register_existing
-        # is bypassed for the telemetry category (it would reject it), so call
-        # publish directly with the verified file path.
         self._validate_parent(parent)
         self._assert_regular_source(path)
-        return self.publish(
-            path,
-            category="telemetry",
-            format="jsonl",
-            format_version=1,
-            producing_component=producing_component,
-            parent=parent,
-        )
+        # Copy the source bytes into a store-owned temporary buffer owned by this
+        # process before validation. Subsequent verification and publication both
+        # operate on these owned bytes, so a concurrent source mutation cannot
+        # change what was validated (item #5 TOCTOU).
+        owned_copy = self._copy_to_owned_buffer(path)
+        try:
+            try:
+                load_telemetry_stream(
+                    owned_copy,
+                    expected_identity=self._identity,
+                    expected_process_context=process_context,
+                )
+            except TelemetryLoadError as e:
+                raise ArtifactStoreError(
+                    f"telemetry stream failed canonical verification: {e}"
+                ) from e
+            # Publish from the verified owned copy (bytes), not the original
+            # source path. publish re-hashes these exact bytes into the canonical
+            # bundle, guaranteeing the published content equals the validated copy.
+            return self.publish(
+                owned_copy,
+                category="telemetry",
+                format="jsonl",
+                format_version=1,
+                producing_component=producing_component,
+                parent=parent,
+            )
+        finally:
+            # Remove the owned copy regardless of outcome (publish already
+            # materialized its own canonical bytes inside the bundle).
+            try:
+                owned_copy.unlink()
+            except OSError:
+                pass
+
+    def _copy_to_owned_buffer(self, source: Path) -> Path:
+        """Copy a regular source file into a store-owned temp file (item #5).
+
+        The source bytes are read via the symlink-safe path
+        (:func:`_read_bytes_no_follow`, which opens with ``O_NOFOLLOW`` and
+        ``fstat``-verifies a regular file) so a symlinked or non-regular source
+        is rejected. The copy lives beneath the attempt directory so it is owned
+        by this process.
+        """
+        self._attempt_dir.mkdir(parents=True, exist_ok=True)
+        _verify_no_symlinks_in_chain(self._artifact_root, self._attempt_dir)
+        # Read the source through the symlink-safe reader (closes its own fd).
+        data = _read_bytes_no_follow(source)
+        tmp = Path(tempfile.mkstemp(prefix=".tmp-tel-", dir=self._attempt_dir)[1])
+        try:
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_TRUNC
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_BINARY", 0)
+            )
+            fd_dst = os.open(tmp, flags, 0o600)
+            try:
+                _full_write(fd_dst, data)
+                os.fsync(fd_dst)
+            finally:
+                os.close(fd_dst)
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return tmp
 
     # -- register_external -------------------------------------------------
 
@@ -895,14 +954,25 @@ class ArtifactStore:
             )
         except ExternalLocationError as e:
             raise ArtifactConflictError(str(e)) from e
-        # Persist the artifact.json bundle sidecar so the record is
-        # self-contained (metadata_only — no local content bytes).
-        self._write_metadata_only_bundle(record, ext)
-        # Append a single logically atomic external_registration entry whose
-        # payload carries both the record and its external reference.
-        payload = self._external_registration_payload(record, ext)
-        self._append_registry("external_registration", payload)
-        return ext
+        # The bundle existence check/rename and registry append must be atomic
+        # with respect to concurrent register_external callers: wrap the whole
+        # operation in the attempt lock so two concurrent registrations of the
+        # same external artifact are idempotent (item #6). Inside the lock:
+        # check existence, create temp dir, write bundle, atomic rename, append
+        # registry. If the bundle already exists with matching metadata, return
+        # idempotently.
+        try:
+            with AttemptLock(self._lock_path):
+                self._write_metadata_only_bundle(record, ext)
+                # Append a single logically atomic external_registration entry
+                # whose payload carries both the record and its external
+                # reference. Idempotent: if the artifact is already indexed as
+                # an external_registration, do not append a duplicate (item #6).
+                # hold_lock=True avoids re-acquiring the non-reentrant lock.
+                self._ensure_external_indexed(record, ext)
+                return ext
+        except LockUnavailableError as e:
+            raise ArtifactStoreError(f"could not acquire external-register lock: {e}") from e
 
     def _write_metadata_only_bundle(self, record: ArtifactRecord, ext: ExternalReference) -> None:
         bdir = artifact_bundle_dir(
@@ -1029,6 +1099,22 @@ class ArtifactStore:
         payload = json.loads(record.model_dump_json(by_alias=True))
         self._append_registry(entry_kind, payload, hold_lock=hold_lock)
 
+    def _ensure_external_indexed(
+        self, record: ArtifactRecord, ext: ExternalReference, *, hold_lock: bool = True
+    ) -> None:
+        """Append an external_registration entry if not already indexed (item #6).
+
+        Idempotent under the held attempt lock: if the artifact_id is already
+        present in the registry (e.g. a concurrent register_external won the
+        race and appended first), no duplicate entry is appended. The combined
+        record+external payload is appended atomically otherwise.
+        """
+        existing = self._indexed_artifact_ids()
+        if record.artifact_id in existing:
+            return
+        payload = self._external_registration_payload(record, ext)
+        self._append_registry("external_registration", payload, hold_lock=hold_lock)
+
     def _append_registry(
         self, entry_kind: str, payload: dict[str, Any], *, hold_lock: bool = False
     ) -> RegistryEntry:
@@ -1075,9 +1161,14 @@ class ArtifactStore:
 
     def _bundle_path(self, artifact_id: str) -> Path:
         validate_id_component(artifact_id, "artifact_id")
+        # Verify no symlinked parent directory in the chain from the artifact
+        # root to the artifacts tree BEFORE returning any bundle path (item #4).
+        # This protects locate()/inspect()/verify() from a symlinked ancestor.
+        arts = self._attempt_dir / "artifacts"
+        if arts.exists():
+            _verify_no_symlinks_in_chain(self._artifact_root, arts)
         # Locate the bundle by scanning categories (the artifact_id encodes the
         # full descriptor, not the category, so we look it up).
-        arts = self._attempt_dir / "artifacts"
         if not arts.exists():
             raise ArtifactNotFoundError(f"artifact {artifact_id!r} not found.")
         for cat_dir in arts.iterdir():
@@ -1085,6 +1176,8 @@ class ArtifactStore:
                 continue
             cand = cat_dir / artifact_id
             if cand.exists() or _is_symlink(cand):
+                # Verify the full chain to the candidate bundle before returning.
+                _verify_no_symlinks_in_chain(self._artifact_root, cand)
                 return cand
         raise ArtifactNotFoundError(f"artifact {artifact_id!r} not found.")
 
@@ -1115,6 +1208,12 @@ class ArtifactStore:
         Returns the last-known registry state per artifact_id. An authoritative
         registry read that propagates registry corruption (item #1).
         """
+        # Verify no symlinked parent directory in the chain before iterating the
+        # category directory (item #4). Even though list reads the registry, a
+        # symlinked artifact tree is rejected defensively.
+        arts = self._attempt_dir / "artifacts"
+        if arts.exists():
+            _verify_no_symlinks_in_chain(self._artifact_root, arts)
         entries = self._load_registry()
         histories = _reduce_history(entries)
         out: list[ArtifactRecord] = []
@@ -1194,6 +1293,19 @@ class ArtifactStore:
                 artifact_id=artifact_id,
                 diagnostic_code="bundle_metadata_mismatch",
             )
+        # Bind the bundle's record to THIS store's identity and to its on-disk
+        # location (item #7). A bundle that carries a record from a different
+        # run/attempt/fingerprint, or that lives under the wrong category or
+        # attempt directory, is not evidence for this store and is rejected with
+        # a typed identity_binding_mismatch result. This prevents a bundle
+        # copied from another attempt from verifying against this store.
+        binding = self._check_bundle_binding(bdir, record)
+        if binding is not None:
+            return VerificationResult(
+                status=False,
+                artifact_id=artifact_id,
+                diagnostic_code=binding,
+            )
         if not content.exists():
             # External/metadata_only bundles have no local content.
             ext = self._current_external(artifact_id)
@@ -1251,6 +1363,41 @@ class ArtifactStore:
         histories = _reduce_history(entries)
         hist = histories.get(artifact_id)
         return hist.external if hist else None
+
+    def _check_bundle_binding(
+        self, bdir: Path, record: ArtifactRecord
+    ) -> VerificationDiagnosticCode | None:
+        """Bind a bundle's record to this store's identity and location (item #7).
+
+        Returns a diagnostic code if any binding fails, or None when the bundle
+        is correctly bound to:
+        a) this store's run_id, attempt_id, specification_fingerprint;
+        b) a parent category directory whose name matches ``record.category``;
+        c) the attempt directory owned by this store.
+        """
+        if record.run_id != self._identity.run_id:
+            return "identity_binding_mismatch"
+        if record.attempt_id != self._identity.attempt_id:
+            return "identity_binding_mismatch"
+        if record.specification_fingerprint != self.specification_fingerprint:
+            return "identity_binding_mismatch"
+        # The bundle's parent directory must be the category directory whose name
+        # matches the record's category.
+        try:
+            category_component = bdir.parent.name
+        except OSError:
+            return "identity_binding_mismatch"
+        if category_component != record.category:
+            return "identity_binding_mismatch"
+        # The bundle's attempt directory (three levels up from the bundle:
+        # <attempt>/artifacts/<category>/<artifact_id>) must equal this store's
+        # canonical attempt directory.
+        if len(bdir.parents) < 3:
+            return "identity_binding_mismatch"
+        bundle_attempt = bdir.parents[2]
+        if bundle_attempt != self._attempt_dir:
+            return "identity_binding_mismatch"
+        return None
 
     def verify_bool(self, artifact_id: str) -> bool:
         """Boolean convenience wrapper around :meth:`verify` (amendment J)."""
@@ -1324,6 +1471,10 @@ class ArtifactStore:
         skipped: list[tuple[str, str]] = []
         if not arts.exists():
             return RegistryReconciliation(appended=appended, orphans=orphans, skipped=skipped)
+        # Verify no symlinked parent directory in the chain before scanning any
+        # bundle (item #4). A symlinked ancestor would let reconciliation follow
+        # an attacker-controlled tree.
+        _verify_no_symlinks_in_chain(self._artifact_root, arts)
         for cat_dir in sorted(arts.iterdir()):
             if not cat_dir.is_dir():
                 continue
