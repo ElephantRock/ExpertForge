@@ -13,8 +13,10 @@ parses sequentially for large archives).
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterator
+from pathlib import Path
 
 from expertforge.checkpoints.tar_writer import USTAR_BLOCK_SIZE
 
@@ -47,14 +49,26 @@ class TarParseError(Exception):
 
 
 class ParsedMember:
-    """One parsed archive member."""
+    """One parsed archive member.
 
-    __slots__ = ("name", "data", "size")
+    For large tensor members, ``data`` may be ``None`` and ``temp_path`` holds
+    a Path to a temp file containing the member bytes. This keeps peak heap
+    bounded to one member's data during streaming parse.
+    """
 
-    def __init__(self, name: str, data: bytes, size: int) -> None:
+    __slots__ = ("name", "data", "size", "temp_path")
+
+    def __init__(
+        self,
+        name: str,
+        data: bytes | None,
+        size: int,
+        temp_path: Path | None = None,
+    ) -> None:
         self.name = name
         self.size = size
         self.data = data
+        self.temp_path = temp_path
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"ParsedMember(name={self.name!r}, size={self.size})"
@@ -383,7 +397,6 @@ def parse_ustar_archive_streaming(
     the descriptor MUST be positioned at the start of the archive (the caller
     opens it fresh). Raises :class:`TarParseError` on any non-canonical framing.
     """
-    import os
     import stat as _stat
 
     archive_limit = max_archive_bytes or _get_limit("MAX_ARCHIVE_BYTES", _MAX_ARCHIVE_BYTES_DEFAULT)
@@ -478,8 +491,28 @@ def parse_ustar_archive_streaming(
                     f"total tensor bytes {total_tensor_bytes} exceed MAX_TENSOR_BYTES "
                     f"({total_tensor_limit})"
                 )
-        # Read the data, then the padding (validated to be zero).
-        data = _read_exact(size, f"data for {name!r}") if size else b""
+        # Read the data. For large tensor members, spill to a temp file to
+        # keep peak heap bounded (review 4833143258 item 2).
+        _SPILL_THRESHOLD = 4 * 1024 * 1024  # 4 MiB
+        temp_path: Path | None = None
+        if is_tensor and size > _SPILL_THRESHOLD:
+            import tempfile
+
+            fd_tmp, temp_name = tempfile.mkstemp(suffix=".tensor")
+            try:
+                remaining = size
+                while remaining > 0:
+                    chunk_sz = min(remaining, 65536)
+                    chunk = _read_exact(chunk_sz, f"data for {name!r}")
+                    os.write(fd_tmp, chunk)
+                    remaining -= chunk_sz
+                os.fsync(fd_tmp)
+            finally:
+                os.close(fd_tmp)
+            data = None
+            temp_path = Path(temp_name)
+        else:
+            data = _read_exact(size, f"data for {name!r}") if size else b""
         data_blocks = (size + USTAR_BLOCK_SIZE - 1) // USTAR_BLOCK_SIZE
         padding_len = data_blocks * USTAR_BLOCK_SIZE - size
         if padding_len:
@@ -488,7 +521,7 @@ def parse_ustar_archive_streaming(
                 raise TarParseError(f"member {name!r} has non-zero padding bytes")
         blocks_consumed += data_blocks
         _validate_member_name(name)
-        members.append(ParsedMember(name=name, data=data, size=size))
+        members.append(ParsedMember(name=name, data=data, size=size, temp_path=temp_path))
         if len(members) > member_limit:
             raise TarParseError(f"member count exceeds max_member_count ({member_limit})")
 

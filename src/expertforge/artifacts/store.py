@@ -311,25 +311,28 @@ def _open_content_via_fd_chain(root: Path, content: Path) -> int:
     """Open ``content`` through a descriptor chain, parent-race-safe (item 2).
 
     On POSIX, walk from ``root`` (opened once) opening each component via
-    :func:`os.openat` relative to the parent directory descriptor, fstat-verifying
-    each (directories are not symlinks; the final component is a regular file).
-    The returned fd is the leaf of the chain: no path-name ``os.open`` of the
-    final file occurs after the chain is verified, so a TOCTOU swap of an
-    intermediate directory for a symlink cannot redirect the open — the parent
-    fd was already bound before its child was opened.
+    ``os.open(part, dir_fd=parent_fd)`` (the CPython interface to ``openat``),
+    fstat-verifying each (directories are not symlinks; the final component is a
+    regular file). The returned fd is the leaf of the chain: no path-name
+    ``os.open`` of the final file occurs after the chain is verified, so a
+    TOCTOU swap of an intermediate directory for a symlink cannot redirect the
+    open — the parent fd was already bound before its child was opened.
 
-    On Windows (no ``os.openat`` / ``O_NOFOLLOW``), fall back to a path-name
-    ``os.open`` + immediate ``fstat`` regular-file check. This closes the
-    final-element race but leaves a documented residual risk on intermediate
-    directories.
+    On Windows (no ``dir_fd`` support), fall back to a path-name ``os.open`` +
+    immediate ``fstat`` regular-file check. This closes the final-element race
+    but leaves a documented residual risk on intermediate directories.
     """
     import stat as _stat
 
-    if not hasattr(os, "openat"):
+    # Detect POSIX dir_fd support: os.open accepts dir_fd on POSIX, rejects it
+    # on Windows with ValueError.
+    _supports_dir_fd = hasattr(os, "O_NOFOLLOW")
+
+    if not _supports_dir_fd:
         # Windows fallback: path-name open + immediate fstat regular-file check.
         # Residual risk: a concurrent swap of an intermediate directory for a
         # symlink between the (separate) chain verification and this open could
-        # redirect the read. openat is unavailable, so this is the best
+        # redirect the read. dir_fd is unavailable, so this is the best
         # available primitive on Windows.
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         fd = os.open(content, flags)
@@ -353,19 +356,18 @@ def _open_content_via_fd_chain(root: Path, content: Path) -> int:
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     o_path = getattr(os, "O_PATH", 0)
-    # Open the root directory itself (its fd is the chain anchor). O_DIRECTORY on
-    # POSIX; O_RDONLY suffices where O_DIRECTORY is unavailable.
     o_directory = getattr(os, "O_DIRECTORY", 0)
+    o_cloexec = getattr(os, "O_CLOEXEC", 0)
+    # Open the root directory itself (its fd is the chain anchor).
     try:
         parent_fd = os.open(
             str(root),
-            os.O_RDONLY | o_directory | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | o_directory | o_cloexec,
         )
     except OSError as e:
         raise ArtifactConflictError(f"cannot open artifact root {root}: {e}") from e
     opened_fds: list[int] = [parent_fd]
     try:
-        # Verify the root fd is a directory and not a symlink.
         root_st = os.fstat(parent_fd)
         if _stat.S_ISLNK(root_st.st_mode) or not _stat.S_ISDIR(root_st.st_mode):
             raise ArtifactConflictError(f"artifact root {root} is not a directory")
@@ -373,12 +375,12 @@ def _open_content_via_fd_chain(root: Path, content: Path) -> int:
         for i, part in enumerate(rel_parts):
             is_final = i == last
             if is_final:
-                # Open the final file with O_NOFOLLOW so a symlinked final
-                # element is rejected by the kernel, then fstat-verify regular.
-                child_fd = os.openat(
-                    parent_fd,
+                # Open the final file with O_NOFOLLOW + dir_fd so a symlinked
+                # final element is rejected by the kernel, then fstat-verify.
+                child_fd = os.open(
                     part,
-                    os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                    os.O_RDONLY | nofollow | o_cloexec,
+                    dir_fd=parent_fd,
                 )
                 opened_fds.append(child_fd)
                 st = os.fstat(child_fd)
@@ -386,8 +388,6 @@ def _open_content_via_fd_chain(root: Path, content: Path) -> int:
                     raise ArtifactConflictError(
                         f"content component {part!r} is not a regular file; refused."
                     )
-                # Success: the chain reached the regular content file. Return the
-                # leaf fd and close all intermediate directory fds.
                 leaf: int = child_fd
                 opened_fds.pop()  # don't close the returned leaf
                 for fd in reversed(opened_fds):
@@ -397,24 +397,19 @@ def _open_content_via_fd_chain(root: Path, content: Path) -> int:
                         pass
                 return leaf
             # Intermediate component: open as a directory via O_PATH|O_NOFOLLOW
-            # (or O_RDONLY|O_DIRECTORY) and fstat-verify it is a real directory,
-            # not a symlink. O_NOFOLLOW ensures a symlinked intermediate name is
-            # rejected by the kernel at each step.
+            # (or O_RDONLY|O_DIRECTORY) relative to parent_fd, fstat-verify.
             if o_path:
-                flags = o_path | nofollow | getattr(os, "O_CLOEXEC", 0)
+                flags = o_path | nofollow | o_cloexec
             else:
-                flags = os.O_RDONLY | o_directory | nofollow | getattr(os, "O_CLOEXEC", 0)
-            child_fd = os.openat(parent_fd, part, flags)
+                flags = os.O_RDONLY | o_directory | nofollow | o_cloexec
+            child_fd = os.open(part, flags, dir_fd=parent_fd)
             opened_fds.append(child_fd)
             st = os.fstat(child_fd)
             if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISDIR(st.st_mode):
                 raise ArtifactConflictError(f"path component {part!r} is not a directory; refused.")
             parent_fd = child_fd
-        # Unreachable: the loop returns on the final component.
         raise ArtifactConflictError("content path has no final component")  # pragma: no cover
     except BaseException:
-        # Close every still-open descriptor on ANY failure (including
-        # BaseException so no fd leaks mid-chain).
         for fd in opened_fds:
             try:
                 os.close(fd)

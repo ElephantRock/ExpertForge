@@ -50,6 +50,7 @@ from expertforge.checkpoints.tar_reader import (
     ParsedMember,
     TarParseError,
     parse_ustar_archive,
+    parse_ustar_archive_streaming,
 )
 from expertforge.config.resolve import ResolutionEnvelope
 from expertforge.identity.record import AttemptIdentityRecord
@@ -195,6 +196,10 @@ class CheckpointArchive:
         m = self._members_by_name.get(name)
         if m is None:
             raise CheckpointCorruptError(f"missing member {name!r}")
+        if m.data is None:
+            if m.temp_path is not None:
+                return m.temp_path.read_bytes()
+            raise CheckpointCorruptError(f"member {name!r} has no data and no temp_path")
         return m.data
 
     def component(self, role: str) -> bytes:
@@ -818,8 +823,6 @@ class CheckpointStore:
         """
         import os as _os
 
-        from expertforge.checkpoints.tar_reader import parse_ustar_archive_streaming
-
         nofollow = getattr(_os, "O_NOFOLLOW", 0)
         fd = _os.open(path, _os.O_RDONLY | nofollow | getattr(_os, "O_BINARY", 0))
         try:
@@ -834,7 +837,11 @@ class CheckpointStore:
         return members
 
     def _decode_manifest(self, members: list[ParsedMember]) -> CheckpointManifest:
-        raw = members[0].data
+        raw = (
+            members[0].data
+            if members[0].data is not None
+            else (members[0].temp_path.read_bytes() if members[0].temp_path else b"")
+        )
         try:
             text = raw.decode("utf-8")
             data = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
@@ -886,14 +893,17 @@ class CheckpointStore:
             raise CheckpointCorruptError(f"missing members: {sorted(missing)!r}")
         for name, (sha, size) in expected.items():
             m = by_name[name]
-            actual_sha = hashlib.sha256(m.data).hexdigest()
+            member_data = (
+                m.data if m.data is not None else (m.temp_path.read_bytes() if m.temp_path else b"")
+            )
+            actual_sha = hashlib.sha256(member_data).hexdigest()
             if actual_sha != sha:
                 raise CheckpointCorruptError(
                     f"member {name!r} digest mismatch: {actual_sha!r} != {sha!r}"
                 )
-            if len(m.data) != size:
+            if len(member_data) != size:
                 raise CheckpointCorruptError(
-                    f"member {name!r} size mismatch: {len(m.data)!r} != {size!r}"
+                    f"member {name!r} size mismatch: {len(member_data)!r} != {size!r}"
                 )
         # No metadata.json (amendment B).
         if "metadata.json" in by_name:
@@ -940,7 +950,12 @@ class CheckpointStore:
         by_name = {m.name: m for m in members}
 
         def _comp(role: str) -> bytes:
-            return by_name[f"state/{role}.json"].data
+            m = by_name[f"state/{role}.json"]
+            if m.data is not None:
+                return m.data
+            if m.temp_path is not None:
+                return m.temp_path.read_bytes()
+            raise CheckpointCorruptError(f"member state/{role}.json has no data")
 
         def _strict(payload: dict[str, Any], model_cls: Any, label: str) -> Any:
             # Item 5: validate from the canonical JSON re-encoding so list->tuple
@@ -1203,10 +1218,52 @@ class CheckpointStore:
             return CheckpointInspection(
                 status="corrupt", diagnostic=str(e), archive_byte_size=archive_byte_size
             )
-        # member_count from the manifest-declared graph (manifest +
-        # state_components + tensor_members). This reflects the expected member
-        # layout without scanning the whole file.
+        # Validate the complete archive: scan all members to verify the tar
+        # terminator, member order, and that every declared member exists with
+        # the correct size. This prevents a damaged/truncated archive from being
+        # misclassified as "complete" (review 4833143258 item 3).
+        try:
+            scan_fd = os.open(
+                str(path),
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+        except OSError as e:
+            return CheckpointInspection(
+                status="corrupt", diagnostic=f"re-open for scan failed: {e}"
+            )
+        try:
+            raw = os.read(scan_fd, archive_byte_size)
+            members = parse_ustar_archive(raw, validate_member_order=True)
+        except TarParseError as e:
+            return CheckpointInspection(
+                status="corrupt",
+                diagnostic=f"tar scan failed: {e}",
+                archive_byte_size=archive_byte_size,
+            )
+        except CheckpointCorruptError as e:
+            return CheckpointInspection(
+                status="corrupt",
+                diagnostic=str(e),
+                archive_byte_size=archive_byte_size,
+            )
+        finally:
+            try:
+                os.close(scan_fd)
+            except OSError:
+                pass
+        # Verify declared members match actual scanned members.
         declared_member_count = 1 + len(manifest.state_components) + len(manifest.tensor_members)
+        if len(members) != declared_member_count:
+            return CheckpointInspection(
+                status="corrupt",
+                diagnostic=(
+                    f"member count mismatch: declared {declared_member_count}, "
+                    f"actual {len(members)}"
+                ),
+                manifest=manifest,
+                archive_byte_size=archive_byte_size,
+                member_count=len(members),
+            )
         return CheckpointInspection(
             status="complete",
             manifest=manifest,
