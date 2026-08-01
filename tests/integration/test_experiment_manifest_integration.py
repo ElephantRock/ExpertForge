@@ -13,6 +13,7 @@ from expertforge.artifacts import ArtifactRecord, ArtifactStore
 from expertforge.experiments import (
     DatasetReference,
     EvaluationSummary,
+    ExperimentManifest,
     LoadedExperimentManifest,
     ManifestBindingError,
     ManifestCorruptError,
@@ -108,7 +109,7 @@ def _generate(
     store: ArtifactStore,
     records: dict[str, ArtifactRecord],
     **kwargs: Any,
-):
+) -> ExperimentManifest:
     values: dict[str, Any] = {
         "identity": store.identity,
         "finalized_at_utc": FINALIZED_AT,
