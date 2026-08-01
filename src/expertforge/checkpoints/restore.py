@@ -58,6 +58,7 @@ OptimizerStateBundle = tuple[
     SafeValue | None,
 ]
 
+
 __all__ = [
     "RestoreError",
     "RestoreIncompatibleError",
@@ -73,6 +74,7 @@ __all__ = [
     "OptimizerState",
     "OptimizerStateBundle",
     "SchedulerState",
+    "SchedulerStateBundle",
     "ScalerState",
 ]
 
@@ -232,6 +234,29 @@ class SchedulerState(_StrictModel):
     has_state: bool = True
 
 
+class SchedulerStateBundle(_StrictModel):
+    """A resolved scheduler state bundle (item 4).
+
+    Carries the optional scheduler state tensor AND the optional structured
+    scalar state (e.g. a step counter, last-epoch LR, or other non-tensor
+    scheduler bookkeeping). Either may be None:
+
+    - tensor-only scheduler (the legacy case): ``tensor`` set, ``scalar_state``
+      None;
+    - scalar-only scheduler (a scheduler with no tensor state, e.g. a
+      step-counter-only scheduler): ``tensor`` None, ``scalar_state`` set;
+    - mixed: both set.
+
+    Factories consume this via :meth:`StateFactory.apply_scheduler_state`. The
+    restore path routes a scalar-bearing scheduler through the full-state method
+    so scalar state is never silently dropped (mirroring the optimizer item-3
+    fix).
+    """
+
+    tensor: CapturedTensor | None = None
+    scalar_state: SafeValue | None = None
+
+
 class ScalerState(_StrictModel):
     """The strict ``state/scaler.json`` component payload (item 12)."""
 
@@ -289,16 +314,19 @@ def build_restored_tensors(
     dict[str, CapturedTensor],
     dict[str, CapturedTensor],
     OptimizerStateBundle,
+    SchedulerStateBundle,
     dict[str, int],
 ]:
     """Decode the model/optimizer/scheduler/scaler component refs and materialize
     the captured tensors from the archive's tensor members.
 
     Returns ``(parameters, buffers, state_tensors_by_role, optimizer_bundle,
-    member_index)`` where ``optimizer_bundle`` is ``(legacy_tensor, slots,
-    scalar_state)`` (item 3): the legacy single ``state_tensor`` (when present),
-    the full multi-slot tensors keyed by ``(group_index, param_name,
-    slot_name)``, and the structured scalar state.
+    scheduler_bundle, member_index)`` where:
+
+    - ``optimizer_bundle`` is ``(legacy_tensor, slots, scalar_state)`` (item 3);
+    - ``scheduler_bundle`` is a :class:`SchedulerStateBundle` carrying the
+      scheduler tensor (when present) AND the structured scalar_state (item 4):
+      tensor-only, scalar-only, and mixed schedulers all round-trip.
 
     Every component tensor reference is strict-schema-validated (item 5) and
     cross-bound to the manifest's :class:`TensorMemberRef`: ``member_name``,
@@ -339,6 +367,9 @@ def build_restored_tensors(
     optimizer_slots: dict[tuple[int, str, str], CapturedTensor] = {}
     optimizer_legacy: CapturedTensor | None = None
     optimizer_scalar: SafeValue | None = None
+    # Item 4: scheduler carries an optional tensor AND an optional scalar_state.
+    scheduler_tensor: CapturedTensor | None = None
+    scheduler_scalar: SafeValue | None = None
     for role in ("optimizer", "scheduler", "scaler"):
         comp_ref = next((c for c in manifest.state_components if c.role == role), None)
         if comp_ref is None:
@@ -362,7 +393,7 @@ def build_restored_tensors(
                 )
         except ValidationError as e:
             raise RestoreError(f"{role} component failed strict validation: {e}") from e
-        # A stateless component (has_state=False) carries no tensor.
+        # A stateless component (has_state=False) carries no tensor/scalar.
         if not parsed.has_state:
             continue
         if role == "optimizer":
@@ -374,10 +405,13 @@ def build_restored_tensors(
             opt_state: OptimizerState = parsed  # type: ignore[assignment]
             if opt_state.state_tensor is not None:
                 optimizer_legacy = _materialize(archive, opt_state.state_tensor, members_by_name)
+            opt_descriptor = manifest.compatibility.optimizer_descriptor
             for slot_ref in opt_state.state_slots:
                 slot_tensor = _materialize(archive, slot_ref, members_by_name)
+                # Item 3: resolve the slot's group_index against the descriptor
+                # (the authoritative source) rather than hardcoding group_index=0.
                 slot_key = _slot_key_from_logical_names(
-                    slot_ref.logical_names, slot_ref.member_name
+                    slot_ref.logical_names, slot_ref.member_name, opt_descriptor
                 )
                 optimizer_slots[slot_key] = slot_tensor
             optimizer_scalar = opt_state.scalar_state
@@ -385,11 +419,32 @@ def build_restored_tensors(
             if optimizer_legacy is not None:
                 state_tensors["optimizer"] = optimizer_legacy
             continue
+        if role == "scheduler":
+            # Item 4: build the SchedulerStateBundle from the optional tensor AND
+            # the optional scalar_state. A scalar-only scheduler (no tensor) is
+            # valid and no longer raises; a mixed scheduler carries both.
+            sched_state: SchedulerState = parsed  # type: ignore[assignment]
+            if sched_state.state_tensor is not None:
+                scheduler_tensor = _materialize(archive, sched_state.state_tensor, members_by_name)
+            scheduler_scalar = sched_state.scalar_state
+            # A scheduler with has_state=True must carry at least one of
+            # tensor/scalar; an empty has_state=True scheduler is corruption.
+            if scheduler_tensor is None and scheduler_scalar is None:
+                raise RestoreError(
+                    "scheduler component has_state=True but carries neither a "
+                    "state_tensor nor a scalar_state"
+                )
+            # Keep the legacy tensor view for backward-compatible consumers.
+            if scheduler_tensor is not None:
+                state_tensors["scheduler"] = scheduler_tensor
+            continue
         ref = parsed.state_tensor
         if ref is None:
             raise RestoreError(f"component {role!r} is missing state_tensor")
         tensor = _materialize(archive, ref, members_by_name)
         state_tensors[role] = tensor
+
+    scheduler_bundle = SchedulerStateBundle(tensor=scheduler_tensor, scalar_state=scheduler_scalar)
 
     member_index = {m.member_name: i for i, m in enumerate(manifest.tensor_members)}
     return (
@@ -397,22 +452,31 @@ def build_restored_tensors(
         buffers,
         state_tensors,
         (optimizer_legacy, optimizer_slots, optimizer_scalar),
+        scheduler_bundle,
         member_index,
     )
 
 
 def _slot_key_from_logical_names(
-    logical_names: tuple[str, ...], member_name: str
+    logical_names: tuple[str, ...],
+    member_name: str,
+    opt_descriptor: OptimizerDescriptor,
 ) -> tuple[int, str, str]:
     """Derive the (group_index, param_name, slot_name) key for an optimizer slot.
 
-    Optimizer slot tensors follow the canonical naming
-    ``optimizer.<slot_name>.<param_name>`` (see
-    :class:`CapturedCheckpointState`). The group_index is not encoded in the
-    name; it is resolved against the optimizer descriptor at apply time. Because
-    the slot key must be stable and unique across param+slot, the group index is
-    defaulted to 0 here and the factory binds the slot by (param, slot) to the
-    descriptor's group during apply.
+    Item 3: the group_index is resolved from the optimizer descriptor — the
+    authoritative source — by matching the slot's ``(param_name, slot_name)``
+    (parsed from the canonical logical name
+    ``optimizer.<slot_name>.<param_name>``) to a declared
+    :class:`OptimizerStateSlot`. This preserves GROUP IDENTITY for multi-group
+    optimizers: a slot whose (param, slot) appears in group 1 is keyed by
+    group_index=1, not silently collapsed to group 0.
+
+    The logical name does NOT carry the group index (the descriptor does), so
+    matching is by (param, slot). If the same (param, slot) is declared in
+    multiple groups, the match is ambiguous and the slot is rejected — providers
+    must disambiguate via distinct slot_name or param_name per group. A slot
+    declared in exactly one group resolves to that group's index.
     """
     if not logical_names:
         raise RestoreError(f"optimizer slot {member_name!r} has no logical_names")
@@ -427,7 +491,23 @@ def _slot_key_from_logical_names(
     param_name = ".".join(parts[2:])
     if not slot_name or not param_name:
         raise RestoreError(f"optimizer slot logical_name {name!r} is malformed")
-    return (0, param_name, slot_name)
+    # Resolve the group_index against the descriptor (the authoritative source).
+    matches = [
+        s.group_index
+        for s in opt_descriptor.state_slots
+        if s.param_name == param_name and s.slot_name == slot_name
+    ]
+    if not matches:
+        raise RestoreError(
+            f"optimizer slot ({param_name!r}, {slot_name!r}) is not declared in the "
+            "optimizer descriptor state_slots"
+        )
+    if len(set(matches)) > 1:
+        raise RestoreError(
+            f"optimizer slot ({param_name!r}, {slot_name!r}) is ambiguous: declared in "
+            f"groups {sorted(set(matches))}; disambiguate via distinct slot/param names"
+        )
+    return (matches[0], param_name, slot_name)
 
 
 def _apply_optimizer_state_to_factory(
@@ -439,17 +519,59 @@ def _apply_optimizer_state_to_factory(
 ) -> None:
     """Apply the full optimizer state bundle to ``factory`` (item 3).
 
-    If the factory implements :meth:`apply_optimizer_state`, it receives the
-    legacy single tensor, the full multi-slot dict, and the structured scalar
-    state together — so a real multi-slot optimizer round-trips. Otherwise the
-    transaction falls back to the legacy single-tensor :meth:`apply_optimizer`
-    so existing reference factories keep working.
+    The optimizer carries structured state beyond a single legacy tensor:
+    multi-slot tensors (keyed by ``(group_index, param_name, slot_name)``) and
+    a structured ``scalar_state``. When EITHER is present, the factory MUST
+    implement :meth:`apply_optimizer_state`; falling back to the legacy
+    single-tensor :meth:`apply_optimizer` would SILENTLY DROP the slots/scalars,
+    producing an incomplete restore. This is now a hard error rather than a
+    silent fallback (item 3).
+
+    When the optimizer carries ONLY the legacy single tensor (no slots, no
+    scalar_state), the legacy :meth:`apply_optimizer` path is still permitted so
+    minimal reference factories keep working.
     """
+    has_structured = bool(slots) or scalar_state is not None
     apply_state = getattr(factory, "apply_optimizer_state", None)
     if callable(apply_state):
         apply_state(target, state_tensor, slots, scalar_state)
-    else:
-        factory.apply_optimizer(target, state_tensor)
+        return
+    if has_structured:
+        raise RestoreError(
+            "optimizer carries structured state (multi-slot tensors or scalar_state) "
+            "but the factory does not implement apply_optimizer_state; refusing to "
+            "silently drop slots/scalars via the legacy apply_optimizer fallback"
+        )
+    # Legacy path: single tensor only, no structured state.
+    factory.apply_optimizer(target, state_tensor)
+
+
+def _apply_scheduler_state_to_factory(
+    factory: Any,
+    target: Any,
+    bundle: SchedulerStateBundle,
+) -> None:
+    """Apply the scheduler state bundle to ``factory`` (item 4).
+
+    The scheduler may carry a tensor, a scalar_state, or both. When the bundle
+    carries scalar_state, the factory MUST implement
+    :meth:`apply_scheduler_state` so the scalar state is consumed (falling back
+    to the legacy :meth:`apply_scheduler` would silently drop it). A tensor-only
+    scheduler may use the legacy path.
+    """
+    has_scalar = bundle.scalar_state is not None
+    apply_state = getattr(factory, "apply_scheduler_state", None)
+    if callable(apply_state):
+        apply_state(target, bundle)
+        return
+    if has_scalar:
+        raise RestoreError(
+            "scheduler carries scalar_state but the factory does not implement "
+            "apply_scheduler_state; refusing to silently drop scalar state via "
+            "the legacy apply_scheduler fallback"
+        )
+    # Legacy path: tensor only (or empty), no scalar state.
+    factory.apply_scheduler(target, bundle.tensor)
 
 
 def _materialize(
@@ -593,9 +715,14 @@ class RestoreTransaction:
             raise RestoreError(f"factory.create failed: {e}") from e
         self._maybe_fail("factory")
 
-        parameters, buffers, state_tensors, optimizer_bundle, _ = build_restored_tensors(
-            self._archive
-        )
+        (
+            parameters,
+            buffers,
+            state_tensors,
+            optimizer_bundle,
+            scheduler_bundle,
+            _,
+        ) = build_restored_tensors(self._archive)
 
         # Apply parameters.
         self._factory.apply_parameters(self._target, parameters)
@@ -608,16 +735,19 @@ class RestoreTransaction:
 
         # Apply optimizer state (item 3): the full multi-slot tensors plus the
         # structured scalar state are applied together so a real multi-slot
-        # optimizer round-trips. Fall back to the legacy single-tensor apply when
-        # the factory does not implement apply_optimizer_state.
+        # optimizer round-trips. Structured state REQUIRES apply_optimizer_state
+        # (no silent legacy fallback that drops slots/scalars).
         opt_legacy, opt_slots, opt_scalar = optimizer_bundle
         _apply_optimizer_state_to_factory(
             self._factory, self._target, opt_legacy, opt_slots, opt_scalar
         )
         self._maybe_fail("optimizer")
 
-        # Apply scheduler state.
-        self._factory.apply_scheduler(self._target, state_tensors.get("scheduler"))
+        # Apply scheduler state (item 4): the full SchedulerStateBundle (tensor
+        # + scalar_state) is applied via apply_scheduler_state so scalar state is
+        # never silently dropped. A scalar-bearing scheduler routes through the
+        # full-state method; a tensor-only scheduler may use the legacy path.
+        _apply_scheduler_state_to_factory(self._factory, self._target, scheduler_bundle)
         self._maybe_fail("scheduler")
 
         # Apply scaler state (if present).

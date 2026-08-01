@@ -34,10 +34,11 @@ from expertforge.artifacts.models import (
     RetentionStatus,
 )
 from expertforge.artifacts.store import BLOCK_SIZE, ArtifactStore
-from expertforge.checkpoints.encoder import ArchiveMembers, build_archive
+from expertforge.checkpoints.encoder import ArchiveParts, build_archive_parts
 from expertforge.checkpoints.models import (
     CHECKPOINT_ARCHIVE_FORMAT_VERSION,
     MAX_ARCHIVE_BYTES,
+    MAX_COMPONENT_MEMBER_BYTES,
     CheckpointInspection,
     CheckpointManifest,
     CompatibilityDescriptor,
@@ -45,7 +46,11 @@ from expertforge.checkpoints.models import (
     CompatibilityResult,
     canonical_json_bytes,
 )
-from expertforge.checkpoints.tar_reader import ParsedMember, TarParseError, parse_ustar_archive
+from expertforge.checkpoints.tar_reader import (
+    ParsedMember,
+    TarParseError,
+    parse_ustar_archive,
+)
 from expertforge.config.resolve import ResolutionEnvelope
 from expertforge.identity.record import AttemptIdentityRecord
 from expertforge.provenance.record import ProvenanceRecord
@@ -115,9 +120,13 @@ class CheckpointArchive:
     """The fully decoded, validated checkpoint archive.
 
     Holds the manifest, the parsed members (by name), the decoded component
-    payloads, and the binding :class:`ArtifactRecord`. All state is materialized
-    in memory (below the v1 bounds). Restoration is a separate transaction
-    (:mod:`expertforge.checkpoints.restore`).
+    payloads, and the binding :class:`ArtifactRecord`. On the small path (every
+    realistic v1 checkpoint, ≤ MAX_INMEMORY_ARCHIVE_BYTES) the full tar bytes are
+    materialized in memory for inspection. On the LARGE path (> 64 MiB, item 8)
+    the archive is stream-parsed from the file descriptor and ``tar_bytes`` is
+    NOT retained — the complete archive is never held in Python heap; only the
+    parsed member bytes the caller requests are materialized. Restoration is a
+    separate transaction (:mod:`expertforge.checkpoints.restore`).
     """
 
     __slots__ = (
@@ -135,15 +144,20 @@ class CheckpointArchive:
         manifest: CheckpointManifest,
         members: list[ParsedMember],
         record: ArtifactRecord,
-        tar_bytes: bytes,
+        tar_bytes: bytes | None,
+        content_digest: str,
+        byte_size: int,
     ) -> None:
         self._manifest = manifest
         self._members_by_name = {m.name: m for m in members}
         self._record = record
+        # tar_bytes is None on the large (streaming) path: the whole archive is
+        # never retained. content_digest / byte_size are always populated (they
+        # are computed incrementally during the streaming read, before any
+        # member is parsed).
         self._tar_bytes = tar_bytes
-        h = hashlib.sha256(tar_bytes)
-        self._content_digest = f"sha256:{h.hexdigest()}"
-        self._byte_size = len(tar_bytes)
+        self._content_digest = content_digest
+        self._byte_size = byte_size
 
     @property
     def manifest(self) -> CheckpointManifest:
@@ -167,6 +181,13 @@ class CheckpointArchive:
 
     @property
     def tar_bytes(self) -> bytes:
+        # Item 8: on the large (streaming) path the complete tar is intentionally
+        # not retained. Callers that need raw archive bytes must use the small
+        # path (every realistic v1 checkpoint) or re-read the published content.
+        if self._tar_bytes is None:
+            raise CheckpointCorruptError(
+                "tar_bytes is unavailable on the streaming (large-archive) path"
+            )
         return self._tar_bytes
 
     def member(self, name: str) -> bytes:
@@ -224,9 +245,11 @@ class CheckpointStore:
         provider's :meth:`capture_checkpoint_snapshot`. The RNG member is
         serialized from ``captured.rng_bundle_bytes`` (the atomic snapshot); an
         optional ``rng_bundle`` is validated against those bytes and rejected on
-        disagreement (item 4). Per amendment F / item 8, the archive is STREAMED
-        to a temporary file during encoding rather than materialized whole in
-        memory; the temp file is then published via
+        disagreement (item 4). Per amendment F / item 8 (streaming), the archive
+        parts are computed once (:func:`build_archive_parts`) and then STREAMED
+        member-by-member to a temp file via :func:`stream_ustar_archive` while
+        the SHA-256 digest is updated incrementally — the complete tar is NEVER
+        materialized in memory. The temp file is then published via
         :meth:`ArtifactStore.publish` (which copies the verified regular file
         into a canonical bundle). The returned record is verified for checkpoint
         category/format/version, producing component, identity (run/attempt/
@@ -236,13 +259,14 @@ class CheckpointStore:
         import tempfile
 
         from expertforge.checkpoints.models import CapturedCheckpointState
+        from expertforge.checkpoints.tar_writer import stream_ustar_archive
 
         if not isinstance(captured, CapturedCheckpointState):
             raise CheckpointComponentError(
                 "captured must be a CapturedCheckpointState from capture_checkpoint_snapshot()"
             )
         ts = created_at_utc or datetime.now(tz=_UTC())
-        archive = build_archive(
+        parts = build_archive_parts(
             identity=identity,
             captured=captured,
             configuration_envelope=configuration_envelope,
@@ -251,23 +275,29 @@ class CheckpointStore:
             parent=parent,
             created_at_utc=ts,
         )
-        # Item 8: stream the encoded archive to a temp file instead of holding
-        # the whole tar in memory through publication. publish() re-hashes the
-        # regular file (no symlink following) into the canonical bundle, so the
-        # temp file is the sole transient allocation.
+        # Item 8: stream the members directly to a temp file. Each member's
+        # header + padded data is written as it is encoded; the running SHA-256
+        # is updated per chunk so the digest is computed without ever holding
+        # the whole tar in a single buffer. publish() re-hashes the regular file
+        # (no symlink following) into the canonical bundle.
         tmp_fd, tmp_name = tempfile.mkstemp(prefix=".tmp-cp-", suffix=".tar")
+        h = hashlib.sha256()
+        total = 0
         try:
+
+            def _write(chunk: bytes) -> None:
+                nonlocal total
+                _full_write(tmp_fd, chunk)
+                h.update(chunk)
+                total += len(chunk)
+
+            stream_ustar_archive(parts.members, _write)
+            os.fsync(tmp_fd)
             os.close(tmp_fd)
+            tmp_fd = -1  # mark closed so the finally does not double-close
+            parts.content_digest = f"sha256:{h.hexdigest()}"
+            parts.byte_size = total
             tmp_path = Path(tmp_name)
-            view = memoryview(archive.tar_bytes)
-            with open(tmp_path, "wb") as fh:
-                total = 0
-                chunk = MAX_INMEMORY_ARCHIVE_BYTES
-                if chunk <= 0:
-                    chunk = 64 * 1024
-                while total < len(view):
-                    fh.write(view[total : total + chunk])
-                    total += chunk
             record = self._store.publish(
                 tmp_path,
                 category="checkpoint",
@@ -277,17 +307,22 @@ class CheckpointStore:
                 parent=parent,
             )
         finally:
+            if tmp_fd >= 0:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(tmp_name)
             except OSError:
                 pass
-        self._verify_returned_record(record, archive, parent, identity)
+        self._verify_returned_record(record, parts, parent, identity)
         return record
 
     def _verify_returned_record(
         self,
         record: ArtifactRecord,
-        archive: ArchiveMembers,
+        archive: ArchiveParts,
         parent: ParentReference | None,
         identity: AttemptIdentityRecord,
     ) -> None:
@@ -398,25 +433,44 @@ class CheckpointStore:
                 "inspected artifact_id"
             )
         try:
-            # Item 8: stream-parse from the fd. Below MAX_INMEMORY_ARCHIVE_BYTES
-            # the bounded read materializes the whole tar in memory; above it
-            # the archive is streamed to a temp file (the whole tar is never
-            # held in Python heap) and read back via mmap for parsing. The
-            # digest/size are computed during the read so the descriptor is the
-            # single trusted source.
-            tar_bytes, digest = self._read_and_hash_fd(fd, record.byte_size)
+            if record.byte_size <= MAX_INMEMORY_ARCHIVE_BYTES:
+                # Small path (every realistic v1 checkpoint): materialize the
+                # whole tar in memory, hash it, and parse from the buffer.
+                tar_bytes, digest = self._read_and_hash_fd(fd, record.byte_size)
+                size_read = len(tar_bytes)
+            else:
+                # Item 8 large path: stream the fd to a temp file (hashing
+                # incrementally) then re-open the verified temp file and
+                # stream-PARSE it with parse_ustar_archive_streaming. The
+                # complete archive is NEVER held in Python heap — peak heap is
+                # one member's data plus one header block. tar_bytes stays None.
+                tar_bytes = None
+                digest, size_read, parsed_path = self._read_large_fd_streaming(fd, record.byte_size)
         finally:
             os.close(fd)
-        # The descriptor is now closed; all subsequent validation uses tar_bytes.
+        # The content descriptor is now closed. The digest/size were computed
+        # during the read so the descriptor was the single trusted source.
         if digest != record.content_digest:
             raise CheckpointCorruptError(
                 f"content digest {digest!r} != record {record.content_digest!r}"
             )
-        if len(tar_bytes) != record.byte_size:
+        if size_read != record.byte_size:
             raise CheckpointCorruptError(
-                f"content size {len(tar_bytes)!r} != record {record.byte_size!r}"
+                f"content size {size_read!r} != record {record.byte_size!r}"
             )
-        members = self._parse_and_validate_tar(tar_bytes)
+        if tar_bytes is not None:
+            members = self._parse_and_validate_tar(tar_bytes)
+        else:
+            # Large path: parse the verified temp file sequentially. The temp
+            # file is unlinked after parsing; only the parsed member bytes are
+            # retained.
+            try:
+                members = self._parse_and_validate_tar_streaming(parsed_path, record.byte_size)
+            finally:
+                try:
+                    parsed_path.unlink()
+                except OSError:
+                    pass
         manifest = self._decode_manifest(members)
         # Manifest producing identity must equal the record fields (amendment G).
         self._assert_manifest_record_binding(manifest, record)
@@ -429,6 +483,8 @@ class CheckpointStore:
             members=members,
             record=record,
             tar_bytes=tar_bytes,
+            content_digest=digest,
+            byte_size=size_read,
         )
 
     def _inspect_record(self, artifact_id: str) -> ArtifactRecord:
@@ -602,38 +658,51 @@ class CheckpointStore:
             raise CheckpointCorruptError(
                 "manifest specification_fingerprint != record specification_fingerprint"
             )
-        if manifest.parent_artifact_id != (record.parent.artifact_id if record.parent else None):
+        # Item 6: compare the COMPLETE ParentReference, not just artifact_id.
+        # A manifest whose parent_run_id / parent_attempt_id diverge from the
+        # record's registered parent (while sharing the artifact_id) must be
+        # rejected — comparing only artifact_id lets a swapped run/attempt slip
+        # through. The manifest stores the three fields separately; the record
+        # carries a single ParentReference (run_id, attempt_id, artifact_id).
+        m_parent_artifact = manifest.parent_artifact_id
+        m_parent_run = manifest.parent_run_id
+        m_parent_attempt = manifest.parent_attempt_id
+        r_parent = record.parent
+        r_parent_artifact = r_parent.artifact_id if r_parent else None
+        r_parent_run = r_parent.run_id if r_parent else None
+        r_parent_attempt = r_parent.attempt_id if r_parent else None
+        if m_parent_artifact != r_parent_artifact:
             raise CheckpointCorruptError("manifest parent_artifact_id != record parent artifact_id")
+        if m_parent_run != r_parent_run:
+            raise CheckpointCorruptError("manifest parent_run_id != record parent run_id")
+        if m_parent_attempt != r_parent_attempt:
+            raise CheckpointCorruptError("manifest parent_attempt_id != record parent attempt_id")
 
     def _read_and_hash_fd(self, fd: int, expected_size: int) -> tuple[bytes, str]:
-        """Item 8: read + hash ``fd`` with bounded in-memory allocation.
+        """Item 8 small path: read + hash ``fd`` materializing the whole tar.
 
-        Archives at or below :data:`MAX_INMEMORY_ARCHIVE_BYTES` are materialized
-        whole (the fast path used by every realistic v1 checkpoint). Larger
-        archives are streamed to a temporary file in BLOCK_SIZE chunks while the
-        digest is computed incrementally, then read back via :func:`mmap` so the
-        complete tar is NEVER held in the Python heap — only the parsed member
-        bytes the caller requests are materialized. Returns ``(tar_view,
-        digest)`` where ``tar_view`` is ``bytes`` for the small path and a
-        ``mmap``-backed buffer for the large path (both support slicing and
-        ``len()``).
+        Used only when ``expected_size <= MAX_INMEMORY_ARCHIVE_BYTES`` (every
+        realistic v1 checkpoint). Returns ``(tar_bytes, digest)``. The large
+        path is handled separately by :meth:`_read_large_fd_streaming`.
         """
-        if expected_size <= MAX_INMEMORY_ARCHIVE_BYTES:
-            tar_bytes = self._read_bounded_fd(fd, expected_size)
-            digest = f"sha256:{hashlib.sha256(tar_bytes).hexdigest()}"
-            return tar_bytes, digest
-        return self._read_large_fd_streaming(fd, expected_size)
+        tar_bytes = self._read_bounded_fd(fd, expected_size)
+        digest = f"sha256:{hashlib.sha256(tar_bytes).hexdigest()}"
+        return tar_bytes, digest
 
-    def _read_large_fd_streaming(self, fd: int, expected_size: int) -> tuple[bytes, str]:
-        """Item 8: stream a large archive to a temp file, hash incrementally,
-        and return the bytes for parsing.
+    def _read_large_fd_streaming(self, fd: int, expected_size: int) -> tuple[str, int, Path]:
+        """Item 8 large path: stream ``fd`` to a temp file, hash incrementally.
 
         The fd is streamed to a temporary file in BLOCK_SIZE chunks while the
         running SHA-256 is updated (the whole archive is never accumulated in a
-        single Python bytearray during the read). The temp file is then read
-        back for tar parsing and unlinked. This bounds peak heap usage during
-        the streaming read to one BLOCK_SIZE chunk; the parsed member bytes are
-        the only large allocations retained.
+        single Python bytearray during the read). The temp file is LEFT on disk
+        so the caller can stream-PARSE it via
+        :meth:`_parse_and_validate_tar_streaming` (using
+        :func:`parse_ustar_archive_streaming`) without ever materializing the
+        complete tar in Python heap. The caller unlinks the temp file after
+        parsing.
+
+        Returns ``(digest, size, parsed_path)``. There is NO
+        ``read(expected_size)`` of the whole archive on this path.
         """
         import tempfile
 
@@ -651,6 +720,8 @@ class CheckpointStore:
         tmp_fd, tmp_name = tempfile.mkstemp(prefix=".tmp-cp-load-", suffix=".tar")
         h = hashlib.sha256()
         total = 0
+        parsed_path = Path(tmp_name)
+        unlinked = False
         try:
             try:
                 while total < expected_size:
@@ -672,14 +743,16 @@ class CheckpointStore:
             if extra:
                 raise CheckpointCorruptError("content has trailing bytes beyond declared size")
             digest = f"sha256:{h.hexdigest()}"
-            # Read the verified temp file back for parsing.
-            with open(tmp_name, "rb") as src:
-                return src.read(expected_size), digest
+            # Leave the temp file in place for the streaming parse; the caller
+            # unlinks it. Do NOT read the whole file back here.
+            unlinked = True  # hand ownership to the caller
+            return digest, total, parsed_path
         finally:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
+            if not unlinked:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
 
     def _read_bounded_fd(self, fd: int, expected_size: int) -> bytes:
         """Bounded read of ``fd`` (item 10).
@@ -728,6 +801,34 @@ class CheckpointStore:
             members = parse_ustar_archive(tar_bytes)
         except TarParseError as e:
             raise CheckpointCorruptError(f"tar framing invalid: {e}") from e
+        if not members or members[0].name != "manifest.json":
+            raise CheckpointCorruptError("manifest.json must be the first archive member")
+        return members
+
+    def _parse_and_validate_tar_streaming(
+        self, path: Path, expected_size: int
+    ) -> list[ParsedMember]:
+        """Item 8 large path: stream-parse the verified temp file sequentially.
+
+        Opens the temp file produced by :meth:`_read_large_fd_streaming` and
+        parses it member-by-member with
+        :func:`parse_ustar_archive_streaming` so the complete tar is never held
+        in Python heap. The same framing/order/byte-limit checks as the in-memory
+        parser apply. The caller owns unlinking ``path``.
+        """
+        import os as _os
+
+        from expertforge.checkpoints.tar_reader import parse_ustar_archive_streaming
+
+        nofollow = getattr(_os, "O_NOFOLLOW", 0)
+        fd = _os.open(path, _os.O_RDONLY | nofollow | getattr(_os, "O_BINARY", 0))
+        try:
+            try:
+                members = parse_ustar_archive_streaming(fd, expected_size)
+            except TarParseError as e:
+                raise CheckpointCorruptError(f"tar framing invalid: {e}") from e
+        finally:
+            _os.close(fd)
         if not members or members[0].name != "manifest.json":
             raise CheckpointCorruptError("manifest.json must be the first archive member")
         return members
@@ -854,6 +955,18 @@ class CheckpointStore:
                     f"{label} component failed strict validation: {e}"
                 ) from e
 
+        def _strict_typed(raw: bytes, model_cls: Any, label: str) -> Any:
+            # Item 5: validate the RAW component bytes directly through the typed
+            # model (strict). Used for identity/provenance, whose canonical JSON
+            # IS the stored bytes — validating from raw (not a re-encoded dict)
+            # enforces the exact typed shape and catches any structural drift.
+            try:
+                return model_cls.model_validate_json(raw, strict=True)
+            except ValidationError as e:
+                raise CheckpointCorruptError(
+                    f"{label} component failed strict typed validation: {e}"
+                ) from e
+
         # counters.json must equal manifest.counters (strict).
         counters_payload = decode_component_json(_comp("counters"))
         counters = _strict(counters_payload, _Counters, "counters")
@@ -893,78 +1006,151 @@ class CheckpointStore:
         expected_model = manifest.compatibility.model_descriptor
         _assert_model_component_matches(model_state, expected_model)
 
-        # identity member run/attempt/fingerprint must equal the record. The
-        # identity record carries a nested SpecificationFingerprintRecord whose
-        # ``digest_str`` is the public fingerprint string.
-        identity_payload = decode_component_json(_comp("identity"))
-        id_run = identity_payload.get("run_id")
-        id_attempt = identity_payload.get("attempt_id")
-        id_fp = identity_payload.get("specification_fingerprint")
-        id_digest = id_fp.get("digest_str") if isinstance(id_fp, dict) else None
-        if not isinstance(id_run, str) or id_run != record.run_id:
+        # configuration member: fingerprint must equal the record AND the
+        # embedded config bytes must rehash to the manifest's content_sha256
+        # (item 5). The prior check compared the JSON-declared content_sha256
+        # field to the manifest, which a tampered payload could self-attest;
+        # now the actual content_base64 bytes are decoded, SHA-256'd, and
+        # compared to the manifest's authoritative digest.
+        import base64 as _base64
+
+        from expertforge.checkpoints.models import ConfigurationState
+
+        config_payload = decode_component_json(_comp("configuration"))
+        config_state = _strict(config_payload, ConfigurationState, "configuration")
+        if config_state.fingerprint != record.specification_fingerprint:
+            raise CheckpointCorruptError(
+                "state/configuration.json fingerprint != record fingerprint"
+            )
+        # Decode the actual configuration bytes and rehash them.
+        try:
+            cfg_bytes = _base64.b64decode(config_state.content_base64, validate=True)
+        except (ValueError, _base64.binascii.Error) as e:  # type: ignore[attr-defined]
+            raise CheckpointCorruptError(
+                f"state/configuration.json content_base64 is not valid base64: {e}"
+            ) from e
+        if len(cfg_bytes) != config_state.byte_length:
+            raise CheckpointCorruptError(
+                "state/configuration.json byte_length != decoded content length"
+            )
+        actual_cfg_sha = hashlib.sha256(cfg_bytes).hexdigest()
+        if actual_cfg_sha != manifest.configuration_content_sha256:
+            raise CheckpointCorruptError(
+                "state/configuration.json content bytes rehash != manifest "
+                "configuration_content_sha256"
+            )
+        if actual_cfg_sha != config_state.content_sha256:
+            raise CheckpointCorruptError(
+                "state/configuration.json content bytes rehash != payload content_sha256"
+            )
+
+        # identity member: strict typed validation, then bind run/attempt/
+        # fingerprint to the record (item 5). The identity record carries a
+        # nested SpecificationFingerprintRecord whose digest_str is the public
+        # fingerprint string; validating via the typed model enforces the
+        # digest consistency too (verify_digest).
+        from expertforge.identity.record import AttemptIdentityRecord
+
+        identity_state = _strict_typed(_comp("identity"), AttemptIdentityRecord, "identity")
+        if identity_state.run_id != record.run_id:
             raise CheckpointCorruptError("state/identity.json run_id != record run_id")
-        if not isinstance(id_attempt, str) or id_attempt != record.attempt_id:
+        if identity_state.attempt_id != record.attempt_id:
             raise CheckpointCorruptError("state/identity.json attempt_id != record attempt_id")
-        if not isinstance(id_digest, str) or id_digest != record.specification_fingerprint:
+        if identity_state.fingerprint_digest_str() != record.specification_fingerprint:
             raise CheckpointCorruptError(
                 "state/identity.json specification_fingerprint.digest_str != record fingerprint"
             )
 
-        # configuration member fingerprint must equal the record.
-        config_payload = decode_component_json(_comp("configuration"))
-        cfg_fp = config_payload.get("fingerprint")
-        if not isinstance(cfg_fp, str) or cfg_fp != record.specification_fingerprint:
-            raise CheckpointCorruptError(
-                "state/configuration.json fingerprint != record fingerprint"
-            )
-        cfg_sha = config_payload.get("content_sha256")
-        if cfg_sha != manifest.configuration_content_sha256:
-            raise CheckpointCorruptError(
-                "state/configuration.json content_sha256 != manifest configuration_content_sha256"
-            )
+        # provenance member: strict typed validation, then bind run/attempt to
+        # the record (item 5).
+        from expertforge.provenance.record import ProvenanceRecord
 
-        # provenance member must reference the same run/attempt as the record.
-        prov_payload = decode_component_json(_comp("provenance"))
-        prov_run = prov_payload.get("run_id")
-        prov_attempt = prov_payload.get("attempt_id")
-        if prov_run != record.run_id or prov_attempt != record.attempt_id:
+        prov_state = _strict_typed(_comp("provenance"), ProvenanceRecord, "provenance")
+        if prov_state.run_id != record.run_id or prov_state.attempt_id != record.attempt_id:
             raise CheckpointCorruptError("state/provenance.json run/attempt != record run/attempt")
 
-        # RNG member must decode to a valid bundle (item 10 strict decode).
+        # RNG member: decode to a valid bundle AND cross-bind its internal
+        # descriptor fields to manifest.compatibility.rng_descriptor (item 5).
+        # The prior check only verified decodability; now the bundle's persisted
+        # adapter set / framework versions / schema version must equal the
+        # manifest's RNG descriptor.
         try:
-            RngStateBundle.from_json_bytes(_comp("rng"))
+            rng_bundle = RngStateBundle.from_json_bytes(_comp("rng"))
         except (ValueError, SafeStateDecodeError) as e:
             raise CheckpointCorruptError(
                 f"state/rng.json is not a decodable RngStateBundle: {e}"
             ) from e
+        rng_descriptor = manifest.compatibility.rng_descriptor
+        if rng_bundle.rng_state_schema_version != rng_descriptor.rng_state_schema_version:
+            raise CheckpointCorruptError(
+                "state/rng.json rng_state_schema_version != manifest rng_descriptor"
+            )
+        # Derive the bundle's provider set from its framework_states and compare
+        # to the descriptor's framework_versions providers. The bundle's
+        # framework_states carry (provider, device) but not a framework version;
+        # the descriptor carries the canonical (provider, version) pairs. The
+        # binding enforces that every descriptor framework provider has a
+        # persisted framework_state and vice versa (no drift between the RNG
+        # descriptor and the actual persisted RNG adapters).
+        bundle_providers = {s.provider for s in rng_bundle.framework_states}
+        descriptor_providers = {pair[0] for pair in rng_descriptor.framework_versions}
+        if bundle_providers != descriptor_providers:
+            raise CheckpointCorruptError(
+                "state/rng.json framework_states providers != manifest rng_descriptor "
+                "framework_versions providers"
+            )
 
-        # Item 5: every declared tensor member must be referenced by exactly one
-        # component payload (no unused tensor members). Collect the referenced
-        # member names from the model + optimizer + scheduler + scaler payloads.
-        referenced: set[str] = set()
+        # Item 5: every declared tensor member must be referenced the EXACT
+        # number of times its logical-name count implies, and every referenced
+        # member must be declared. Use a reference COUNT (member_name -> count),
+        # not a set, so a tensor referenced the wrong number of times (double-
+        # counted, or missing a logical name) is caught. A manifest tensor member
+        # with L logical_names must be referenced exactly L times: once per
+        # logical name across the component payloads (alias groups share one
+        # physical member but contribute one reference per logical name).
+        referenced: dict[str, int] = {}
+
+        def _ref(name: str) -> None:
+            referenced[name] = referenced.get(name, 0) + 1
+
         for entry in (*model_state.parameters, *model_state.buffers):
-            referenced.add(entry.member_name)
+            _ref(entry.member_name)
         if opt_state.has_state:
             if opt_state.state_tensor is not None:
-                referenced.add(opt_state.state_tensor.member_name)
+                _ref(opt_state.state_tensor.member_name)
             for slot in opt_state.state_slots:
-                referenced.add(slot.member_name)
+                _ref(slot.member_name)
         if sched_state.has_state and sched_state.state_tensor is not None:
-            referenced.add(sched_state.state_tensor.member_name)
+            _ref(sched_state.state_tensor.member_name)
         if "state/scaler.json" in by_name and scaler_state.has_state:
             if scaler_state.state_tensor is not None:
-                referenced.add(scaler_state.state_tensor.member_name)
-        declared = {t.member_name for t in manifest.tensor_members}
-        unused = declared - referenced
+                _ref(scaler_state.state_tensor.member_name)
+        # Expected count per member = number of logical names it serves (1 for a
+        # standalone tensor, L for an L-way alias group).
+        expected_counts = {t.member_name: len(t.logical_names) for t in manifest.tensor_members}
+        declared = set(expected_counts)
+        # Undeclared references (a component points at a non-manifest tensor).
+        undeclared = set(referenced) - declared
+        if undeclared:
+            raise CheckpointCorruptError(
+                f"component payloads reference undeclared tensor members: {sorted(undeclared)!r}"
+            )
+        # Every declared tensor member must be referenced exactly its
+        # logical-name count (once per logical name).
+        wrong = {
+            name: (got, expected_counts[name])
+            for name, got in referenced.items()
+            if got != expected_counts[name]
+        }
+        if wrong:
+            raise CheckpointCorruptError(
+                f"tensor members referenced != their logical-name count (got, expected): {wrong!r}"
+            )
+        unused = declared - set(referenced)
         if unused:
             raise CheckpointCorruptError(
                 f"tensor members declared in the manifest are not referenced by any "
                 f"component payload: {sorted(unused)!r}"
-            )
-        undeclared = referenced - declared
-        if undeclared:
-            raise CheckpointCorruptError(
-                f"component payloads reference undeclared tensor members: {sorted(undeclared)!r}"
             )
 
     # -- inspect_path (non-authoritative) ----------------------------------
@@ -972,14 +1158,19 @@ class CheckpointStore:
     def inspect_path(self, path: Path) -> CheckpointInspection:
         """Diagnose an arbitrary untrusted file (amendment G: non-authoritative).
 
-        Cannot restore state or claim #10 registration. Validates the complete
-        tar framing + terminator and decodes the manifest; reports a typed
-        :class:`CheckpointInspection`.
+        Cannot restore state or claim #10 registration. Item 8: reads ONLY the
+        manifest (the first member) for inspection — the file is never fully
+        materialized, so even a multi-GiB archive can be diagnosed cheaply. The
+        manifest is decoded and a typed :class:`CheckpointInspection` is
+        returned; ``member_count`` reflects the manifest-declared member graph
+        (1 manifest + N state components + M tensor members) rather than a full
+        scan.
         """
         if not path.exists():
             return CheckpointInspection(status="corrupt", diagnostic="file not found")
-        # Open the path without following a symlink (best-effort), then perform a
-        # bounded read capped at MAX_ARCHIVE_BYTES (item 10).
+        # Open the path without following a symlink (best-effort), then read only
+        # the first member (manifest.json) — bounded by the component-member
+        # limit, NOT the whole file.
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0))
@@ -994,28 +1185,113 @@ class CheckpointStore:
                     status="corrupt",
                     diagnostic=f"archive size {st.st_size} exceeds MAX_ARCHIVE_BYTES",
                 )
-            tar_bytes = self._read_bounded_fd(fd, st.st_size)
+            archive_byte_size = st.st_size
+            # Read only the first member: its 512-byte header + its data
+            # (bounded by MAX_COMPONENT_MEMBER_BYTES) + its padding.
+            manifest_bytes = self._read_first_member(fd)
         except CheckpointCorruptError as e:
             return CheckpointInspection(status="corrupt", diagnostic=str(e))
         finally:
             os.close(fd)
         try:
-            members = self._parse_and_validate_tar(tar_bytes)
-            manifest = self._decode_manifest(members)
+            manifest = self._decode_manifest_first(manifest_bytes)
         except CheckpointVersionError as e:
             return CheckpointInspection(
-                status="unsupported", diagnostic=str(e), archive_byte_size=len(tar_bytes)
+                status="unsupported", diagnostic=str(e), archive_byte_size=archive_byte_size
             )
         except CheckpointCorruptError as e:
             return CheckpointInspection(
-                status="corrupt", diagnostic=str(e), archive_byte_size=len(tar_bytes)
+                status="corrupt", diagnostic=str(e), archive_byte_size=archive_byte_size
             )
+        # member_count from the manifest-declared graph (manifest +
+        # state_components + tensor_members). This reflects the expected member
+        # layout without scanning the whole file.
+        declared_member_count = 1 + len(manifest.state_components) + len(manifest.tensor_members)
         return CheckpointInspection(
             status="complete",
             manifest=manifest,
-            archive_byte_size=len(tar_bytes),
-            member_count=len(members),
+            archive_byte_size=archive_byte_size,
+            member_count=declared_member_count,
         )
+
+    def _read_first_member(self, fd: int) -> bytes:
+        """Item 8: read ONLY the first archive member (manifest.json).
+
+        Reads the 512-byte header, validates it (canonical ustar + the name is
+        ``manifest.json``), then reads exactly that member's data plus its
+        zero-padding. The whole archive is never read. The on-disk size must be
+        at least one header block.
+        """
+        from expertforge.checkpoints.tar_reader import _parse_header
+        from expertforge.checkpoints.tar_writer import USTAR_BLOCK_SIZE
+
+        st = os.fstat(fd)
+        if st.st_size < USTAR_BLOCK_SIZE:
+            raise CheckpointCorruptError("file smaller than one tar header block")
+        header = self._read_exact_fd(fd, USTAR_BLOCK_SIZE, "header block")
+        # _parse_header validates checksum/magic/typeflag/numeric fields/name. We
+        # pass a 1-block buffer; the returned data_start is irrelevant here.
+        name, _typeflag, size, _data_start = _parse_header(header, 0)
+        if name != "manifest.json":
+            raise CheckpointCorruptError(f"first member must be manifest.json, got {name!r}")
+        component_limit = MAX_COMPONENT_MEMBER_BYTES
+        if size > component_limit:
+            raise CheckpointCorruptError(
+                f"manifest.json size {size} exceeds MAX_COMPONENT_MEMBER_BYTES ({component_limit})"
+            )
+        data = self._read_exact_fd(fd, size, "manifest.json data")
+        data_blocks = (size + USTAR_BLOCK_SIZE - 1) // USTAR_BLOCK_SIZE
+        padding_len = data_blocks * USTAR_BLOCK_SIZE - size
+        if padding_len:
+            padding = self._read_exact_fd(fd, padding_len, "manifest.json padding")
+            if any(b != 0 for b in padding):
+                raise CheckpointCorruptError("manifest.json has non-zero padding bytes")
+        return data
+
+    def _read_exact_fd(self, fd: int, n: int, what: str) -> bytes:
+        """Read exactly ``n`` bytes from ``fd`` in BLOCK_SIZE chunks."""
+        if n == 0:
+            return b""
+        buf = bytearray()
+        remaining = n
+        while remaining > 0:
+            chunk = os.read(fd, min(BLOCK_SIZE, remaining))
+            if not chunk:
+                raise CheckpointCorruptError(
+                    f"unexpected EOF reading {what}: got {len(buf)} of {n} bytes"
+                )
+            buf.extend(chunk)
+            remaining -= len(chunk)
+        return bytes(buf)
+
+    def _decode_manifest_first(self, raw: bytes) -> CheckpointManifest:
+        """Decode + validate the manifest.json bytes (first member only).
+
+        Same canonical-JSON + strict-typed validation as
+        :meth:`_decode_manifest`, but operating on the single manifest member
+        rather than a full member list (item 8: inspection reads only the
+        manifest).
+        """
+        try:
+            text = raw.decode("utf-8")
+            data = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise CheckpointCorruptError(f"manifest.json is not canonical JSON: {e}") from e
+        except ValueError as e:
+            raise CheckpointCorruptError(f"manifest.json rejected: {e}") from e
+        if not isinstance(data, dict):
+            raise CheckpointCorruptError("manifest.json root must be an object")
+        canonical = canonical_json_bytes(data)
+        if canonical != raw:
+            raise CheckpointCorruptError("manifest.json is not canonical compact sorted JSON")
+        try:
+            return CheckpointManifest.model_validate_json(canonical, strict=True)
+        except ValidationError as e:
+            if _is_version_validation_error(e):
+                raise CheckpointVersionError(
+                    f"manifest carries an unsupported schema/version: {e}"
+                ) from e
+            raise CheckpointCorruptError(f"manifest failed validation: {e}") from e
 
     # -- check_compatibility -----------------------------------------------
 
@@ -1370,36 +1646,54 @@ def _full_write(fd: int, data: bytes) -> None:
         total += written
 
 
-# The frozen manifest model fields whose validators reject unsupported schema
-# versions (item 6). A ValidationError touching one of these is classified as
-# "unsupported" rather than "corrupt".
+# The frozen manifest + compatibility model fields whose validators reject
+# unsupported schema names/versions (items 6 + 7). A ValidationError touching
+# one of these is classified as "unsupported" rather than "corrupt". This covers
+# EVERY versioned schema field the ratified manifest carries: the archive
+# format, the manifest schema name/version, the safe-state format, and the
+# embedded compatibility descriptor's schema name/version.
 _VERSION_VALIDATED_FIELDS: frozenset[str] = frozenset(
     {
         "archive_format_version",
+        "manifest_schema",
         "manifest_schema_version",
         "state_format_version",
+        "compatibility_schema",
+        "compatibility_schema_version",
     }
 )
 
 
 def _is_version_validation_error(error: ValidationError) -> bool:
-    """Item 6: classify a Pydantic ValidationError as version-unsupported or corrupt.
+    """Classify a Pydantic ValidationError as version-unsupported or corrupt.
 
-    Returns True when every error loci touches one of the version-validated
-    manifest fields (``archive_format_version``, ``manifest_schema_version``,
-    ``state_format_version``). Pydantic field validators on these fields raise
-    ``ValueError("unsupported ...")`` for future/unknown versions, which is an
-    "unsupported" status, not corruption.
+    Returns True when every error locus touches one of the version-validated
+    schema fields (``archive_format_version``, ``manifest_schema``,
+    ``manifest_schema_version``, ``state_format_version``,
+    ``compatibility_schema``, ``compatibility_schema_version``). Pydantic field
+    validators (Literal type narrowing + the explicit ``unsupported ...`` value
+    validators) on these fields raise for future/unknown schema names or
+    versions, which is an "unsupported" status, not corruption.
+
+    Item 7: a future manifest-schema NAME (e.g. ``expertforge.checkpoint-manifest-v2``)
+    or compatibility-schema NAME/version mismatch must be classified as
+    ``unsupported`` (CheckpointVersionError), not ``corrupt``.
     """
-    for err in error.errors():
+    errs = error.errors()
+    if not errs:
+        return False
+    for err in errs:
         loc = err.get("loc", ())
         if not loc:
             return False
-        # The last path element is the field name (e.g. "archive_format_version").
+        # The last path element is the field name (e.g.
+        # "archive_format_version" or "compatibility_schema_version"). Nested
+        # loci like ("compatibility", "manifest_schema_version") are covered by
+        # inspecting the leaf.
         field = loc[-1]
         if not isinstance(field, str) or field not in _VERSION_VALIDATED_FIELDS:
             return False
-    return len(error.errors()) > 0
+    return True
 
 
 def _assert_model_component_matches(model_state: Any, expected: Any) -> None:

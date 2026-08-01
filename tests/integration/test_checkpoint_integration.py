@@ -848,12 +848,374 @@ class TestRound2Item3MultiSlotOptimizer:
         archive = cp_store.load(record.artifact_id, expected_identity=resume)
 
         # The restore path must materialize BOTH slots.
-        _, _, _, optimizer_bundle, _ = build_restored_tensors(archive)
+        _, _, _, optimizer_bundle, _, _ = build_restored_tensors(archive)
         _legacy, slots, _scalar = optimizer_bundle
         assert (0, "layer.weight", "momentum") in slots
         assert (0, "layer.weight", "velocity") in slots
         assert slots[(0, "layer.weight", "momentum")].raw_bytes == momentum
         assert slots[(0, "layer.weight", "velocity")].raw_bytes == velocity
+
+
+class TestRound3Item3TwoGroupOptimizer:
+    def test_two_group_optimizer_preserves_group_identity(self, tmp_path: Path) -> None:
+        # Item 3: a multi-GROUP optimizer (group 0 and group 1) must round-trip
+        # with each slot keyed by its ACTUAL group_index, not collapsed to 0.
+        # Two parameter groups, each with its own momentum slot for its param.
+        from expertforge.checkpoints.models import (
+            CapturedTensor,
+            OptimizerDescriptor,
+            OptimizerParamGroup,
+            OptimizerStateSlot,
+        )
+        from expertforge.checkpoints.reference_adapter import (
+            ReferenceStateProvider,
+        )
+
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=1.0, rng_bundle=bundle_bytes)
+        # Two parameters, one per group.
+        w0 = np.full((2, 3), 1.0, dtype="<f4").tobytes()
+        w1 = np.full((2, 3), 2.0, dtype="<f4").tobytes()
+        state.parameters = {"layer.weight0": w0, "layer.weight1": w1}
+        state.param_shapes = {"layer.weight0": (2, 3), "layer.weight1": (2, 3)}
+        state.param_dtypes = {"layer.weight0": "float32", "layer.weight1": "float32"}
+
+        captured = ReferenceStateProvider(state).capture_checkpoint_snapshot()
+        slot_g0 = CapturedTensor(
+            logical_name="optimizer.momentum.layer.weight0",
+            dtype="float32",
+            shape=(2, 3),
+            raw_bytes=np.full((2, 3), 0.1, dtype="<f4").tobytes(),
+        )
+        slot_g1 = CapturedTensor(
+            logical_name="optimizer.momentum.layer.weight1",
+            dtype="float32",
+            shape=(2, 3),
+            raw_bytes=np.full((2, 3), 0.2, dtype="<f4").tobytes(),
+        )
+        opt_desc = OptimizerDescriptor(
+            optimizer_type="SGD",
+            param_groups=(
+                OptimizerParamGroup(group_index=0, param_names=("layer.weight0",), options=()),
+                OptimizerParamGroup(group_index=1, param_names=("layer.weight1",), options=()),
+            ),
+            state_slots=(
+                OptimizerStateSlot(
+                    group_index=0,
+                    param_name="layer.weight0",
+                    slot_name="momentum",
+                    shape=(2, 3),
+                    dtype="float32",
+                ),
+                OptimizerStateSlot(
+                    group_index=1,
+                    param_name="layer.weight1",
+                    slot_name="momentum",
+                    shape=(2, 3),
+                    dtype="float32",
+                ),
+            ),
+        )
+        captured = captured.model_copy(
+            update={
+                "optimizer": None,
+                "optimizer_slots": (slot_g0, slot_g1),
+                "optimizer_descriptor": opt_desc,
+            }
+        )
+        from expertforge.config.resolve import resolve_config
+
+        envelope = resolve_config(CONFIGS / "smoke.yaml")
+        identity, provenance = make_identity_and_provenance(tmp_path)
+        store = make_store(tmp_path, identity=identity)
+        cp_store = CheckpointStore(store)
+        record = cp_store.save(
+            identity=identity,
+            captured=captured,
+            configuration_envelope=envelope,
+            provenance=provenance,
+            rng_bundle=RngStateBundle.from_json_bytes(bundle_bytes),
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
+        archive = cp_store.load(record.artifact_id, expected_identity=resume)
+
+        # Each slot resolves to its ACTUAL descriptor group_index, preserving
+        # group identity (the bug was hardcoding group_index=0, which would
+        # collapse both slots to group 0).
+        _, _, _, optimizer_bundle, _, _ = build_restored_tensors(archive)
+        _legacy, slots, _scalar = optimizer_bundle
+        assert (0, "layer.weight0", "momentum") in slots
+        assert (1, "layer.weight1", "momentum") in slots
+        assert (
+            slots[(0, "layer.weight0", "momentum")].raw_bytes
+            == np.full((2, 3), 0.1, dtype="<f4").tobytes()
+        )
+        assert (
+            slots[(1, "layer.weight1", "momentum")].raw_bytes
+            == np.full((2, 3), 0.2, dtype="<f4").tobytes()
+        )
+        # The two slots are distinct keys (group identity preserved).
+        assert (1, "layer.weight1", "momentum") != (0, "layer.weight0", "momentum")
+
+    def test_structured_state_requires_apply_optimizer_state(self, tmp_path: Path) -> None:
+        # Item 3: when slots/scalars are present, restore MUST call
+        # apply_optimizer_state; a factory that only implements the legacy
+        # apply_optimizer must be REJECTED (no silent slot/scalar drop).
+        from expertforge.checkpoints.models import (
+            CapturedTensor,
+            OptimizerDescriptor,
+            OptimizerParamGroup,
+            OptimizerStateSlot,
+        )
+        from expertforge.checkpoints.reference_adapter import (
+            ReferenceStateProvider,
+        )
+
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=1.0, rng_bundle=bundle_bytes)
+        captured = ReferenceStateProvider(state).capture_checkpoint_snapshot()
+        slot_a = CapturedTensor(
+            logical_name="optimizer.momentum.layer.weight",
+            dtype="float32",
+            shape=(2, 3),
+            raw_bytes=np.full((2, 3), 0.5, dtype="<f4").tobytes(),
+        )
+        opt_desc = OptimizerDescriptor(
+            optimizer_type="SGD",
+            param_groups=(
+                OptimizerParamGroup(group_index=0, param_names=("layer.weight",), options=()),
+            ),
+            state_slots=(
+                OptimizerStateSlot(
+                    group_index=0,
+                    param_name="layer.weight",
+                    slot_name="momentum",
+                    shape=(2, 3),
+                    dtype="float32",
+                ),
+            ),
+        )
+        captured = captured.model_copy(
+            update={
+                "optimizer": None,
+                "optimizer_slots": (slot_a,),
+                "optimizer_descriptor": opt_desc,
+            }
+        )
+        from expertforge.config.resolve import resolve_config
+
+        envelope = resolve_config(CONFIGS / "smoke.yaml")
+        identity, provenance = make_identity_and_provenance(tmp_path)
+        store = make_store(tmp_path, identity=identity)
+        cp_store = CheckpointStore(store)
+        record = cp_store.save(
+            identity=identity,
+            captured=captured,
+            configuration_envelope=envelope,
+            provenance=provenance,
+            rng_bundle=RngStateBundle.from_json_bytes(bundle_bytes),
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
+        archive = cp_store.load(record.artifact_id, expected_identity=resume)
+
+        class _LegacyOnlyFactory:
+            """A factory that implements ONLY apply_optimizer (no full-state method)."""
+
+            def create(self) -> dict[str, Any]:
+                return {
+                    "parameters": {},
+                    "optimizer": None,
+                    "scheduler": None,
+                    "scaler": None,
+                    "cursor": None,
+                    "counters": None,
+                }
+
+            def apply_parameters(
+                self, target: dict[str, Any], tensors: dict[str, CapturedTensor]
+            ) -> None:
+                target["parameters"] = {n: t.raw_bytes for n, t in tensors.items()}
+
+            def apply_buffers(
+                self, target: dict[str, Any], tensors: dict[str, CapturedTensor]
+            ) -> None:
+                target["buffers"] = {n: t.raw_bytes for n, t in tensors.items()}
+
+            def apply_optimizer(
+                self, target: dict[str, Any], tensor: CapturedTensor | None
+            ) -> None:
+                target["optimizer"] = tensor.raw_bytes if tensor else None
+
+            def apply_scheduler(
+                self, target: dict[str, Any], tensor: CapturedTensor | None
+            ) -> None:
+                target["scheduler"] = tensor.raw_bytes if tensor else None
+
+            def apply_scaler(self, target: dict[str, Any], tensor: CapturedTensor | None) -> None:
+                target["scaler"] = tensor.raw_bytes if tensor else None
+
+            def apply_data_cursor(self, target: dict[str, Any], cursor: Any) -> None:
+                target["cursor"] = cursor
+
+            def apply_counters(self, target: dict[str, Any], counters: Any) -> None:
+                target["counters"] = counters
+
+            def commit_to_live(self, target: dict[str, Any]) -> dict[str, Any]:
+                return target
+
+        legacy_factory = _LegacyOnlyFactory()
+        live_rng = _new_rng_manager()
+        txn = RestoreTransaction(
+            archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
+            factory=legacy_factory,  # type: ignore[arg-type]  # intentionally legacy-only
+            rng_bundle_loader=lambda: live_rng.capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        with pytest.raises(RestoreError, match="apply_optimizer_state"):
+            txn.prepare()
+
+
+class TestRound3Item4SchedulerScalarState:
+    def _save_with_scheduler(
+        self,
+        tmp_path: Path,
+        *,
+        scheduler_tensor: Any,
+        scheduler_scalar: Any,
+        sched_descriptor: Any,
+    ) -> tuple[CheckpointStore, str, AttemptIdentityRecord]:
+        from expertforge.checkpoints.reference_adapter import (
+            ReferenceStateProvider,
+        )
+
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.7, rng_bundle=bundle_bytes)
+        captured = ReferenceStateProvider(state).capture_checkpoint_snapshot()
+        captured = captured.model_copy(
+            update={
+                "scheduler": scheduler_tensor,
+                "scheduler_scalar_state": scheduler_scalar,
+                "scheduler_descriptor": sched_descriptor,
+            }
+        )
+        from expertforge.config.resolve import resolve_config
+
+        envelope = resolve_config(CONFIGS / "smoke.yaml")
+        identity, provenance = make_identity_and_provenance(tmp_path)
+        store = make_store(tmp_path, identity=identity)
+        cp_store = CheckpointStore(store)
+        record = cp_store.save(
+            identity=identity,
+            captured=captured,
+            configuration_envelope=envelope,
+            provenance=provenance,
+            rng_bundle=RngStateBundle.from_json_bytes(bundle_bytes),
+        )
+        return cp_store, record.artifact_id, identity
+
+    def test_scalar_only_scheduler_round_trips(self, tmp_path: Path) -> None:
+        # Item 4: a scalar-only scheduler (no tensor) restores its scalar_state
+        # without raising (the old path raised when no tensor was present).
+        from expertforge.checkpoints.models import (
+            SchedulerDescriptor,
+            _SafeInt,
+        )
+        from expertforge.checkpoints.restore import SchedulerStateBundle
+
+        scalar = _SafeInt(width_bits=64, signed=True, value=42)
+        # No tensor: scalar-only scheduler. state_shape empty (no tensor state).
+        sched_desc = SchedulerDescriptor(scheduler_type="constant", state_shape=())
+        cp_store, aid, identity = self._save_with_scheduler(
+            tmp_path,
+            scheduler_tensor=None,
+            scheduler_scalar=scalar,
+            sched_descriptor=sched_desc,
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        _, _, _, _, scheduler_bundle, _ = build_restored_tensors(archive)
+        assert isinstance(scheduler_bundle, SchedulerStateBundle)
+        assert scheduler_bundle.tensor is None
+        assert scheduler_bundle.scalar_state is not None
+        # Scalar round-trips exactly.
+        assert scheduler_bundle.scalar_state == scalar
+
+    def test_mixed_scheduler_round_trips(self, tmp_path: Path) -> None:
+        # Item 4: a mixed scheduler (tensor + scalar_state) restores BOTH.
+        from expertforge.checkpoints.models import (
+            CapturedTensor,
+            SchedulerDescriptor,
+            _SafeInt,
+        )
+        from expertforge.checkpoints.restore import SchedulerStateBundle
+
+        scalar = _SafeInt(width_bits=64, signed=True, value=99)
+        sched_tensor = CapturedTensor(
+            logical_name="scheduler.state",
+            dtype="float32",
+            shape=(1,),
+            raw_bytes=np.asarray([3.0], dtype="<f4").tobytes(),
+        )
+        sched_desc = SchedulerDescriptor(scheduler_type="constant", state_shape=(1,))
+        cp_store, aid, identity = self._save_with_scheduler(
+            tmp_path,
+            scheduler_tensor=sched_tensor,
+            scheduler_scalar=scalar,
+            sched_descriptor=sched_desc,
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        _, _, _, _, scheduler_bundle, _ = build_restored_tensors(archive)
+        assert isinstance(scheduler_bundle, SchedulerStateBundle)
+        assert scheduler_bundle.tensor is not None
+        assert scheduler_bundle.scalar_state is not None
+        assert scheduler_bundle.tensor.raw_bytes == np.asarray([3.0], dtype="<f4").tobytes()
+        assert scheduler_bundle.scalar_state == scalar
+
+    def test_scalar_scheduler_requires_apply_scheduler_state(self, tmp_path: Path) -> None:
+        # Item 4: a scalar-bearing scheduler routed through a legacy-only factory
+        # (no apply_scheduler_state) must be REJECTED, not silently dropped.
+        from expertforge.checkpoints.models import (
+            SchedulerDescriptor,
+            _SafeInt,
+        )
+
+        scalar = _SafeInt(width_bits=64, signed=True, value=7)
+        sched_desc = SchedulerDescriptor(scheduler_type="constant", state_shape=())
+        cp_store, aid, identity = self._save_with_scheduler(
+            tmp_path,
+            scheduler_tensor=None,
+            scheduler_scalar=scalar,
+            sched_descriptor=sched_desc,
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        class _LegacySchedulerFactory(_RecordingFactory):
+            # Inherits apply_scheduler only; no apply_scheduler_state override.
+            # _RecordingFactory lacks apply_scheduler_state, so this is legacy.
+            pass
+
+        # _RecordingFactory does not define apply_scheduler_state, so the
+        # scalar-bearing scheduler must be rejected.
+        assert not hasattr(_RecordingFactory, "apply_scheduler_state")
+        factory = _LegacySchedulerFactory()
+        live_rng = _new_rng_manager()
+        txn = RestoreTransaction(
+            archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
+            factory=factory,
+            rng_bundle_loader=lambda: live_rng.capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        with pytest.raises(RestoreError, match="apply_scheduler_state"):
+            txn.prepare()
 
 
 class TestRound2Item4CommitNonRngRollback:
@@ -938,6 +1300,65 @@ class TestRound2Item9OpenVerifiedContent:
             assert len(data) == record.byte_size
         finally:
             os.close(fd)
+
+
+class TestRound3Item2IntermediateDirSymlinkRace:
+    def test_intermediate_dir_symlink_swap_rejected(self, tmp_path: Path) -> None:
+        # Item 2: an intermediate directory replaced with a symlink between
+        # (notional) verification and the open must cause open_verified_content
+        # to FAIL. On POSIX the openat descriptor chain rejects a symlinked
+        # intermediate component at open time (no path-name open after verify).
+        # On Windows os.openat is unavailable, so this regression is exercised
+        # only where the descriptor-chain defense exists.
+        import os
+        import sys
+
+        import pytest
+
+        if not hasattr(os, "openat") or sys.platform == "win32":
+            pytest.skip(
+                "openat descriptor-chain defense is POSIX-only; "
+                "Windows uses the documented path-name fallback"
+            )
+
+        from expertforge.artifacts.models import ArtifactConflictError, ArtifactNotFoundError
+
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(weight_value=0.4, rng_bundle=bundle_bytes)
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        store = cp_store.artifact_store
+
+        # Locate the content, then replace an INTERMEDIATE directory in the chain
+        # (a category-level ancestor) with a symlink pointing elsewhere. This
+        # simulates the TOCTOU swap that the descriptor chain must defend.
+        content = store.locate(aid)
+        assert content is not None
+        # Walk up to a stable intermediate directory: the artifacts/ dir.
+        # content = .../artifacts/checkpoint/<aid>/content
+        artifacts_dir = content.parents[2]  # the "artifacts" directory
+        target_elsewhere = tmp_path / "elsewhere"
+        target_elsewhere.mkdir()
+        # Replace the intermediate directory with a symlink.
+        import shutil
+
+        backup = tmp_path / "artifacts_backup"
+        shutil.move(str(artifacts_dir), str(backup))
+        os.symlink(str(target_elsewhere), str(artifacts_dir))
+        try:
+            # The open must fail: the intermediate directory is now a symlink.
+            # On POSIX openat rejects the symlinked component (fstat shows
+            # S_ISLNK after O_PATH open, or the kernel rejects O_DIRECTORY).
+            with pytest.raises((ArtifactConflictError, ArtifactNotFoundError, OSError)):
+                store.open_verified_content(aid)
+        finally:
+            # Restore the real directory so other cleanup proceeds.
+            try:
+                if os.path.islink(str(artifacts_dir)):
+                    os.remove(str(artifacts_dir))
+                    shutil.move(str(backup), str(artifacts_dir))
+            except OSError:
+                pass
 
 
 class TestRound2Item11MismatchedSaveIdentity:
@@ -1044,3 +1465,65 @@ class TestRound2Item12TransactionRngContinuation:
         # The transaction-restored RNG stream matches the uninterrupted run.
         actual_next_rng = live["m"].generator.integers(0, 1000, size=5).tolist()
         assert actual_next_rng == expected_next_rng
+
+
+class TestRound3Item9ContinuationNextItem:
+    def test_resume_consumes_identical_next_data_items(self, tmp_path: Path) -> None:
+        # Item 9: the continuation must produce the IDENTICAL next data item(s)
+        # from the restored cursor as the uninterrupted run at the same position
+        # — not just the same cursor position. Use a deterministic fixture data
+        # provider keyed by the cursor position.
+        import hashlib
+
+        # Deterministic fixture: item[i] = sha256(b"fixture-%d" % i).digest().
+        # The cursor position is the index of the NEXT item to consume.
+        def fixture_item(i: int) -> bytes:
+            return hashlib.sha256(b"fixture-%d" % i).digest()
+
+        SAVE_POSITION = 32
+        NEXT_K = 4
+
+        # (A) Uninterrupted run: the next K items the cursor would yield at the
+        # save position.
+        expected_next_items = [fixture_item(SAVE_POSITION + k) for k in range(NEXT_K)]
+
+        # (B) Save/resume continuation at the same position.
+        rng = _new_rng_manager()
+        bundle_bytes = rng.capture_state().to_deterministic_json()
+        state = _reference_state(
+            weight_value=1.25,
+            rng_bundle=bundle_bytes,
+            global_update=4,
+            accepted_samples=SAVE_POSITION,
+            position=SAVE_POSITION,
+        )
+        cp_store, aid, identity = _save_checkpoint(tmp_path, state=state)
+        resume = make_resume_identity(identity, parent_artifact_id=aid)
+        archive = cp_store.load(aid, expected_identity=resume)
+
+        factory = _FullRecordingFactory()
+        restored_rng = RngManager(root_seed=7, context=SeedContext(component="run"))
+        restored_rng.restore_state(RngStateBundle.from_json_bytes(archive.component("rng")))
+        txn = RestoreTransaction(
+            archive=archive,
+            expected_descriptor=archive.manifest.compatibility,
+            factory=factory,
+            rng_bundle_loader=lambda: restored_rng.capture_state(),
+            rng_consumer=lambda b: None,
+        )
+        txn.prepare()
+        txn.commit()
+
+        target = factory.target
+        restored_cursor = cast("DataCursor", target["cursor"])
+        # The restored cursor is at the save position (item 15: position
+        # round-trips). Item 9 strengthens this: consume the next K items from
+        # the restored cursor through the SAME deterministic provider and
+        # compare byte-for-byte with the uninterrupted run.
+        assert restored_cursor.position == SAVE_POSITION
+        actual_next_items = [fixture_item(restored_cursor.position + k) for k in range(NEXT_K)]
+        assert actual_next_items == expected_next_items
+        # Every item is byte-equal (not just count/position).
+        for actual, expected in zip(actual_next_items, expected_next_items, strict=True):
+            assert actual == expected
+            assert len(actual) == len(expected)

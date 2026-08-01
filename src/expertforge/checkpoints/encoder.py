@@ -42,7 +42,9 @@ from expertforge.rng.state import RngStateBundle
 __all__ = [
     "EncoderError",
     "ArchiveMembers",
+    "ArchiveParts",
     "build_archive",
+    "build_archive_parts",
     "encode_safe_value",
 ]
 
@@ -198,6 +200,34 @@ class ArchiveMembers:
         self.byte_size = len(tar_bytes)
 
 
+class ArchiveParts:
+    """The ordered manifest + members WITHOUT the materialized tar bytes (item 8).
+
+    Used by the streaming save path (:meth:`CheckpointStore.save`): the manifest
+    and the ordered :class:`TarMember` list are computed once, then the archive
+    is streamed to a temp file via :func:`stream_ustar_archive` while the SHA-256
+    digest is updated incrementally. The complete tar is never held in memory.
+
+    ``content_digest`` / ``byte_size`` are filled in by the streaming writer as
+    it emits the bytes; the in-memory :class:`ArchiveMembers` form remains
+    available via :func:`build_archive` for tests and the small/deterministic
+    path.
+    """
+
+    __slots__ = ("manifest", "members", "content_digest", "byte_size")
+
+    def __init__(
+        self,
+        *,
+        manifest: CheckpointManifest,
+        members: list[TarMember],
+    ) -> None:
+        self.manifest = manifest
+        self.members = members
+        self.content_digest = ""
+        self.byte_size = 0
+
+
 def _component_path(role: str) -> str:
     return f"state/{role}.json"
 
@@ -265,7 +295,7 @@ def _resolve_tensors(
     return canonical_tensors, name_to_member
 
 
-def build_archive(
+def build_archive_parts(
     *,
     identity: AttemptIdentityRecord,
     captured: CapturedCheckpointState,
@@ -274,19 +304,19 @@ def build_archive(
     rng_bundle: RngStateBundle | None = None,
     parent: ParentReference | None = None,
     created_at_utc: datetime,
-) -> ArchiveMembers:
-    """Build the full checkpoint archive from a quiescent captured snapshot.
+) -> ArchiveParts:
+    """Compute the manifest + ordered members WITHOUT materializing the tar.
 
-    The archive manifest authenticates every non-manifest member. The #10
-    content digest (computed over the full tar byte stream) authenticates the
-    manifest. No self-referential checkpoint id is stored (amendment A).
+    This is the streaming-friendly core of :func:`build_archive` (item 8): every
+    byte that ends up in the archive is determined here (manifest, component
+    payloads, tensor payloads), but the complete ustar byte stream is NOT
+    assembled. :meth:`CheckpointStore.save` streams these parts directly to a
+    temp file via :func:`stream_ustar_archive` while hashing incrementally, so
+    the whole archive is never held in Python heap.
 
-    The RNG member is serialized from the snapshot's own
-    ``captured.rng_bundle_bytes`` (item 4): the bytes captured atomically by
-    :meth:`StateProvider.capture_checkpoint_snapshot`. If a ``rng_bundle`` is
-    additionally supplied, it MUST decode to the exact same bytes; any
-    disagreement raises :class:`EncoderError` rather than silently persisting a
-    bundle from a different instant.
+    Returns an :class:`ArchiveParts` whose ``content_digest`` / ``byte_size`` are
+    left empty (filled in by the streaming writer) — the in-memory digest/size
+    are available via :func:`build_archive`.
     """
     config_bytes = canonical_bytes(configuration_envelope)
     config_digest = hashlib.sha256(config_bytes).hexdigest()
@@ -479,11 +509,49 @@ def build_archive(
         tensor, _ = tensors_by_index[idx]
         members.append(TarMember(f"tensors/{idx}.bin", tensor.raw_bytes))
 
-    tar_bytes = build_ustar_archive(members)
+    return ArchiveParts(manifest=manifest, members=members)
+
+
+def build_archive(
+    *,
+    identity: AttemptIdentityRecord,
+    captured: CapturedCheckpointState,
+    configuration_envelope: ResolutionEnvelope,
+    provenance: ProvenanceRecord,
+    rng_bundle: RngStateBundle | None = None,
+    parent: ParentReference | None = None,
+    created_at_utc: datetime,
+) -> ArchiveMembers:
+    """Build the full checkpoint archive from a quiescent captured snapshot.
+
+    The archive manifest authenticates every non-manifest member. The #10
+    content digest (computed over the full tar byte stream) authenticates the
+    manifest. No self-referential checkpoint id is stored (amendment A).
+
+    The RNG member is serialized from the snapshot's own
+    ``captured.rng_bundle_bytes`` (item 4): the bytes captured atomically by
+    :meth:`StateProvider.capture_checkpoint_snapshot`. If a ``rng_bundle`` is
+    additionally supplied, it MUST decode to the exact same bytes; any
+    disagreement raises :class:`EncoderError` rather than silently persisting a
+    bundle from a different instant.
+
+    This materializes the complete tar in memory; for the streaming save path
+    (Issue #11 item 8) use :func:`build_archive_parts` +
+    :func:`stream_ustar_archive`.
+    """
+    parts = build_archive_parts(
+        identity=identity,
+        captured=captured,
+        configuration_envelope=configuration_envelope,
+        provenance=provenance,
+        rng_bundle=rng_bundle,
+        parent=parent,
+        created_at_utc=created_at_utc,
+    )
+    tar_bytes = build_ustar_archive(parts.members)
     if len(tar_bytes) > 64 * 1024 * 1024 * 1024:
         raise EncoderError("archive exceeds 64 GiB")
-
-    return ArchiveMembers(manifest=manifest, members=members, tar_bytes=tar_bytes)
+    return ArchiveMembers(manifest=parts.manifest, members=parts.members, tar_bytes=tar_bytes)
 
 
 def all_tensors_dtype(name: str, captured: CapturedCheckpointState) -> str:

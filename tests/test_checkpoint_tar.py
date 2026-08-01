@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from expertforge.checkpoints.tar_reader import (
@@ -255,3 +257,71 @@ def test_size_field_octal_width() -> None:
     assert field.endswith(b"\x00")
     with pytest.raises(TarWriterError):
         _octal_field(max_size + 1, 12)
+
+
+# ---------------------------------------------------------------------------
+# Item 8: streaming writer/reader byte-canonicality and equivalence
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingEquivalence:
+    def test_stream_writer_identical_to_in_memory(self) -> None:
+        # stream_ustar_archive must produce byte-for-byte identical output to
+        # build_ustar_archive for the same members.
+        from expertforge.checkpoints.tar_writer import stream_ustar_archive
+
+        members = [
+            TarMember("manifest.json", b'{"a":1}'),
+            TarMember("state/rng.json", b"abcd"),
+            TarMember("tensors/0.bin", b"Z" * 1000),
+        ]
+        expected = build_ustar_archive(members)
+        chunks: list[bytes] = []
+        stream_ustar_archive(members, chunks.append)
+        streamed = b"".join(chunks)
+        assert streamed == expected
+
+    def test_stream_parser_identical_members_to_in_memory(self, tmp_path: Path) -> None:
+        # parse_ustar_archive_streaming must produce identical members (name,
+        # size, data) to parse_ustar_archive for the same archive.
+        import os
+
+        from expertforge.checkpoints.tar_reader import parse_ustar_archive_streaming
+
+        members = [
+            TarMember("a.bin", b"hello"),
+            TarMember("big.bin", b"Z" * (USTAR_BLOCK_SIZE * 3 + 7)),
+        ]
+        archive = build_ustar_archive(members)
+        p = tmp_path / "a.tar"
+        p.write_bytes(archive)
+        fd = os.open(p, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        try:
+            streamed = parse_ustar_archive_streaming(fd, len(archive), validate_member_order=False)
+        finally:
+            os.close(fd)
+        inmem = parse_ustar_archive(archive, validate_member_order=False)
+        assert [m.name for m in streamed] == [m.name for m in inmem]
+        assert [m.size for m in streamed] == [m.size for m in inmem]
+        assert [m.data for m in streamed] == [m.data for m in inmem]
+
+    def test_stream_parser_rejects_wrong_on_disk_size(self, tmp_path: Path) -> None:
+        # The streaming parser fstat-checks that the descriptor's on-disk size
+        # equals expected_size (a content-with-trailing-bytes file is rejected
+        # here, before any tar framing is parsed).
+        import os
+
+        from expertforge.checkpoints.tar_reader import parse_ustar_archive_streaming
+
+        members = [TarMember("a.bin", b"x")]
+        archive = build_ustar_archive(members)  # multiple of 512
+        p = tmp_path / "trailing.tar"
+        p.write_bytes(archive + b"\x01")  # one trailing byte
+        fd = os.open(p, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        try:
+            # expected_size is the canonical size (multiple of 512); the on-disk
+            # file is one byte longer -> rejected by the fstat check.
+            with pytest.raises(TarParseError, match="on-disk size"):
+                parse_ustar_archive_streaming(fd, len(archive), validate_member_order=False)
+        finally:
+            os.close(fd)

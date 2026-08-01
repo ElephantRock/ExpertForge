@@ -18,7 +18,13 @@ from collections.abc import Iterator
 
 from expertforge.checkpoints.tar_writer import USTAR_BLOCK_SIZE
 
-__all__ = ["ParsedMember", "parse_ustar_archive", "TarParseError"]
+__all__ = [
+    "BLOCK_READ_CHUNK",
+    "ParsedMember",
+    "parse_ustar_archive",
+    "parse_ustar_archive_streaming",
+    "TarParseError",
+]
 
 _NAME_LIMIT = 100
 _PREFIX_LIMIT = 155
@@ -55,20 +61,35 @@ class ParsedMember:
 
 
 def _parse_numeric(field: bytes, *, label: str) -> int:
-    """Parse a ustar octal numeric field, requiring the canonical form (item 11).
+    """Parse a ustar octal numeric field, requiring the EXACT writer form (item 8).
 
-    Canonical form (as emitted by the writer): zero-padded octal digits followed
-    by a single NUL terminator. Rejects base-256/GNU encoding, old-style
-    space-terminated fields, leading/trailing spaces, and embedded NULs. A field
-    that is all NUL (value 0) is accepted only when it is the canonical zero
-    encoding used by uname/gname/devmajor/devminor (all-NUL is canonical zero).
+    The writer emits exactly: zero-padded ASCII octal digits filling all but the
+    final byte, followed by a single NUL terminator. This is byte-canonical:
+    every numeric field (mode, uid, gid, size, mtime, devmajor, devminor) carries
+    the identical encoding the writer produces.
+
+    Rejected (all classified as non-canonical):
+    - base-256 / GNU numeric encoding (high bit of the first byte set);
+    - old-style all-NUL zero (the writer never emits this for a numeric field —
+      it emits ``0000000\\0`` for zero);
+    - space-terminated fields, leading/trailing spaces, embedded NULs, and any
+      byte that is not an ASCII octal digit before the final NUL terminator.
+
+    The uname/gname fields are NOT numeric (they are validated as empty NUL
+    buffers elsewhere), so no all-NUL acceptance is needed here.
     """
     # Reject base-256 (GNU) encoding: the high bit of the first byte set.
     if field and (field[0] & 0x80):
         raise TarParseError(f"{label}: base-256/GNU numeric encoding is rejected")
-    # All-NUL is the canonical zero encoding (used by devmajor/devminor).
+    # Reject old-style all-NUL zero: the writer emits the canonical
+    # ``<zero-padded octal digits> + NUL`` form for every numeric field, including
+    # zero (e.g. ``0000000\\0`` for an 8-byte field). An all-NUL field is a
+    # different byte encoding and is therefore non-canonical (item 8).
     if field == b"\x00" * len(field):
-        return 0
+        raise TarParseError(
+            f"{label}: old-style all-NUL numeric field rejected "
+            "(writer emits canonical zero-padded octal + NUL)"
+        )
     # Canonical form: <zero-padded octal digits> + <single NUL terminator>. The
     # final byte MUST be NUL; everything before it MUST be ASCII octal digits
     # (no leading spaces, no embedded spaces/NULs, no old-style terminator).
@@ -86,9 +107,7 @@ def _parse_numeric(field: bytes, *, label: str) -> int:
                 f"(non-octal/space byte {bytes([ch])!r}): {field!r}"
             )
     text = digits.decode("ascii")
-    # Canonical zero is all-NUL (handled above); a canonical nonzero value must
-    # not have leading-zero ambiguity beyond the canonical zero-padding. Leading
-    # zeros ARE canonical (the writer zero-pads), so accept them.
+    # Leading zeros ARE canonical (the writer zero-pads), so accept them.
     return int(text, 8)
 
 
@@ -107,25 +126,21 @@ def _parse_header(buf: bytes, offset: int) -> tuple[str, bytes, int, int]:
         raise TarParseError("truncated archive: incomplete header block")
     header = buf[offset : offset + USTAR_BLOCK_SIZE]
 
-    # Verify the checksum FIRST (before trusting any field).
+    # Verify the checksum FIRST (before trusting any field). The writer emits
+    # the EXACT canonical form ``<6 zero-padded octal digits> + NUL + space``
+    # (item 8): require byte-for-byte agreement rather than the lenient
+    # NUL/space-stripped parse that accepts alternate spacings.
     stored = header[148:156]
     # Compute the unsigned-byte sum with the chksum field replaced by spaces.
     chksum_buf = bytearray(header)
     chksum_buf[148:156] = b"        "
     computed = sum(chksum_buf) & 0o777777
-    stored_text = stored.decode("ascii", errors="replace").rstrip("\x00 ")
-    stored_text = stored_text.lstrip(" ")
-    if not stored_text:
-        raise TarParseError("empty checksum field")
-    for ch in stored_text:
-        if ch not in "01234567":
-            raise TarParseError(f"non-octal character in checksum field: {ch!r}")
-    try:
-        stored_val = int(stored_text, 8)
-    except ValueError:
-        raise TarParseError("bad checksum octal value") from None
-    if stored_val != computed:
-        raise TarParseError(f"header checksum mismatch: stored={stored_val} computed={computed}")
+    canonical_chk = f"{computed:06o}\x00 ".encode("ascii")
+    if stored != canonical_chk:
+        raise TarParseError(
+            f"header checksum field {stored!r} is not the canonical writer form "
+            f"{canonical_chk!r} (computed sum={computed})"
+        )
 
     # magic: bytes 257:263 must be "ustar\x00".
     magic = header[257:263]
@@ -138,14 +153,18 @@ def _parse_header(buf: bytes, offset: int) -> tuple[str, bytes, int, int]:
     if version != b"00":
         raise TarParseError(f"bad version {version!r}; expected b'00'")
 
-    # typeflag: byte 156 must be '0' (regular file) or a terminator sentinel.
+    # typeflag: byte 156 must be EXACTLY b"0" (regular file). The writer always
+    # emits b"0"; a NUL byte (the alternate pre-POSIX regular-file marker) is a
+    # different byte encoding and is rejected (item 8).
     typeflag = header[156:157]
     # Reject PAX/GNU extended headers outright.
     if typeflag in (b"x", b"g", b"L", b"K"):
         raise TarParseError(f"extended header typeflag {typeflag!r} rejected (PAX/GNU not allowed)")
-    # Symlinks/hardlinks/dirs/devices/fifos rejected.
-    if typeflag not in (b"0", b"\x00"):
-        raise TarParseError(f"unsupported typeflag {typeflag!r}; only regular files allowed")
+    if typeflag != b"0":
+        raise TarParseError(
+            f"unsupported typeflag {typeflag!r}; the writer emits exactly b'0' "
+            "(NUL/alternate regular-file markers are non-canonical)"
+        )
 
     name_field = header[0:100]
     prefix_field = header[345:500]
@@ -153,6 +172,17 @@ def _parse_header(buf: bytes, offset: int) -> tuple[str, bytes, int, int]:
     name_bytes = name_field if name_nul == -1 else name_field[:name_nul]
     prefix_nul = prefix_field.find(b"\x00")
     prefix_bytes = prefix_field if prefix_nul == -1 else prefix_field[:prefix_nul]
+    # Item 8: reject nonzero bytes after the first NUL in the name/prefix fields.
+    # The writer NUL-pads these fixed-width fields; any nonzero byte after the
+    # terminating NUL is a different (non-canonical) encoding.
+    if name_nul != -1:
+        tail = name_field[name_nul + 1 :]
+        if any(b != 0 for b in tail):
+            raise TarParseError("nonzero bytes after NUL in the name field")
+    if prefix_nul != -1:
+        ptail = prefix_field[prefix_nul + 1 :]
+        if any(b != 0 for b in ptail):
+            raise TarParseError("nonzero bytes after NUL in the prefix field")
     if prefix_bytes:
         name = prefix_bytes.decode("utf-8") + "/" + name_bytes.decode("utf-8")
     else:
@@ -322,6 +352,168 @@ def _get_limit(name: str, default: int) -> int:
         return int(getattr(_m, name))
     except Exception:  # pragma: no cover - defensive
         return default
+
+
+def parse_ustar_archive_streaming(
+    fd: int,
+    expected_size: int,
+    *,
+    max_archive_bytes: int | None = None,
+    max_member_count: int | None = None,
+    max_tensor_count: int | None = None,
+    validate_member_order: bool = True,
+) -> list[ParsedMember]:
+    """Stream-parse a strict ustar archive from an open descriptor (item 8).
+
+    This is the large-archive load path (Issue #11 item 8): the archive is
+    parsed SEQUENTIALLY from ``fd`` so the complete tar byte stream is NEVER
+    materialized in Python heap. Each member's header is read, validated, then
+    that member's data bytes are read individually (bounded by the per-member
+    limits); only the parsed member bytes the caller requests are retained. Peak
+    heap during the parse is one member's data plus one header block, not the
+    whole archive.
+
+    The framing/numeric/header validation is byte-for-byte identical to
+    :func:`parse_ustar_archive`: every check applied to the in-memory form is
+    applied here too (checksum, magic/version, typeflag, canonical octal
+    fields, member order, byte limits, two-block terminator, no trailing bytes).
+
+    ``expected_size`` is the record-declared archive size; the descriptor is
+    fstat-checked to be a regular file of exactly that size before any read, and
+    the descriptor MUST be positioned at the start of the archive (the caller
+    opens it fresh). Raises :class:`TarParseError` on any non-canonical framing.
+    """
+    import os
+    import stat as _stat
+
+    archive_limit = max_archive_bytes or _get_limit("MAX_ARCHIVE_BYTES", _MAX_ARCHIVE_BYTES_DEFAULT)
+    if expected_size > archive_limit:
+        raise TarParseError(
+            f"archive size {expected_size} exceeds max_archive_bytes ({archive_limit})"
+        )
+    if expected_size <= 0 or expected_size % USTAR_BLOCK_SIZE != 0:
+        raise TarParseError(
+            f"archive size {expected_size} is not a positive multiple of {USTAR_BLOCK_SIZE}"
+        )
+    # The caller already fstat-verified regularity + exact size; re-assert here
+    # so this function is safe to call directly.
+    st = os.fstat(fd)
+    if not _stat.S_ISREG(st.st_mode):
+        raise TarParseError("streaming parse requires a regular-file descriptor")
+    if st.st_size != expected_size:
+        raise TarParseError(f"on-disk size {st.st_size} != expected_size {expected_size}")
+
+    member_limit = max_member_count or _get_limit("MAX_MEMBER_COUNT", _MAX_MEMBER_COUNT_DEFAULT)
+    tensor_limit = max_tensor_count or _get_limit("MAX_TENSOR_COUNT", _MAX_TENSOR_COUNT_DEFAULT)
+    component_member_limit = _get_limit("MAX_COMPONENT_MEMBER_BYTES", _MAX_MEMBER_BYTES_DEFAULT)
+    tensor_member_limit = _get_limit("MAX_TENSOR_MEMBER_BYTES", _MAX_TENSOR_BYTES_DEFAULT)
+    total_tensor_limit = _get_limit("MAX_TENSOR_BYTES", _MAX_TENSOR_BYTES_DEFAULT)
+
+    total_read = 0
+
+    def _read_exact(n: int, what: str) -> bytes:
+        nonlocal total_read
+        buf = bytearray()
+        remaining = n
+        while remaining > 0:
+            chunk = os.read(fd, min(BLOCK_READ_CHUNK, remaining))
+            if not chunk:
+                raise TarParseError(f"unexpected EOF reading {what}: got {len(buf)} of {n} bytes")
+            buf.extend(chunk)
+            remaining -= len(chunk)
+        total_read += n
+        return bytes(buf)
+
+    members: list[ParsedMember] = []
+    seen: set[str] = set()
+    terminator_seen = False
+    total_tensor_bytes = 0
+    n_blocks = expected_size // USTAR_BLOCK_SIZE
+
+    # Parse member-by-member. We cannot seek on a pipe, but the descriptor is a
+    # regular file; we still read strictly sequentially (no seeks) so the whole
+    # archive is never buffered.
+    blocks_consumed = 0
+    # We need header bytes for _parse_header, which expects the WHOLE buffer to
+    # bounds-check member data offsets. We give it a 1-block slice so it can only
+    # see the header (data is read separately below). _parse_header computes the
+    # data_start as offset + USTAR_BLOCK_SIZE but we ignore that and read data
+    # ourselves.
+    while blocks_consumed < n_blocks:
+        header_block = _read_exact(USTAR_BLOCK_SIZE, "header block")
+        blocks_consumed += 1
+        # A zero block signals the end of members.
+        if header_block == b"\x00" * USTAR_BLOCK_SIZE:
+            terminator_seen = True
+            # Must be followed by exactly one more zero block, then EOF.
+            break
+        # _parse_header validates the header (checksum, magic, typeflag, numeric
+        # fields, name/prefix, devmajor/devminor, linkname, reserved). We pass a
+        # 1-block buffer; the data-start it returns is irrelevant here.
+        name, _typeflag, size, _data_start = _parse_header(header_block, 0)
+        if name in seen:
+            raise TarParseError(f"duplicate member name {name!r}")
+        seen.add(name)
+        if size < 0:
+            raise TarParseError(f"negative size for member {name!r}")
+        # Enforce per-member byte limits DURING parsing (same as the in-memory
+        # parser).
+        is_state = bool(_STATE_MEMBER_RE.fullmatch(name))
+        is_tensor = bool(_TENSOR_MEMBER_RE.fullmatch(name))
+        if name == "manifest.json" or is_state:
+            if size > component_member_limit:
+                raise TarParseError(
+                    f"member {name!r} size {size} exceeds MAX_COMPONENT_MEMBER_BYTES "
+                    f"({component_member_limit})"
+                )
+        elif is_tensor:
+            if size > tensor_member_limit:
+                raise TarParseError(
+                    f"member {name!r} size {size} exceeds MAX_TENSOR_MEMBER_BYTES "
+                    f"({tensor_member_limit})"
+                )
+            total_tensor_bytes += size
+            if total_tensor_bytes > total_tensor_limit:
+                raise TarParseError(
+                    f"total tensor bytes {total_tensor_bytes} exceed MAX_TENSOR_BYTES "
+                    f"({total_tensor_limit})"
+                )
+        # Read the data, then the padding (validated to be zero).
+        data = _read_exact(size, f"data for {name!r}") if size else b""
+        data_blocks = (size + USTAR_BLOCK_SIZE - 1) // USTAR_BLOCK_SIZE
+        padding_len = data_blocks * USTAR_BLOCK_SIZE - size
+        if padding_len:
+            padding = _read_exact(padding_len, f"padding for {name!r}")
+            if any(b != 0 for b in padding):
+                raise TarParseError(f"member {name!r} has non-zero padding bytes")
+        blocks_consumed += data_blocks
+        _validate_member_name(name)
+        members.append(ParsedMember(name=name, data=data, size=size))
+        if len(members) > member_limit:
+            raise TarParseError(f"member count exceeds max_member_count ({member_limit})")
+
+    if not terminator_seen:
+        raise TarParseError("missing two-block zero terminator")
+    # The terminator must be exactly two zero blocks, then EOF.
+    if blocks_consumed >= n_blocks:
+        raise TarParseError("truncated terminator: expected two zero blocks")
+    second = _read_exact(USTAR_BLOCK_SIZE, "second terminator block")
+    blocks_consumed += 1
+    if second != b"\x00" * USTAR_BLOCK_SIZE:
+        raise TarParseError("second terminator block is non-zero")
+    if total_read != expected_size:
+        raise TarParseError(f"streamed {total_read} bytes != expected_size {expected_size}")
+    # Any trailing bytes beyond the two terminator blocks are corruption.
+    extra = os.read(fd, 1)
+    if extra:
+        raise TarParseError("trailing bytes after terminator are rejected")
+    if validate_member_order:
+        _validate_checkpoint_member_order(members, tensor_limit)
+    return members
+
+
+# Streaming reads use this chunk size (bounds peak heap to one chunk + header).
+BLOCK_READ_CHUNK: int = 64 * 1024
 
 
 def _validate_checkpoint_member_order(members: list[ParsedMember], tensor_limit: int) -> None:

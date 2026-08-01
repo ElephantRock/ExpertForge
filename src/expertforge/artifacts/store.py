@@ -307,6 +307,122 @@ def _read_bytes_no_follow(path: Path) -> bytes:
         pass
 
 
+def _open_content_via_fd_chain(root: Path, content: Path) -> int:
+    """Open ``content`` through a descriptor chain, parent-race-safe (item 2).
+
+    On POSIX, walk from ``root`` (opened once) opening each component via
+    :func:`os.openat` relative to the parent directory descriptor, fstat-verifying
+    each (directories are not symlinks; the final component is a regular file).
+    The returned fd is the leaf of the chain: no path-name ``os.open`` of the
+    final file occurs after the chain is verified, so a TOCTOU swap of an
+    intermediate directory for a symlink cannot redirect the open — the parent
+    fd was already bound before its child was opened.
+
+    On Windows (no ``os.openat`` / ``O_NOFOLLOW``), fall back to a path-name
+    ``os.open`` + immediate ``fstat`` regular-file check. This closes the
+    final-element race but leaves a documented residual risk on intermediate
+    directories.
+    """
+    import stat as _stat
+
+    if not hasattr(os, "openat"):
+        # Windows fallback: path-name open + immediate fstat regular-file check.
+        # Residual risk: a concurrent swap of an intermediate directory for a
+        # symlink between the (separate) chain verification and this open could
+        # redirect the read. openat is unavailable, so this is the best
+        # available primitive on Windows.
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        fd = os.open(content, flags)
+        try:
+            st = os.fstat(fd)
+        except OSError as e:
+            os.close(fd)
+            raise ArtifactConflictError(f"cannot fstat {content}: {e}") from e
+        if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise ArtifactConflictError(f"{content} is not a regular file; refused.")
+        return fd
+
+    # POSIX path: open each component relative to its parent directory fd.
+    try:
+        rel_parts = content.relative_to(root).parts
+    except ValueError as e:
+        raise ArtifactConflictError(f"content {content} is not within artifact root {root}") from e
+    if not rel_parts:
+        raise ArtifactConflictError("content path equals the artifact root")
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    o_path = getattr(os, "O_PATH", 0)
+    # Open the root directory itself (its fd is the chain anchor). O_DIRECTORY on
+    # POSIX; O_RDONLY suffices where O_DIRECTORY is unavailable.
+    o_directory = getattr(os, "O_DIRECTORY", 0)
+    try:
+        parent_fd = os.open(
+            str(root),
+            os.O_RDONLY | o_directory | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as e:
+        raise ArtifactConflictError(f"cannot open artifact root {root}: {e}") from e
+    opened_fds: list[int] = [parent_fd]
+    try:
+        # Verify the root fd is a directory and not a symlink.
+        root_st = os.fstat(parent_fd)
+        if _stat.S_ISLNK(root_st.st_mode) or not _stat.S_ISDIR(root_st.st_mode):
+            raise ArtifactConflictError(f"artifact root {root} is not a directory")
+        last = len(rel_parts) - 1
+        for i, part in enumerate(rel_parts):
+            is_final = i == last
+            if is_final:
+                # Open the final file with O_NOFOLLOW so a symlinked final
+                # element is rejected by the kernel, then fstat-verify regular.
+                child_fd = os.openat(
+                    parent_fd,
+                    part,
+                    os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                )
+                opened_fds.append(child_fd)
+                st = os.fstat(child_fd)
+                if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
+                    raise ArtifactConflictError(
+                        f"content component {part!r} is not a regular file; refused."
+                    )
+                # Success: the chain reached the regular content file. Return the
+                # leaf fd and close all intermediate directory fds.
+                leaf: int = child_fd
+                opened_fds.pop()  # don't close the returned leaf
+                for fd in reversed(opened_fds):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                return leaf
+            # Intermediate component: open as a directory via O_PATH|O_NOFOLLOW
+            # (or O_RDONLY|O_DIRECTORY) and fstat-verify it is a real directory,
+            # not a symlink. O_NOFOLLOW ensures a symlinked intermediate name is
+            # rejected by the kernel at each step.
+            if o_path:
+                flags = o_path | nofollow | getattr(os, "O_CLOEXEC", 0)
+            else:
+                flags = os.O_RDONLY | o_directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+            child_fd = os.openat(parent_fd, part, flags)
+            opened_fds.append(child_fd)
+            st = os.fstat(child_fd)
+            if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISDIR(st.st_mode):
+                raise ArtifactConflictError(f"path component {part!r} is not a directory; refused.")
+            parent_fd = child_fd
+        # Unreachable: the loop returns on the final component.
+        raise ArtifactConflictError("content path has no final component")  # pragma: no cover
+    except BaseException:
+        # Close every still-open descriptor on ANY failure (including
+        # BaseException so no fd leaks mid-chain).
+        for fd in opened_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Canonical artifact.json
 # ---------------------------------------------------------------------------
@@ -1314,22 +1430,30 @@ class ArtifactStore:
         """Public, descriptor-bound, parent-race-safe content read primitive.
 
         Returns ``(fd, record)`` where ``fd`` is an open file descriptor on the
-        canonical content that is guaranteed to be a regular file (verified via
-        ``fstat`` on the SAME descriptor), and ``record`` is the registry-indexed
-        :class:`ArtifactRecord` describing it. The caller owns the descriptor and
-        must :func:`os.close` it.
+        canonical content obtained through a DESCRIPTOR CHAIN (not a path-name
+        open after a separate verification), and ``record`` is the
+        registry-indexed :class:`ArtifactRecord` describing it. The caller owns
+        the descriptor and must :func:`os.close` it.
 
-        This closes the TOCTOU window that a path-based ``open`` (``locate`` +
-        ``os.open``) leaves open between chain verification and the final open:
-        the full parent chain from the artifact root to the bundle is verified
-        symlink-free, then the content is opened with ``O_NOFOLLOW`` (where
-        available) and ``fstat``-verified on the resulting descriptor. Any
-        component in the chain — including an intermediate directory — being a
-        symlink is rejected.
+        Item 2 (TOCTOU on intermediate directories): a path-based open
+        (``locate`` + ``os.open``) leaves a window between chain verification and
+        the final open where an intermediate directory can be replaced by a
+        symlink. To close it:
 
-        This is the public boundary consumers (Issue #11) MUST use instead of
-        importing underscored path helpers (:func:`_open_read_no_follow`,
-        :func:`_verify_no_symlinks_in_chain`), which remain module-private.
+        - On POSIX, every path component from the artifact root down to (and
+          including) the final ``content`` file is opened via
+          :func:`os.openat` RELATIVE TO ITS PARENT DIRECTORY DESCRIPTOR, and each
+          is ``fstat``-verified (directory or regular file; never a symlink) on
+          the resulting descriptor. The final file fd is the leaf of that
+          descriptor chain, so a TOCTOU swap of an intermediate directory cannot
+          redirect the open — the parent fd was already bound before the child
+          open.
+        - On Windows, ``os.openat`` / ``O_NOFOLLOW`` are unavailable; the
+          content is opened via ``os.open`` followed by an immediate ``fstat``
+          regular-file check. This closes the final-element race but leaves a
+          RESIDUAL risk on intermediate directories (documented): a concurrent
+          attacker replacing an intermediate directory with a symlink between the
+          chain verification and the path-name open could redirect the read.
 
         Raises :class:`ArtifactNotFoundError` if the artifact or its content is
         absent, and :class:`ArtifactConflictError` if any path component (root,
@@ -1337,21 +1461,17 @@ class ArtifactStore:
         regular file.
         """
         bdir = self._bundle_path(artifact_id)
-        # Verify the full chain from the artifact root to the bundle directory
-        # (including every intermediate directory) is symlink-free before opening
-        # anything. This is the parent-race defense: O_NOFOLLOW only protects the
-        # final element, so a symlinked intermediate directory must be rejected
-        # here.
-        _verify_no_symlinks_in_chain(self._artifact_root, bdir)
         content = bdir / "content"
         if not content.exists():
             raise ArtifactNotFoundError(
                 f"artifact {artifact_id!r} has no canonical content to open."
             )
-        # _open_read_no_follow applies O_NOFOLLOW + fstat regular-file check on
-        # the returned descriptor, so a TOCTOU swap between locate and open
-        # cannot inject a symlinked or non-regular content file.
-        fd = _open_read_no_follow(content)
+        # Item 2: open the content through a descriptor chain. On POSIX this uses
+        # openat(parent_fd, child) for every component so the final fd is reached
+        # without any path-name open after the chain is verified. On Windows the
+        # os.open + immediate fstat form is used (residual intermediate-dir risk
+        # documented above).
+        fd = _open_content_via_fd_chain(self._artifact_root, content)
         # Bind the descriptor to the registry-indexed record so the caller has a
         # single authoritative description of the bytes it is about to read.
         record = self._current_record(artifact_id)

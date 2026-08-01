@@ -162,6 +162,87 @@ class TestItem6VersionClassification:
         with pytest.raises(CheckpointCorruptError):
             store._decode_manifest(members)
 
+    def test_future_manifest_schema_name_classified_unsupported(self) -> None:
+        # Item 7: a future manifest_schema NAME must be classified as
+        # ``unsupported`` (CheckpointVersionError), not ``corrupt``.
+        from pydantic import BaseModel, Field
+
+        from expertforge.checkpoints.store import _is_version_validation_error
+
+        class _M(BaseModel):
+            manifest_schema: str = Field(default="expertforge.checkpoint-manifest")
+
+            # Mimic the Literal narrowing: reject anything but the v1 name.
+            # We simulate a future-schema rejection via a value validator.
+
+        # Pydantic's Literal-typed field raises a ValidationError whose loc is
+        # ("manifest_schema",) for an unknown name. Build a Literal field to
+        # reproduce the real manifest behavior.
+        from typing import Literal as _Literal
+
+        class _MLiteral(BaseModel):
+            manifest_schema: _Literal["expertforge.checkpoint-manifest"] = (
+                "expertforge.checkpoint-manifest"
+            )
+
+        with pytest.raises(ValidationError) as exc_info:
+            _MLiteral(
+                manifest_schema="expertforge.checkpoint-manifest-v2"  # type: ignore[arg-type]
+            )
+        assert _is_version_validation_error(exc_info.value) is True
+
+    def test_future_compatibility_schema_version_classified_unsupported(self) -> None:
+        # Item 7: a future compatibility_schema_version (or compatibility_schema
+        # name) mismatch nested under the compatibility descriptor must be
+        # classified as ``unsupported``, not ``corrupt``.
+        from typing import Literal as _Literal
+
+        from pydantic import BaseModel, field_validator
+
+        from expertforge.checkpoints.store import _is_version_validation_error
+
+        class _Comp(BaseModel):
+            compatibility_schema: _Literal["expertforge.checkpoint-compatibility"] = (
+                "expertforge.checkpoint-compatibility"
+            )
+            compatibility_schema_version: int = 1
+
+            @field_validator("compatibility_schema_version")
+            @classmethod
+            def _v(cls, v: int) -> int:
+                if v != 1:
+                    raise ValueError("unsupported")
+                return v
+
+        class _Root(BaseModel):
+            compatibility: _Comp
+
+        # A future schema version raises with loc=("compatibility",
+        # "compatibility_schema_version"); the leaf is version-validated.
+        with pytest.raises(ValidationError) as exc_info:
+            _Root.model_validate(
+                {
+                    "compatibility": {
+                        "compatibility_schema": "expertforge.checkpoint-compatibility",
+                        "compatibility_schema_version": 99,
+                    }
+                }
+            )
+        assert _is_version_validation_error(exc_info.value) is True
+
+        # A future schema NAME raises with loc=("compatibility",
+        # "compatibility_schema"); also version-classified.
+        with pytest.raises(ValidationError) as exc_info:
+            _Root.model_validate(
+                {
+                    "compatibility": {
+                        "compatibility_schema": "expertforge.checkpoint-compat-v2",
+                        "compatibility_schema_version": 1,
+                    }
+                }
+            )
+        assert _is_version_validation_error(exc_info.value) is True
+
 
 # ---------------------------------------------------------------------------
 # Item 7: byte-canonical tar (fixed role order, all headers, byte limits)
@@ -183,6 +264,108 @@ _CANONICAL_ROLES = (
 
 def _canonical_state_members() -> list[tuple[str, bytes]]:
     return [("manifest.json", b"{}")] + [(f"state/{r}.json", b"{}") for r in _CANONICAL_ROLES]
+
+
+# ---------------------------------------------------------------------------
+# Item 6 (parent binding): _assert_manifest_record_binding compares the FULL
+# ParentReference (run_id + attempt_id + artifact_id), not just artifact_id.
+# ---------------------------------------------------------------------------
+
+
+class TestItem6ParentBinding:
+    def _assert(self) -> Any:
+        from expertforge.checkpoints.store import CheckpointStore
+
+        return CheckpointStore.__new__(CheckpointStore)._assert_manifest_record_binding
+
+    def test_matching_parent_passes(self) -> None:
+        # A manifest whose three parent fields match the record's ParentReference
+        # passes the binding check.
+        from types import SimpleNamespace
+
+        manifest = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent_artifact_id="aid",
+            parent_run_id="pr",
+            parent_attempt_id="pa",
+        )
+        record = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent=SimpleNamespace(artifact_id="aid", run_id="pr", attempt_id="pa"),
+        )
+        # Should not raise.
+        self._assert()(manifest, record)
+
+    def test_mismatched_parent_run_id_rejected(self) -> None:
+        # Item 6: a manifest whose parent_run_id differs from the record's
+        # parent.run_id (artifact_id matches) must be rejected.
+        from types import SimpleNamespace
+
+        from expertforge.checkpoints.store import CheckpointCorruptError
+
+        manifest = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent_artifact_id="aid",
+            parent_run_id="pr-manifest",
+            parent_attempt_id="pa",
+        )
+        record = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent=SimpleNamespace(artifact_id="aid", run_id="pr-record", attempt_id="pa"),
+        )
+        with pytest.raises(CheckpointCorruptError, match="parent_run_id"):
+            self._assert()(manifest, record)
+
+    def test_mismatched_parent_attempt_id_rejected(self) -> None:
+        # Item 6: a manifest whose parent_attempt_id differs from the record's
+        # parent.attempt_id must be rejected.
+        from types import SimpleNamespace
+
+        from expertforge.checkpoints.store import CheckpointCorruptError
+
+        manifest = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent_artifact_id="aid",
+            parent_run_id="pr",
+            parent_attempt_id="pa-manifest",
+        )
+        record = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent=SimpleNamespace(artifact_id="aid", run_id="pr", attempt_id="pa-record"),
+        )
+        with pytest.raises(CheckpointCorruptError, match="parent_attempt_id"):
+            self._assert()(manifest, record)
+
+    def test_none_parent_on_both_sides_passes(self) -> None:
+        from types import SimpleNamespace
+
+        manifest = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent_artifact_id=None,
+            parent_run_id=None,
+            parent_attempt_id=None,
+        )
+        record = SimpleNamespace(
+            run_id="r",
+            attempt_id="a",
+            specification_fingerprint="fp",
+            parent=None,
+        )
+        self._assert()(manifest, record)  # should not raise
 
 
 class TestItem7ByteCanonicalTar:
@@ -261,6 +444,83 @@ class TestItem7ByteCanonicalTar:
         tar[148:156] = f"{chk:06o}\x00 ".encode("ascii")
         with pytest.raises(TarParseError, match="linkname"):
             parse_ustar_archive(bytes(tar), validate_member_order=False)
+
+    # ---- Item 8: byte-canonical to the writer (no alternate representations) --
+
+    def _canonical_header_with_valid_checksum(self, mutate: Any) -> bytes:
+        """Build a canonical single-member header, apply ``mutate(header)``,
+        then recompute the canonical checksum so parsing reaches the targeted
+        field check rather than the checksum gate."""
+        from expertforge.checkpoints.tar_writer import USTAR_BLOCK_SIZE
+
+        tar = bytearray(_build_tar([("manifest.json", b"hi")]))
+        mutate(tar)
+        header = tar[:USTAR_BLOCK_SIZE]
+        header[148:156] = b"        "
+        chk = sum(header) & 0o777777
+        tar[148:156] = f"{chk:06o}\x00 ".encode("ascii")
+        return bytes(tar)
+
+    def test_checksum_alternate_spacing_rejected(self) -> None:
+        # The writer emits exactly ``NNNNNN\x00 `` (6 digits, NUL, space). An
+        # equally-valid-octal checksum with different spacing (all-space
+        # terminator) is a different byte encoding and must be rejected.
+        from expertforge.checkpoints.tar_writer import USTAR_BLOCK_SIZE
+
+        tar = bytearray(_build_tar([("manifest.json", b"hi")]))
+        header = tar[:USTAR_BLOCK_SIZE]
+        # Compute the checksum the writer would, then write it with the
+        # alternate "7 digits + NUL" spacing (no embedded space).
+        chksum_buf = bytearray(header)
+        chksum_buf[148:156] = b"        "
+        chk = sum(chksum_buf) & 0o777777
+        tar[148:156] = f"{chk:07o}\x00".encode("ascii")
+        with pytest.raises(TarParseError, match="canonical writer form"):
+            parse_ustar_archive(bytes(tar), validate_member_order=False)
+
+    def test_nul_typeflag_rejected(self) -> None:
+        # The writer emits typeflag b"0"; a NUL byte (pre-POSIX regular-file
+        # marker) is non-canonical and must be rejected.
+
+        def mutate(tar: bytearray) -> None:
+            tar[156] = 0x00
+
+        with pytest.raises(TarParseError, match="typeflag"):
+            parse_ustar_archive(
+                self._canonical_header_with_valid_checksum(mutate),
+                validate_member_order=False,
+            )
+
+    def test_all_nul_numeric_field_rejected(self) -> None:
+        # An old-style all-NUL zero (e.g. for mtime) is non-canonical: the writer
+        # emits ``00000000000\x00``. Overwrite the 12-byte mtime field (136:148)
+        # with all NUL and confirm parsing rejects it.
+
+        def mutate(tar: bytearray) -> None:
+            tar[136:148] = b"\x00" * 12
+
+        with pytest.raises(TarParseError, match="old-style all-NUL"):
+            parse_ustar_archive(
+                self._canonical_header_with_valid_checksum(mutate),
+                validate_member_order=False,
+            )
+
+    def test_nonzero_bytes_after_name_nul_rejected(self) -> None:
+        # A name field with nonzero bytes after the first NUL terminator is a
+        # different encoding than the writer's NUL-padding and must be rejected.
+        # "a" (1 byte) leaves 99 padding bytes; set byte 50 (after the NUL at 1)
+        # to a nonzero value.
+
+        def mutate(tar: bytearray) -> None:
+            tar[0] = ord("a")
+            tar[1] = 0x00
+            tar[50] = 0x41  # nonzero after the first NUL
+
+        with pytest.raises(TarParseError, match="name field"):
+            parse_ustar_archive(
+                self._canonical_header_with_valid_checksum(mutate),
+                validate_member_order=False,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +649,7 @@ class TestItem8StreamingThreshold:
 
     def test_read_and_hash_fd_uses_small_path_below_threshold(self, tmp_path: Any) -> None:
         # Below the threshold, _read_and_hash_fd materializes the whole tar via
-        # _read_bounded_fd (the fast path). Verify it dispatches by size.
+        # _read_bounded_fd (the fast path). Verify it returns the bytes + digest.
         import hashlib
         import os
 
@@ -407,37 +667,35 @@ class TestItem8StreamingThreshold:
         finally:
             os.close(fd)
 
-    def test_read_and_hash_fd_uses_streaming_path_above_threshold(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-    ) -> None:
-        # Above the threshold, _read_and_hash_fd streams to a temp file. Lower
-        # the threshold to 1 byte so a tiny payload takes the streaming path,
-        # and confirm _read_large_fd_streaming is invoked and the temp file is
-        # cleaned up.
+    def test_read_large_fd_streaming_returns_path_not_bytes(self, tmp_path: Any) -> None:
+        # Item 8: _read_large_fd_streaming streams the fd to a temp file, hashes
+        # incrementally, and returns (digest, size, path) WITHOUT reading the
+        # whole archive back into memory. The temp file is left in place for the
+        # streaming parse. Verify the contract and that the temp file holds the
+        # streamed bytes.
         import hashlib
         import os
 
         from expertforge.checkpoints import store as cp_store
 
-        monkeypatch.setattr(cp_store, "MAX_INMEMORY_ARCHIVE_BYTES", 1)
         payload = b"stream me" + b"\x00" * 503  # 512 bytes
         p = tmp_path / "large.tar"
         p.write_bytes(payload)
         fd = os.open(p, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         cs = cp_store.CheckpointStore.__new__(cp_store.CheckpointStore)
-        called: dict[str, bool] = {"streaming": False}
-        orig = cs._read_large_fd_streaming
-
-        def _spy(fd_arg: int, expected_size: int) -> tuple[bytes, str]:
-            called["streaming"] = True
-            return orig(fd_arg, expected_size)
-
-        monkeypatch.setattr(cs, "_read_large_fd_streaming", _spy)
         try:
-            tar_bytes, digest = cs._read_and_hash_fd(fd, len(payload))
-            assert called["streaming"] is True
-            assert tar_bytes == payload
-            assert digest == f"sha256:{hashlib.sha256(payload).hexdigest()}"
+            digest, size, parsed_path = cs._read_large_fd_streaming(fd, len(payload))
+            try:
+                assert size == len(payload)
+                assert digest == f"sha256:{hashlib.sha256(payload).hexdigest()}"
+                # The temp file holds the streamed bytes (caller stream-parses it).
+                assert parsed_path.exists()
+                assert parsed_path.read_bytes() == payload
+            finally:
+                try:
+                    parsed_path.unlink()
+                except OSError:
+                    pass
         finally:
             os.close(fd)
 
@@ -485,3 +743,99 @@ class TestItem5StrictComponentLoading:
                 },
                 strict=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# Item 5 (cross-binding): config rehash, RNG descriptor binding, tensor counts,
+# identity/provenance typed validation.
+# ---------------------------------------------------------------------------
+
+
+class TestItem5ConfigurationRehash:
+    def test_configuration_state_rejects_bad_digest(self) -> None:
+        # The strict ConfigurationState model rejects a non-64-hex content_sha256.
+        from expertforge.checkpoints.models import ConfigurationState
+
+        with pytest.raises(ValidationError):
+            ConfigurationState.model_validate(
+                {
+                    "schema": "expertforge.checkpoint-configuration",
+                    "version": 1,
+                    "content_sha256": "not-hex",
+                    "content_base64": "AA==",
+                    "byte_length": 1,
+                    "fingerprint": "fp",
+                }
+            )
+
+    def test_load_cross_binds_config_rng_tensors(self, tmp_path: Any) -> None:
+        # End-to-end: a real save/load runs _bind_components, which rehashes the
+        # configuration bytes, binds the RNG descriptor fields, and verifies
+        # every tensor member is referenced exactly its logical-name count. A
+        # clean round-trip proves the cross-binding is satisfiable.
+
+        from expertforge.checkpoints.store import CheckpointStore
+        from expertforge.config.resolve import resolve_config
+        from tests._checkpoint_fixtures import (
+            CONFIGS,
+            make_captured_state,
+            make_identity_and_provenance,
+            make_resume_identity,
+            make_store,
+        )
+
+        identity, provenance = make_identity_and_provenance(tmp_path)
+        store = make_store(tmp_path, identity=identity)
+        cp_store = CheckpointStore(store)
+        captured = make_captured_state()
+        from tests._checkpoint_fixtures import make_rng_bundle
+
+        envelope = resolve_config(CONFIGS / "smoke.yaml")
+        record = cp_store.save(
+            identity=identity,
+            captured=captured,
+            configuration_envelope=envelope,
+            provenance=provenance,
+            rng_bundle=make_rng_bundle(),
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
+        # This load runs the full _bind_components cross-binding (config rehash,
+        # RNG descriptor, tensor counts, typed identity/provenance).
+        archive = cp_store.load(record.artifact_id, expected_identity=resume)
+        assert archive.artifact_id == record.artifact_id
+
+    def test_alias_group_tensor_count_matches_logical_names(self, tmp_path: Any) -> None:
+        # Item 5: an alias-group tensor member is referenced once per logical
+        # name; the count check accepts exactly len(logical_names) references.
+        from expertforge.checkpoints.store import CheckpointStore
+        from expertforge.config.resolve import resolve_config
+        from tests._checkpoint_fixtures import (
+            CONFIGS,
+            make_captured_state,
+            make_identity_and_provenance,
+            make_resume_identity,
+            make_store,
+        )
+
+        identity, provenance = make_identity_and_provenance(tmp_path)
+        store = make_store(tmp_path, identity=identity)
+        cp_store = CheckpointStore(store)
+        captured = make_captured_state(alias=True)
+        envelope = resolve_config(CONFIGS / "smoke.yaml")
+        from tests._checkpoint_fixtures import make_rng_bundle
+
+        record = cp_store.save(
+            identity=identity,
+            captured=captured,
+            configuration_envelope=envelope,
+            provenance=provenance,
+            rng_bundle=make_rng_bundle(),
+        )
+        resume = make_resume_identity(identity, parent_artifact_id=record.artifact_id)
+        # The alias group has 2 logical names sharing one member; the count
+        # check must accept 2 references to that member (not reject as a
+        # double-count).
+        archive = cp_store.load(record.artifact_id, expected_identity=resume)
+        # Find the aliased member: it has 2 logical_names.
+        aliased = [m for m in archive.manifest.tensor_members if len(m.logical_names) > 1]
+        assert aliased, "expected at least one alias-group tensor member"

@@ -52,6 +52,7 @@ __all__ = [
     "CapturedCheckpointState",
     "TensorMemberRef",
     "StateComponentRef",
+    "ConfigurationState",
     "CounterSnapshot",
     "DataIdentity",
     "DataCursor",
@@ -959,6 +960,34 @@ class StateComponentRef(_FrozenModel):
         # Non-manifest, non-tensor members live under state/<role>.json.
         if not v.startswith("state/") or not v.endswith(".json"):
             raise ValueError(f"component member_name must be 'state/<role>.json'; got {v!r}")
+        return v
+
+
+class ConfigurationState(_FrozenModel):
+    """The strict ``state/configuration.json`` component payload (item 5).
+
+    Carries the configuration fingerprint, the SHA-256 of the canonical
+    configuration bytes, the base64-encoded configuration bytes, and their
+    length. Used by the cross-binding check: the actual ``content_base64`` bytes
+    are decoded and rehashed, then compared to both the payload's
+    ``content_sha256`` and the manifest's ``configuration_content_sha256`` (so a
+    tampered payload cannot self-attest its own digest).
+    """
+
+    schema_: Literal["expertforge.checkpoint-configuration"] = Field(
+        alias="schema", default="expertforge.checkpoint-configuration"
+    )
+    version: Literal[1] = 1
+    content_sha256: str
+    content_base64: str
+    byte_length: int = Field(..., ge=0)
+    fingerprint: str = Field(..., min_length=1)
+
+    @field_validator("content_sha256")
+    @classmethod
+    def _check_digest(cls, v: str) -> str:
+        if not _HEX64.fullmatch(v):
+            raise ValueError(f"content_sha256 must be 64 lowercase hex; got {v!r}.")
         return v
 
 

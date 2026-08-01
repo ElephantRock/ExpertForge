@@ -11,9 +11,15 @@ two terminal zero blocks.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
-__all__ = ["USTAR_BLOCK_SIZE", "TarMember", "build_ustar_archive", "TarWriterError"]
+__all__ = [
+    "USTAR_BLOCK_SIZE",
+    "TarMember",
+    "build_ustar_archive",
+    "stream_ustar_archive",
+    "TarWriterError",
+]
 
 USTAR_BLOCK_SIZE: int = 512
 
@@ -189,6 +195,11 @@ def build_ustar_archive(members: Sequence[TarMember]) -> bytes:
     - canonical octal numeric fields (no base-256);
     - 512-byte block alignment; two trailing zero-block terminator;
     - total size a multiple of 512 bytes.
+
+    This materializes the complete archive in memory; for streaming (Issue #11
+    item 8) use :func:`stream_ustar_archive` which writes each member's header +
+    padded data directly to a ``write`` callable without accumulating the whole
+    archive first.
     """
     seen: set[str] = set()
     out = bytearray()
@@ -203,3 +214,32 @@ def build_ustar_archive(members: Sequence[TarMember]) -> bytes:
     # Two zero-block terminator.
     out.extend(b"\x00" * (USTAR_BLOCK_SIZE * 2))
     return bytes(out)
+
+
+def stream_ustar_archive(
+    members: Sequence[TarMember],
+    write: Callable[[bytes], None],
+) -> None:
+    """Stream a strict POSIX ustar archive to a ``write`` callable (item 8).
+
+    Writes each member's 512-byte header immediately followed by its data padded
+    to a 512-byte block boundary, then the two-block zero terminator. The
+    ``write`` callable is invoked once per chunk; the complete archive is NEVER
+    accumulated in a single buffer, so a caller writing to a file descriptor
+    holds at most one member's bytes (plus padding) in memory at a time.
+
+    Produces byte-for-byte identical output to :func:`build_ustar_archive` for
+    the same ``members``; the streaming form is the canonical large-archive
+    serialization path (Issue #11 amendment F / item 8).
+    """
+    seen: set[str] = set()
+    for member in members:
+        _validate_member_name(member.name)
+        if member.name in seen:
+            raise TarWriterError(f"duplicate member name {member.name!r}")
+        seen.add(member.name)
+        header = _build_header(name=member.name, size=len(member.data))
+        write(header)
+        write(_pad_to_block(member.data))
+    # Two zero-block terminator.
+    write(b"\x00" * (USTAR_BLOCK_SIZE * 2))
