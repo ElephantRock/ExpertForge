@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from expertforge.experiments import experiment_manifest_json_schema
 
 
 def _completed_rule(schema: dict[str, Any]) -> dict[str, Any]:
-    for rule in schema["allOf"]:
-        condition = rule.get("if", {})
-        status = condition.get("properties", {}).get("status")
+    for candidate in schema["allOf"]:
+        rule = cast(dict[str, Any], candidate)
+        condition = cast(dict[str, Any], rule.get("if", {}))
+        properties = cast(dict[str, Any], condition.get("properties", {}))
+        status = properties.get("status")
         if status == {"const": "completed"}:
             return rule
     raise AssertionError("completed-status conditional is missing")
