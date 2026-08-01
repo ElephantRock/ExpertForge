@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from expertforge.artifacts import (
-    ArtifactRecord,
-    RetentionStatus,
-    validate_sha256_digest,
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
 )
+
+from expertforge.artifacts import ArtifactRecord, validate_sha256_digest
 from expertforge.identity.record import AttemptIdentityRecord
 
 __all__ = [
@@ -29,6 +33,7 @@ __all__ = [
     "MaturityStage",
     "MissingEvidenceCode",
     "ModelIdentity",
+    "ParameterCountKind",
     "ResearchFamily",
     "TokenizerReference",
     "TrainingBudget",
@@ -51,6 +56,7 @@ MaturityStage = Literal[
     "M3",
     "M4",
     "M5",
+    "none/not-applicable",
 ]
 ResearchFamily = Literal[
     "none/not-applicable",
@@ -68,6 +74,7 @@ ResearchFamily = Literal[
 ]
 ExperimentClassification = Literal["smoke_test", "formal_experiment"]
 AttemptStatus = Literal["completed", "failed", "interrupted"]
+ParameterCountKind = Literal["exact", "estimated"]
 ManifestDiagnosticCode = Literal[
     "handled_interruption",
     "unhandled_exception",
@@ -88,12 +95,15 @@ ManifestDiagnosticCode = Literal[
     "configuration_error",
 ]
 MissingEvidenceCode = Literal[
+    "checkpoint_artifact_missing",
     "configuration_artifact_missing",
+    "dataset_identity_missing",
+    "evaluation_summary_missing",
+    "generated_output_artifact_missing",
+    "model_identity_missing",
     "provenance_artifact_missing",
     "telemetry_artifact_missing",
-    "dataset_identity_missing",
     "tokenizer_identity_missing",
-    "model_identity_missing",
     "training_budget_missing",
 ]
 ArtifactRole = Literal[
@@ -118,14 +128,26 @@ class _FrozenModel(BaseModel):
     )
 
 
+def _require_non_blank(value: str, *, field_name: str) -> str:
+    if not value.strip():
+        raise ValueError(f"{field_name} must be non-blank.")
+    return value
+
+
 class DatasetReference(_FrozenModel):
     """Dataset identity bound to one specification-fingerprint immutable input."""
 
     dataset_id: str = Field(..., min_length=1)
     split: str = Field(..., min_length=1)
     immutable_input_name: str = Field(..., min_length=1)
-    content_digest: str = Field(..., min_length=1)
+    content_digest: str = Field(..., pattern=r"^sha256:[0-9a-f]{64}$")
     is_fixture: bool
+
+    @field_validator("dataset_id", "split", "immutable_input_name")
+    @classmethod
+    def _validate_text(cls, value: str, info: ValidationInfo) -> str:
+        field_name = info.field_name or "dataset reference"
+        return _require_non_blank(value, field_name=field_name)
 
     @field_validator("content_digest")
     @classmethod
@@ -140,8 +162,14 @@ class TokenizerReference(_FrozenModel):
     tokenizer_id: str = Field(..., min_length=1)
     vocab_size: int = Field(..., ge=1)
     immutable_input_name: str = Field(..., min_length=1)
-    content_digest: str = Field(..., min_length=1)
+    content_digest: str = Field(..., pattern=r"^sha256:[0-9a-f]{64}$")
     is_fixture: bool
+
+    @field_validator("tokenizer_id", "immutable_input_name")
+    @classmethod
+    def _validate_text(cls, value: str, info: ValidationInfo) -> str:
+        field_name = info.field_name or "tokenizer reference"
+        return _require_non_blank(value, field_name=field_name)
 
     @field_validator("content_digest")
     @classmethod
@@ -157,6 +185,12 @@ class ModelIdentity(_FrozenModel):
     n_heads: int = Field(..., ge=1)
     ffn_dim: int = Field(..., ge=1)
     parameter_count: int = Field(..., ge=0)
+    parameter_count_kind: ParameterCountKind
+
+    @field_validator("architecture")
+    @classmethod
+    def _validate_architecture(cls, value: str) -> str:
+        return _require_non_blank(value, field_name="architecture")
 
     @model_validator(mode="after")
     def _validate_attention_shape(self) -> ModelIdentity:
@@ -197,8 +231,8 @@ class EvaluationSummary(_FrozenModel):
     @field_validator("metrics_recorded")
     @classmethod
     def _validate_metrics(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(not item for item in value):
-            raise ValueError("metrics_recorded entries must be non-empty.")
+        if any(not item.strip() for item in value):
+            raise ValueError("metrics_recorded entries must be non-blank.")
         if tuple(sorted(set(value))) != value:
             raise ValueError("metrics_recorded must be sorted and unique.")
         return value
@@ -252,6 +286,7 @@ class ExperimentManifest(_FrozenModel):
     format_version: Literal[1] = 1
 
     identity: AttemptIdentityRecord
+    finalized_at_utc: datetime
     issue_number: int | None = Field(default=None, ge=1)
     pull_request_number: int | None = Field(default=None, ge=1)
     maturity_stage: MaturityStage
@@ -266,11 +301,12 @@ class ExperimentManifest(_FrozenModel):
     provenance_artifact: ArtifactRecord | None = None
     dataset_identity: DatasetReference | None = None
     tokenizer_identity: TokenizerReference | None = None
-    fixture: bool
     model_descriptor: ModelIdentity | None = None
     training_budget: TrainingBudget | None = None
     evaluation_summary: EvaluationSummary | None = None
 
+    smoke_objective: str | None = None
+    smoke_acceptance_criteria: str | None = None
     hypothesis: str | None = None
     control: str | None = None
     fixed_constraints: tuple[str, ...] = Field(default_factory=tuple)
@@ -280,21 +316,55 @@ class ExperimentManifest(_FrozenModel):
     failure_threshold: str | None = None
     kill_criterion: str | None = None
 
+    checkpoint_evidence_required: bool = False
+    generated_output_evidence_required: bool = False
     telemetry_artifacts: tuple[ArtifactRecord, ...] = Field(default_factory=tuple)
     checkpoint_artifacts: tuple[ArtifactRecord, ...] = Field(default_factory=tuple)
     generated_output_artifacts: tuple[ArtifactRecord, ...] = Field(default_factory=tuple)
     review_report_artifacts: tuple[ArtifactRecord, ...] = Field(default_factory=tuple)
     resume_checkpoint: ArtifactRecord | None = None
-    manifest_retention_intent: RetentionStatus = "retained"
+
+    result: str | None = None
+    decision: str | None = None
+
+    @field_validator("finalized_at_utc")
+    @classmethod
+    def _validate_finalized_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError("finalized_at_utc must be timezone-aware UTC.")
+        if value.tzinfo.utcoffset(value) != timedelta(0):
+            raise ValueError("finalized_at_utc must have UTC offset 0.")
+        return value
 
     @field_validator("known_limitations", "fixed_constraints", "dependent_variables")
     @classmethod
     def _validate_sorted_text(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if any(not item.strip() for item in value):
-            raise ValueError("text tuple entries must be non-empty.")
+            raise ValueError("text tuple entries must be non-blank.")
         if tuple(sorted(set(value))) != value:
             raise ValueError("text tuples must be sorted and unique.")
         return value
+
+    @field_validator(
+        "smoke_objective",
+        "smoke_acceptance_criteria",
+        "hypothesis",
+        "control",
+        "independent_variable",
+        "minimum_useful_effect",
+        "failure_threshold",
+        "kill_criterion",
+        "result",
+        "decision",
+    )
+    @classmethod
+    def _validate_optional_text(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        if value is None:
+            return None
+        field_name = info.field_name or "text"
+        return _require_non_blank(value, field_name=field_name)
 
     @field_validator(
         "telemetry_artifacts",
@@ -313,12 +383,15 @@ class ExperimentManifest(_FrozenModel):
 
     @model_validator(mode="after")
     def _validate_contract(self) -> ExperimentManifest:
+        if self.finalized_at_utc < self.identity.created_at_utc:
+            raise ValueError("finalized_at_utc cannot precede identity.created_at_utc.")
         self._validate_classification()
         self._validate_lifecycle()
         self._validate_fixture_binding()
         self._validate_artifact_roles()
         self._validate_resume_binding()
         self._validate_evidence()
+        self._validate_review_snapshot()
         return self
 
     def _validate_classification(self) -> None:
@@ -326,6 +399,9 @@ class ExperimentManifest(_FrozenModel):
             "hypothesis": self.hypothesis,
             "control": self.control,
             "independent_variable": self.independent_variable,
+            "minimum_useful_effect": self.minimum_useful_effect,
+            "failure_threshold": self.failure_threshold,
+            "kill_criterion": self.kill_criterion,
         }
         if self.classification == "formal_experiment":
             missing = [name for name, value in formal_required.items() if not value]
@@ -338,20 +414,18 @@ class ExperimentManifest(_FrozenModel):
                     "formal_experiment requires non-empty experiment-contract fields: "
                     + ", ".join(sorted(missing))
                 )
-        else:
-            if any(value is not None for value in formal_required.values()):
-                raise ValueError("smoke_test forbids hypothesis/control/independent_variable.")
-            if self.fixed_constraints or self.dependent_variables:
-                raise ValueError("smoke_test forbids fixed_constraints/dependent_variables.")
-            if any(
-                value is not None
-                for value in (
-                    self.minimum_useful_effect,
-                    self.failure_threshold,
-                    self.kill_criterion,
-                )
-            ):
-                raise ValueError("smoke_test forbids formal threshold fields.")
+            if self.smoke_objective is not None or self.smoke_acceptance_criteria is not None:
+                raise ValueError("formal_experiment forbids smoke-test contract fields.")
+            return
+
+        if not self.smoke_objective or not self.smoke_acceptance_criteria:
+            raise ValueError(
+                "smoke_test requires smoke_objective and smoke_acceptance_criteria."
+            )
+        if any(value is not None for value in formal_required.values()):
+            raise ValueError("smoke_test forbids formal experiment scalar fields.")
+        if self.fixed_constraints or self.dependent_variables:
+            raise ValueError("smoke_test forbids fixed_constraints/dependent_variables.")
 
     def _validate_lifecycle(self) -> None:
         if self.status in ("failed", "interrupted"):
@@ -361,12 +435,12 @@ class ExperimentManifest(_FrozenModel):
             raise ValueError("completed status forbids outcome_diagnostic.")
 
     def _validate_fixture_binding(self) -> None:
-        for label, ref in (
-            ("dataset_identity", self.dataset_identity),
-            ("tokenizer_identity", self.tokenizer_identity),
+        if (
+            self.dataset_identity is not None
+            and self.tokenizer_identity is not None
+            and self.dataset_identity.is_fixture != self.tokenizer_identity.is_fixture
         ):
-            if ref is not None and ref.is_fixture != self.fixture:
-                raise ValueError(f"{label}.is_fixture must equal top-level fixture.")
+            raise ValueError("dataset and tokenizer fixture status must agree.")
         fingerprint_inputs = {
             item.name: item for item in self.identity.specification_fingerprint.immutable_inputs
         }
@@ -432,6 +506,8 @@ class ExperimentManifest(_FrozenModel):
             if record.category == "experiment_manifest":
                 raise ValueError("a manifest cannot reference itself or another manifest artifact.")
             ids.append(record.artifact_id)
+        if self.resume_checkpoint is not None:
+            ids.append(self.resume_checkpoint.artifact_id)
         if len(set(ids)) != len(ids):
             raise ValueError("artifact_id values must be globally unique across manifest roles.")
 
@@ -469,6 +545,10 @@ class ExperimentManifest(_FrozenModel):
         if self.status == "completed" and missing:
             raise ValueError("completed attempts require complete core evidence.")
 
+    def _validate_review_snapshot(self) -> None:
+        if self.status != "completed" and (self.result is not None or self.decision is not None):
+            raise ValueError("result/decision snapshots are permitted only for completed attempts.")
+
     def derived_missing_evidence(self) -> tuple[MissingEvidenceCode, ...]:
         missing: list[MissingEvidenceCode] = []
         if self.configuration_artifact is None:
@@ -485,7 +565,22 @@ class ExperimentManifest(_FrozenModel):
             missing.append("model_identity_missing")
         if self.training_budget is None:
             missing.append("training_budget_missing")
+        if self.evaluation_summary is None:
+            missing.append("evaluation_summary_missing")
+        if self.checkpoint_evidence_required and not self.checkpoint_artifacts:
+            missing.append("checkpoint_artifact_missing")
+        if self.generated_output_evidence_required and not self.generated_output_artifacts:
+            missing.append("generated_output_artifact_missing")
         return tuple(sorted(missing))
+
+    @property
+    def fixture(self) -> bool | None:
+        """Derived fixture status; absent when neither identity reference exists."""
+        if self.dataset_identity is not None:
+            return self.dataset_identity.is_fixture
+        if self.tokenizer_identity is not None:
+            return self.tokenizer_identity.is_fixture
+        return None
 
     def referenced_attempt_artifacts(self) -> tuple[ArtifactRecord, ...]:
         """All same-attempt records, deterministically sorted by artifact_id."""
