@@ -15,6 +15,19 @@ _RUN_ID_PATTERN = r"^run-\d{8}t\d{6}z-[0-9a-f]{12}-[0-9a-f]{20}$"
 _ATTEMPT_ID_PATTERN = r"^attempt-\d{8}t\d{6}z-[0-9a-f]{20}$"
 
 
+def _strip_annotations(value: Any) -> Any:
+    """Remove non-validation annotations for a compact stable interchange contract."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_annotations(item)
+            for key, item in value.items()
+            if key not in {"description", "title"}
+        }
+    if isinstance(value, list):
+        return [_strip_annotations(item) for item in value]
+    return value
+
+
 def _patch_patterns(schema: dict[str, Any]) -> None:
     defs = schema.get("$defs", {})
     artifact = defs.get("ArtifactRecord", {}).get("properties", {})
@@ -136,11 +149,12 @@ def _fixture_equality_conditionals() -> list[dict[str, Any]]:
 
 
 def experiment_manifest_json_schema() -> dict[str, Any]:
-    """Return the model-derived Draft 2020-12 schema plus binding conditionals."""
-    schema = ExperimentManifest.model_json_schema(by_alias=True, mode="serialization")
+    """Return the compact Draft 2020-12 schema plus binding conditionals."""
+    raw = ExperimentManifest.model_json_schema(by_alias=True, mode="serialization")
+    schema = _strip_annotations(raw)
+    assert isinstance(schema, dict)
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["$id"] = "https://schemas.expertforge.local/experiment-manifest-v1.json"
-    schema["title"] = "ExpertForge experiment manifest v1"
     _patch_patterns(schema)
     schema["allOf"] = [
         _classification_conditional(),
