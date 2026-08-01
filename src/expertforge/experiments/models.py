@@ -248,8 +248,8 @@ class ExperimentManifest(_FrozenModel):
     schema_name: Literal["expertforge.experiment-manifest"] = Field(
         default=EXPERIMENT_MANIFEST_SCHEMA, alias="schema"
     )
-    schema_version: Literal[1] = EXPERIMENT_MANIFEST_SCHEMA_VERSION
-    format_version: Literal[1] = EXPERIMENT_MANIFEST_FORMAT_VERSION
+    schema_version: Literal[1] = 1
+    format_version: Literal[1] = 1
 
     identity: AttemptIdentityRecord
     issue_number: int | None = Field(default=None, ge=1)
@@ -394,25 +394,18 @@ class ExperimentManifest(_FrozenModel):
             self.identity.attempt_id,
             self.identity.fingerprint_digest_str(),
         )
-        role_records: tuple[tuple[ArtifactRole, ArtifactRecord], ...] = tuple(
-            (role, record)
-            for role, records in (
-                (
-                    "configuration",
-                    ()
-                    if self.configuration_artifact is None
-                    else (self.configuration_artifact,),
-                ),
-                (
-                    "provenance",
-                    () if self.provenance_artifact is None else (self.provenance_artifact,),
-                ),
-                ("telemetry", self.telemetry_artifacts),
-                ("checkpoint", self.checkpoint_artifacts),
-                ("generated_output", self.generated_output_artifacts),
-                ("review_report", self.review_report_artifacts),
-            )
-            for record in records
+        role_records: list[tuple[ArtifactRole, ArtifactRecord]] = []
+        if self.configuration_artifact is not None:
+            role_records.append(("configuration", self.configuration_artifact))
+        if self.provenance_artifact is not None:
+            role_records.append(("provenance", self.provenance_artifact))
+        role_records.extend(("telemetry", record) for record in self.telemetry_artifacts)
+        role_records.extend(("checkpoint", record) for record in self.checkpoint_artifacts)
+        role_records.extend(
+            ("generated_output", record) for record in self.generated_output_artifacts
+        )
+        role_records.extend(
+            ("review_report", record) for record in self.review_report_artifacts
         )
         expected_role: dict[ArtifactRole, tuple[str, frozenset[str]]] = {
             "configuration": ("resolved_configuration", frozenset({"json"})),
