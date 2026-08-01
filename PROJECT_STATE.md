@@ -4,7 +4,7 @@
 detailed issue and pull-request records. When this file conflicts with the
 underlying issues/PRs or with `main`, those prevail.
 
-Last updated: Milestone 0 in progress; #10 complete, #11 available next, #13 Phase A CI foundation active.
+Last updated: Milestone 0 in progress; #11 complete, #12 next, #13 active. 9 of 11 child issues complete.
 
 ## Current milestone
 
@@ -31,6 +31,8 @@ order (see #3 for the full graph):
 
 #13 integrates tests throughout Milestone 0; #14 is strictly last.
 
+**Progress: 9 of 11 child issues complete** (#4–#11). Remaining: #12, #14.
+
 ## Active baseline
 
 - No model baseline exists yet. The first model milestone is **D0 (minimal dense
@@ -41,15 +43,14 @@ order (see #3 for the full graph):
 
 ## Active issues
 
-- **#11 — M0.8 checkpoint serialization and exact restoration — available next.**
-  Its #5/#6/#8/#10 dependencies are complete; its completion unlocks #12.
+- **#12 — M0.9 experiment manifests — next implementation issue.** All dependencies
+  (#5/#6/#7/#9/#10/#11) are complete.
 - **#13 — M0.10 test/CI harness — in progress.** Phase A merged via PR #21,
   squash commit `aaa31187d5d6b63671ee96df14a85a75b125f068`: permanent read-only CI,
   strict fast/integration/smoke/accelerator tiers, pinned toolchain, and
   repository-native policy checks are active. #13 remains open until the full
   Milestone 0 component and integration suite is present.
-- **#12 — experiment manifests** follows #5/#6/#7/#9/#10/#11; **#14 — smoke and
-  recovery gate** remains last.
+- **#14 — smoke and recovery gate** remains last.
 - #3 umbrella remains open.
 - **#4 — M0.1 repository and Python package scaffold — completed.**
 - **#5 — M0.2 validated configuration resolution — completed.**
@@ -57,36 +58,27 @@ order (see #3 for the full graph):
 - **#7 — M0.4 source provenance and execution environment — completed** via
   PR #18, squash commit `f59916228d730675151149c74e0dde2ac2a1aadc`.
 - **#8 — M0.5 deterministic seed and RNG-state management — completed** via
-  PR #24, squash commit `fa49c95f7b926dc7d2255ae923b90a1512a21147`. Versioned
-  SHA-256 seed derivation, `RngManager` with Python/NumPy/optional-PyTorch
-  adapters, immutable strict checkpoint state serialization, exact
-  capture/restoration, failure-atomic initialization and restoration, ADR 0003.
+  PR #24, squash commit `fa49c95f7b926dc7d2255ae923b90a1512a21147`.
 - **#9 — M0.6 structured logging and metrics — completed** via PR #27, squash
-  commit `99c5a6b6e6f60be9ef3ad645c1d2bd743b12fbad`. Identity-bound versioned event
-  and metric schemas, canonical per-rank JSONL, deterministic console rendering,
-  durable writer lifecycle, authoritative loading/diagnostic scanning, structural
-  redaction, severity filtering, and permanent fast/integration coverage are in
-  place.
+  commit `99c5a6b6e6f60be9ef3ad645c1d2bd743b12fbad`.
 - **#10 — M0.7 artifact management and content hashing — completed** via PR #32,
-  squash commit `fa4a82d1da1f49a29ebe310bb6d531144a12fa6a`. Strict immutable artifact,
-  registry, and external-reference schemas; deterministic content-addressed
-  bundles; atomic publication; lock-serialized append-only registry mutation;
-  typed verification; telemetry registration; external recovery; retention
-  transitions; path safety; and permanent fast/integration coverage are in place.
+  squash commit `fa4a82d1da1f49a29ebe310bb6d531144a12fa6a`.
+- **#11 — M0.8 checkpoint serialization and exact restoration — completed** via
+  PR #35, squash commit `6801184133f9ea1ef49bce2464407fa166e3c1d5`. Deterministic
+  ustar tar packaging, safe structured state encoding (SafeValue), exact restoration
+  transaction (factory/commit/abort with RNG-last rollback), compatibility checking
+  (closed diagnostics, no force flag), #10 publication boundary, streaming load/save,
+  TOCTOU-safe content opening, pure-Python reference adapter. 7 review passes.
 
 ## Open pull requests
 
-- None after this state synchronization merges.
+- This state synchronization PR (documentation-only).
 
 ## Known blockers
 
-- #11 has no remaining dependency blocker and may proceed. Its PR must publish
-  checkpoint artifacts through #10 and extend the permanent #13 fast/integration
-  tiers with exact-restoration, corruption, compatibility, lineage, and
-  deterministic-continuation coverage.
-- #13 remains open as a cross-cutting integration responsibility, not a blocker
-  to beginning #11.
-- #12 waits for #11; #14 waits for the complete Milestone 0 substrate.
+- None. #12 is unblocked and may proceed.
+- #13 remains open as a cross-cutting integration responsibility, not a blocker.
+- #14 waits for the complete Milestone 0 substrate (#12 + all prior).
 
 ## Latest accepted experiment
 
@@ -97,14 +89,20 @@ order (see #3 for the full graph):
 
 ## Next recommended action
 
-1. Begin **#11 (checkpoint serialization and exact restoration)** — the sole
-   next implementation issue on the persistence critical path.
-2. After #11, implement **#12 (experiment manifests)**.
-3. Continue **#13** incrementally as #11–#12 land; do not close it until the full
+1. Begin **#12 (experiment manifests)** — the sole remaining implementation issue
+   before the smoke gate.
+2. Continue **#13** incrementally as #12 lands; do not close it until the full
    Milestone 0 suite, schema checks, and exact commands satisfy its issue contract.
-4. Complete **#14 (smoke-and-recovery gate)** strictly last.
-5. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
+3. Complete **#14 (smoke-and-recovery gate)** strictly last.
+4. After Milestone 0 is complete, begin D0 (minimal dense baseline, F0
    exact-attention control).
+
+## Critical path
+
+```text
+#12 experiment manifests → #14 smoke-and-recovery gate
+#13 CI remains active throughout
+```
 
 ## Relationship to ExpertOS
 
