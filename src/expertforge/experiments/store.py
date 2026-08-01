@@ -206,17 +206,23 @@ def _verify_manifest_references(
 
 
 def _assert_registry_coverage(manifest: ExperimentManifest, store: ArtifactStore) -> None:
-    """Require every eligible registered pre-manifest artifact exactly once."""
-    registered = {
-        record.artifact_id: record
-        for record in store.list_artifacts()
+    """Require every automatic pre-manifest artifact exactly once.
+
+    Report artifacts are valid explicit references but are not mandatory coverage:
+    reports may be published before finalization as review evidence or afterward as
+    immutable post-manifest analysis.
+    """
+    all_registered = {record.artifact_id: record for record in store.list_artifacts()}
+    required_registered = {
+        artifact_id: record
+        for artifact_id, record in all_registered.items()
         if record.category in _ELIGIBLE_PRE_MANIFEST_CATEGORIES
     }
     referenced = {
         record.artifact_id: record for record in manifest.referenced_attempt_artifacts()
     }
-    missing = sorted(set(registered) - set(referenced))
-    unknown = sorted(set(referenced) - set(registered))
+    missing = sorted(set(required_registered) - set(referenced))
+    unknown = sorted(set(referenced) - set(all_registered))
     if missing or unknown:
         raise ManifestBindingError(
             "manifest registry coverage mismatch; "
