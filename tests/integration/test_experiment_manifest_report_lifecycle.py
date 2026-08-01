@@ -1,4 +1,4 @@
-"""Regression for post-manifest review-report publication (Issue #12 amendment L)."""
+"""Review-report lifecycle regressions for Issue #12 amendment L."""
 
 from __future__ import annotations
 
@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from expertforge.artifacts import ArtifactStore
+from expertforge.artifacts import ArtifactRecord, ArtifactStore
 from expertforge.experiments import (
     DatasetReference,
     EvaluationSummary,
+    ExperimentManifest,
     ManifestGenerator,
     ModelIdentity,
     TokenizerReference,
@@ -23,7 +24,11 @@ from expertforge.identity.record import AttemptIdentityRecord
 pytestmark = pytest.mark.integration
 
 
-def test_later_review_report_does_not_invalidate_manifest_load(tmp_path: Path) -> None:
+def _build_manifest(
+    tmp_path: Path,
+    *,
+    review_report: ArtifactRecord | None = None,
+) -> tuple[ArtifactStore, ManifestGenerator, ExperimentManifest]:
     dataset_hex = "1" * 64
     tokenizer_hex = "2" * 64
     identity = AttemptIdentityRecord(
@@ -68,6 +73,8 @@ def test_later_review_report_does_not_invalidate_manifest_load(tmp_path: Path) -
         format_version=1,
         producing_component="telemetry",
     )
+    if review_report is not None:
+        raise AssertionError("review_report must be published through this attempt store")
     generator = ManifestGenerator(store)
     manifest = generator.generate(
         identity=identity,
@@ -114,9 +121,14 @@ def test_later_review_report_does_not_invalidate_manifest_load(tmp_path: Path) -
             metrics_recorded=("loss",),
         ),
         smoke_objective="Verify manifest/report lifecycle separation.",
-        smoke_acceptance_criteria="A later report does not invalidate loading.",
+        smoke_acceptance_criteria="Report references preserve authoritative loading.",
         telemetry_artifacts=(telemetry,),
     )
+    return store, generator, manifest
+
+
+def test_later_review_report_does_not_invalidate_manifest_load(tmp_path: Path) -> None:
+    store, generator, manifest = _build_manifest(tmp_path)
     manifest_record = generator.publish(manifest)
     store.publish(
         b"reviewed result",
@@ -128,7 +140,32 @@ def test_later_review_report_does_not_invalidate_manifest_load(tmp_path: Path) -
     loaded = load_manifest(
         manifest_record.artifact_id,
         artifact_store=store,
-        expected_identity=identity,
+        expected_identity=store.identity,
     )
     assert loaded.manifest == manifest
+    assert loaded.artifact_record == manifest_record
+
+
+def test_pre_finalization_review_report_can_be_referenced(tmp_path: Path) -> None:
+    store, generator, base_manifest = _build_manifest(tmp_path)
+    report = store.publish(
+        b"reviewed result",
+        category="report",
+        format="text",
+        format_version=1,
+        producing_component="review",
+    )
+    values = base_manifest.model_dump(mode="python", by_alias=False)
+    values["review_report_artifacts"] = (report,)
+    values["result"] = "Observed stable completion."
+    values["decision"] = "Proceed to the smoke gate."
+    reviewed_manifest = ExperimentManifest.model_validate(values, strict=True)
+    manifest_record = generator.publish(reviewed_manifest)
+    loaded = load_manifest(
+        manifest_record.artifact_id,
+        artifact_store=store,
+        expected_identity=store.identity,
+    )
+    assert loaded.manifest.review_report_artifacts == (report,)
+    assert loaded.manifest.result == "Observed stable completion."
     assert loaded.artifact_record == manifest_record
