@@ -16,12 +16,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import stat as stat_mod
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from pydantic import ValidationError
 
@@ -207,23 +208,50 @@ class CheckpointArchive:
         return self._tar_bytes
 
     def member(self, name: str) -> bytes:
-        """Return the raw bytes of member ``name`` (raises if absent)."""
+        """Return the raw bytes of member ``name`` (raises if absent).
+
+        For large spilled members this reads the full temp file. Callers that
+        need streaming access should use :meth:`member_stream` instead.
+        """
         m = self._members_by_name.get(name)
         if m is None:
             raise CheckpointCorruptError(f"missing member {name!r}")
-        if m.data is None:
-            if m.temp_path is not None:
-                return m.temp_path.read_bytes()
-            raise CheckpointCorruptError(f"member {name!r} has no data and no temp_path")
-        return m.data
+        if m.data is not None:
+            return m.data
+        if m.temp_path is not None:
+            return m.temp_path.read_bytes()
+        raise CheckpointCorruptError(f"member {name!r} has no data and no temp_path")
+
+    def member_stream(self, name: str) -> IO[bytes]:
+        """Return a binary file-like that streams member ``name`` bytes.
+
+        For spilled members this opens the temp file directly, avoiding
+        a full materialization into heap. The caller must close the file object.
+        """
+
+        m = self._members_by_name.get(name)
+        if m is None:
+            raise CheckpointCorruptError(f"missing member {name!r}")
+        if m.data is not None:
+            return io.BytesIO(m.data)
+        if m.temp_path is not None:
+            return open(m.temp_path, "rb")
+        raise CheckpointCorruptError(f"member {name!r} has no data and no temp_path")
 
     def component(self, role: str) -> bytes:
         """Return the raw bytes of the ``state/<role>.json`` component."""
         return self.member(f"state/{role}.json")
 
     def tensor_member(self, member_name: str) -> bytes:
-        """Return the raw bytes of tensor member ``member_name``."""
+        """Return the raw bytes of tensor member ``member_name``.
+
+        .. note:: For large tensors prefer :meth:`tensor_member_stream`.
+        """
         return self.member(member_name)
+
+    def tensor_member_stream(self, member_name: str) -> IO[bytes]:
+        """Stream tensor member bytes without full heap materialization."""
+        return self.member_stream(member_name)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"CheckpointArchive(artifact_id={self.artifact_id!r}, byte_size={self._byte_size})"
@@ -492,12 +520,12 @@ class CheckpointStore:
                 except OSError:
                     pass
         manifest = self._decode_manifest(members)
-        # Manifest producing identity must equal the record fields (amendment G).
-        self._assert_manifest_record_binding(manifest, record)
-        # Item 5: cross-bind every persisted component to the manifest + record
-        # (counters, descriptors, identity/config/provenance, RNG decode, and
-        # no unused tensor members).
-        self._bind_components(manifest, members, record)
+        try:
+            self._assert_manifest_record_binding(manifest, record)
+            self._bind_components(manifest, members, record)
+        except Exception:
+            self._cleanup_spill_files(members)
+            raise
         return CheckpointArchive(
             manifest=manifest,
             members=members,
@@ -816,6 +844,16 @@ class CheckpointStore:
             raise CheckpointCorruptError("content has trailing bytes beyond declared size")
         return bytes(buf)
 
+    @staticmethod
+    def _cleanup_spill_files(members: list[ParsedMember]) -> None:
+        """Remove all spill temp files from ``members`` (best-effort)."""
+        for m in members:
+            if m.temp_path is not None:
+                try:
+                    m.temp_path.unlink()
+                except OSError:
+                    pass
+
     def _parse_and_validate_tar(self, tar_bytes: bytes) -> list[ParsedMember]:
         try:
             members = parse_ustar_archive(tar_bytes)
@@ -852,10 +890,9 @@ class CheckpointStore:
         return members
 
     def _decode_manifest(self, members: list[ParsedMember]) -> CheckpointManifest:
+        m0 = members[0]
         raw = (
-            members[0].data
-            if members[0].data is not None
-            else (members[0].temp_path.read_bytes() if members[0].temp_path else b"")
+            m0.data if m0.data is not None else (m0.temp_path.read_bytes() if m0.temp_path else b"")
         )
         try:
             text = raw.decode("utf-8")
@@ -1256,19 +1293,22 @@ class CheckpointStore:
             return CheckpointInspection(
                 status="corrupt", diagnostic=f"re-open for scan failed: {e}"
             )
+        scan_members: list[ParsedMember] = []
         try:
-            members = parse_ustar_archive_streaming(
+            scan_members = parse_ustar_archive_streaming(
                 scan_fd,
                 archive_byte_size,
                 validate_member_order=True,
             )
         except TarParseError as e:
+            self._cleanup_spill_files(scan_members)
             return CheckpointInspection(
                 status="corrupt",
                 diagnostic=f"tar scan failed: {e}",
                 archive_byte_size=archive_byte_size,
             )
         except CheckpointCorruptError as e:
+            self._cleanup_spill_files(scan_members)
             return CheckpointInspection(
                 status="corrupt",
                 diagnostic=str(e),
@@ -1280,8 +1320,10 @@ class CheckpointStore:
             except OSError:
                 pass
         # Verify declared members match actual scanned members.
+        members = scan_members
         declared_member_count = 1 + len(manifest.state_components) + len(manifest.tensor_members)
         if len(members) != declared_member_count:
+            self._cleanup_spill_files(members)
             return CheckpointInspection(
                 status="corrupt",
                 diagnostic=(
@@ -1301,6 +1343,7 @@ class CheckpointStore:
             expected[tensor.member_name] = (tensor.member_sha256, tensor.member_byte_size)
         for name, (exp_sha, exp_size) in expected.items():
             if name not in by_name:
+                self._cleanup_spill_files(members)
                 return CheckpointInspection(
                     status="corrupt",
                     diagnostic=f"manifest-declared member {name!r} missing from archive",
@@ -1310,6 +1353,7 @@ class CheckpointStore:
                 )
             m = by_name[name]
             if m.size != exp_size:
+                self._cleanup_spill_files(members)
                 return CheckpointInspection(
                     status="corrupt",
                     diagnostic=f"member {name!r} size mismatch: {m.size} != {exp_size}",
@@ -1317,7 +1361,6 @@ class CheckpointStore:
                     archive_byte_size=archive_byte_size,
                     member_count=len(members),
                 )
-            # Stream-hash to avoid loading large tensors into heap.
             h = hashlib.sha256()
             if m.data is not None:
                 h.update(m.data)
@@ -1330,6 +1373,7 @@ class CheckpointStore:
                         h.update(chunk)
             actual_sha = h.hexdigest()
             if actual_sha != exp_sha:
+                self._cleanup_spill_files(members)
                 return CheckpointInspection(
                     status="corrupt",
                     diagnostic=f"member {name!r} digest mismatch: {actual_sha!r} != {exp_sha!r}",
@@ -1337,12 +1381,8 @@ class CheckpointStore:
                     archive_byte_size=archive_byte_size,
                     member_count=len(members),
                 )
-            # Clean up spill temp files after inspection.
-            if m.temp_path is not None:
-                try:
-                    m.temp_path.unlink()
-                except OSError:
-                    pass
+        # All members authenticated successfully; clean up spill files.
+        self._cleanup_spill_files(members)
         return CheckpointInspection(
             status="complete",
             manifest=manifest,
