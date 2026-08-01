@@ -24,13 +24,22 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import base64
+          import gzip
+
           source = Path('.github/workflows/apply-pass7-fixes.yml').read_text()
           start_marker = "printf '%s' '"
           end_marker = "' | base64 -d | gzip -d"
           start = source.index(start_marker) + len(start_marker)
           end = source.index(end_marker, start)
-          import base64, gzip
-          Path('/tmp/apply_pass7.py').write_bytes(gzip.decompress(base64.b64decode(source[start:end])))
+          patcher_path = Path('/tmp/apply_pass7.py')
+          patcher_path.write_bytes(gzip.decompress(base64.b64decode(source[start:end])))
+          patcher = patcher_path.read_text()
+          old = "new_text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)"
+          new = "new_text, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.S)"
+          if old not in patcher:
+              raise RuntimeError('regex helper line not found')
+          patcher_path.write_text(patcher.replace(old, new, 1))
           PY
           python /tmp/apply_pass7.py
       - name: Validate
