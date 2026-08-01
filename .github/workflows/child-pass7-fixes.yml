@@ -42,6 +42,22 @@ jobs:
           patcher_path.write_text(patcher.replace(old, new, 1))
           PY
           python /tmp/apply_pass7.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/expertforge/checkpoints/restore.py')
+          source = path.read_text()
+          source = source.replace(
+              'from typing import Any, Literal, Protocol',
+              'from typing import Any, Literal, Protocol, cast',
+              1,
+          )
+          target = '        raw_bytes=raw,\n        source_device=None,\n    )\n\n\nclass RestoreTransaction'
+          replacement = '        raw_bytes=cast(Any, raw),\n        source_device=None,\n    )\n\n\nclass RestoreTransaction'
+          if target not in source:
+              raise RuntimeError('mmap model_construct target not found')
+          path.write_text(source.replace(target, replacement, 1))
+          PY
       - name: Validate
         run: |
           uv python install 3.11
