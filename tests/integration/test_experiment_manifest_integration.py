@@ -57,9 +57,7 @@ def _fingerprint() -> SpecificationFingerprintRecord:
     )
 
 
-def _identity(
-    attempt_id: str, lineage: ResumeLineage | None = None
-) -> AttemptIdentityRecord:
+def _identity(attempt_id: str, lineage: ResumeLineage | None = None) -> AttemptIdentityRecord:
     return AttemptIdentityRecord(
         specification_fingerprint=_fingerprint(),
         run_id=RUN_ID,
