@@ -12,10 +12,12 @@ import pytest
 from expertforge.artifacts import ArtifactRecord, ArtifactStore
 from expertforge.experiments import (
     DatasetReference,
-    ExperimentManifest,
+    EvaluationSummary,
+    LoadedExperimentManifest,
     ManifestBindingError,
     ManifestCorruptError,
     ManifestGenerator,
+    ManifestPublicationError,
     ModelIdentity,
     TokenizerReference,
     TrainingBudget,
@@ -38,6 +40,7 @@ PARENT_ATTEMPT = "attempt-20260101t000000z-cccccccccccccccccccc"
 CHILD_ATTEMPT = "attempt-20260101t000001z-dddddddddddddddddddd"
 DATASET_HEX = "1" * 64
 TOKENIZER_HEX = "2" * 64
+FINALIZED_AT = datetime(2026, 1, 1, 0, 2, tzinfo=UTC)
 
 
 def _fingerprint() -> SpecificationFingerprintRecord:
@@ -105,67 +108,76 @@ def _generate(
     store: ArtifactStore,
     records: dict[str, ArtifactRecord],
     **kwargs: Any,
-) -> ExperimentManifest:
-    return ManifestGenerator(store).generate(
-        identity=store.identity,
-        classification="smoke_test",
-        maturity_stage="Milestone 0",
-        research_family="none/not-applicable",
-        status="completed",
-        issue_number=12,
-        configuration_artifact=records["configuration"],
-        provenance_artifact=records["provenance"],
-        dataset=DatasetReference(
+):
+    values: dict[str, Any] = {
+        "identity": store.identity,
+        "finalized_at_utc": FINALIZED_AT,
+        "classification": "smoke_test",
+        "maturity_stage": "none/not-applicable",
+        "research_family": "none/not-applicable",
+        "status": "completed",
+        "issue_number": 12,
+        "configuration_artifact": records["configuration"],
+        "provenance_artifact": records["provenance"],
+        "dataset": DatasetReference(
             dataset_id="fixture-corpus-v1",
             split="train",
             immutable_input_name="dataset.fixture",
             content_digest=f"sha256:{DATASET_HEX}",
             is_fixture=True,
         ),
-        tokenizer=TokenizerReference(
+        "tokenizer": TokenizerReference(
             tokenizer_id="fixture-tokenizer-v1",
             vocab_size=128,
             immutable_input_name="tokenizer.fixture",
             content_digest=f"sha256:{TOKENIZER_HEX}",
             is_fixture=True,
         ),
-        fixture=True,
-        model=ModelIdentity(
+        "model": ModelIdentity(
             architecture="decoder-only Transformer",
             dim=32,
             n_layers=2,
             n_heads=4,
             ffn_dim=64,
             parameter_count=4096,
+            parameter_count_kind="exact",
         ),
-        training=TrainingBudget(
+        "training": TrainingBudget(
             token_budget=1024,
             batch_size=2,
             seq_len=32,
             learning_rate=1e-3,
             seed=7,
         ),
-        telemetry_artifacts=(records["telemetry"],),
-        checkpoint_artifacts=(records["checkpoint"],),
-        **kwargs,
-    )
+        "evaluation": EvaluationSummary(
+            eval_interval_tokens=256,
+            final_loss=2.0,
+            final_perplexity=7.4,
+            metrics_recorded=("loss", "perplexity"),
+        ),
+        "smoke_objective": "Verify manifest publication and restoration.",
+        "smoke_acceptance_criteria": "Exact typed round trip succeeds.",
+        "checkpoint_evidence_required": True,
+        "telemetry_artifacts": (records["telemetry"],),
+        "checkpoint_artifacts": (records["checkpoint"],),
+    }
+    values.update(kwargs)
+    return ManifestGenerator(store).generate(**values)
 
 
 def test_generate_publish_load_round_trip(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path / "runs", _identity(PARENT_ATTEMPT))
     manifest = _generate(store, _records(store))
     record = ManifestGenerator(store).publish(manifest)
-    assert record.category == "experiment_manifest"
-    assert record.format == "json"
-    manifests = store.list_artifacts(category="experiment_manifest")
-    assert [item.artifact_id for item in manifests] == [record.artifact_id]
     loaded = load_manifest(
         record.artifact_id,
         artifact_store=store,
         expected_identity=store.identity,
     )
-    assert loaded == manifest
-    assert "manifest_id" not in json.loads(canonical_manifest_bytes(loaded))
+    assert isinstance(loaded, LoadedExperimentManifest)
+    assert loaded.manifest == manifest
+    assert loaded.artifact_record == record
+    assert "manifest_id" not in json.loads(canonical_manifest_bytes(loaded.manifest))
 
 
 def test_failed_attempt_publishes_explicit_incomplete_manifest(tmp_path: Path) -> None:
@@ -173,11 +185,14 @@ def test_failed_attempt_publishes_explicit_incomplete_manifest(tmp_path: Path) -
     generator = ManifestGenerator(store)
     manifest = generator.generate(
         identity=store.identity,
+        finalized_at_utc=FINALIZED_AT,
         classification="smoke_test",
-        maturity_stage="Milestone 0",
+        maturity_stage="none/not-applicable",
         research_family="none/not-applicable",
         status="interrupted",
         outcome_diagnostic="handled_interruption",
+        smoke_objective="Verify interruption evidence.",
+        smoke_acceptance_criteria="An explicit partial manifest is published.",
     )
     record = generator.publish(manifest)
     loaded = load_manifest(
@@ -185,11 +200,24 @@ def test_failed_attempt_publishes_explicit_incomplete_manifest(tmp_path: Path) -
         artifact_store=store,
         expected_identity=store.identity,
     )
-    assert loaded.status == "interrupted"
-    assert loaded.evidence.status == "partial"
+    assert loaded.manifest.status == "interrupted"
+    assert loaded.manifest.evidence.status == "partial"
+    assert "evaluation_summary_missing" in loaded.manifest.evidence.missing
 
 
-def test_resumed_attempt_requires_and_resolves_parent_checkpoint(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("status", "diagnostic"),
+    [
+        ("completed", None),
+        ("failed", "checkpoint_restore_failed"),
+        ("interrupted", "handled_interruption"),
+    ],
+)
+def test_resumed_attempt_outcome_is_orthogonal(
+    tmp_path: Path,
+    status: str,
+    diagnostic: str | None,
+) -> None:
     root = tmp_path / "runs"
     parent_store = ArtifactStore(root, _identity(PARENT_ATTEMPT))
     parent_checkpoint = _records(parent_store)["checkpoint"]
@@ -200,32 +228,45 @@ def test_resumed_attempt_requires_and_resolves_parent_checkpoint(tmp_path: Path)
     )
     child_store = ArtifactStore(root, _identity(CHILD_ATTEMPT, lineage))
     records = _records(child_store)
-    manifest = _generate(child_store, records, resume_checkpoint=parent_checkpoint)
-    generator = ManifestGenerator(child_store)
-    with pytest.raises(ManifestBindingError, match="parent_checkpoint_resolver"):
-        generator.publish(manifest)
+    manifest = _generate(
+        child_store,
+        records,
+        status=status,
+        outcome_diagnostic=diagnostic,
+        resume_checkpoint=parent_checkpoint,
+    )
     resolver = lambda observed: (  # noqa: E731 - compact typed fixture resolver
         parent_store,
         parent_checkpoint if observed == lineage else records["checkpoint"],
     )
-    record = generator.publish(manifest, parent_checkpoint_resolver=resolver)
-    with pytest.raises(ManifestBindingError, match="parent_checkpoint_resolver"):
-        load_manifest(
-            record.artifact_id,
-            artifact_store=child_store,
-            expected_identity=child_store.identity,
-        )
+    record = ManifestGenerator(child_store).publish(
+        manifest,
+        parent_checkpoint_resolver=resolver,
+    )
     loaded = load_manifest(
         record.artifact_id,
         artifact_store=child_store,
         expected_identity=child_store.identity,
         parent_checkpoint_resolver=resolver,
     )
-    assert loaded.resume_checkpoint == parent_checkpoint
-    inspected = child_store.inspect(record.artifact_id)
-    assert isinstance(inspected, ArtifactRecord)
-    assert inspected.parent is not None
-    assert inspected.parent.artifact_id == parent_checkpoint.artifact_id
+    assert loaded.manifest.status == status
+    assert loaded.manifest.identity.lineage == lineage
+    assert loaded.manifest.resume_checkpoint == parent_checkpoint
+
+
+def test_registry_coverage_rejects_unrepresented_artifact(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "runs", _identity(PARENT_ATTEMPT))
+    records = _records(store)
+    store.publish(
+        b"unrepresented output",
+        category="generated_sample",
+        format="text",
+        format_version=1,
+        producing_component="generation",
+    )
+    manifest = _generate(store, records)
+    with pytest.raises(ManifestBindingError, match="coverage mismatch"):
+        ManifestGenerator(store).publish(manifest)
 
 
 def test_referenced_artifact_payload_must_verify_before_publication(tmp_path: Path) -> None:
@@ -239,12 +280,12 @@ def test_referenced_artifact_payload_must_verify_before_publication(tmp_path: Pa
         ManifestGenerator(store).publish(manifest)
 
 
-def test_scan_classifies_complete_unsupported_and_corrupt(tmp_path: Path) -> None:
+def test_scan_classifies_valid_unsupported_and_corrupt(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path / "runs", _identity(PARENT_ATTEMPT))
     manifest = _generate(store, _records(store))
     path = tmp_path / "manifest.json"
     path.write_bytes(canonical_manifest_bytes(manifest))
-    assert scan_manifest(path).status == "complete"
+    assert scan_manifest(path).status == "valid"
     data = json.loads(path.read_bytes())
     data["format_version"] = 2
     path.write_text(
@@ -271,3 +312,14 @@ def test_load_rejects_content_tampering(tmp_path: Path) -> None:
             artifact_store=store,
             expected_identity=store.identity,
         )
+
+
+def test_different_second_terminal_manifest_is_rejected(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "runs", _identity(PARENT_ATTEMPT))
+    records = _records(store)
+    generator = ManifestGenerator(store)
+    first = _generate(store, records)
+    generator.publish(first)
+    second = _generate(store, records, known_limitations=("different",))
+    with pytest.raises(ManifestPublicationError, match="different terminal"):
+        generator.publish(second)
