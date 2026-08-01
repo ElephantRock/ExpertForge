@@ -201,7 +201,14 @@ def test_resumed_attempt_requires_and_resolves_parent_checkpoint(tmp_path: Path)
     child_store = ArtifactStore(root, _identity(CHILD_ATTEMPT, lineage))
     records = _records(child_store)
     manifest = _generate(child_store, records, resume_checkpoint=parent_checkpoint)
-    record = ManifestGenerator(child_store).publish(manifest)
+    generator = ManifestGenerator(child_store)
+    with pytest.raises(ManifestBindingError, match="parent_checkpoint_resolver"):
+        generator.publish(manifest)
+    resolver = lambda observed: (  # noqa: E731 - compact typed fixture resolver
+        parent_store,
+        parent_checkpoint if observed == lineage else records["checkpoint"],
+    )
+    record = generator.publish(manifest, parent_checkpoint_resolver=resolver)
     with pytest.raises(ManifestBindingError, match="parent_checkpoint_resolver"):
         load_manifest(
             record.artifact_id,
@@ -212,15 +219,24 @@ def test_resumed_attempt_requires_and_resolves_parent_checkpoint(tmp_path: Path)
         record.artifact_id,
         artifact_store=child_store,
         expected_identity=child_store.identity,
-        parent_checkpoint_resolver=lambda observed: (
-            parent_checkpoint if observed == lineage else records["checkpoint"]
-        ),
+        parent_checkpoint_resolver=resolver,
     )
     assert loaded.resume_checkpoint == parent_checkpoint
     inspected = child_store.inspect(record.artifact_id)
     assert isinstance(inspected, ArtifactRecord)
     assert inspected.parent is not None
     assert inspected.parent.artifact_id == parent_checkpoint.artifact_id
+
+
+def test_referenced_artifact_payload_must_verify_before_publication(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "runs", _identity(PARENT_ATTEMPT))
+    records = _records(store)
+    manifest = _generate(store, records)
+    configuration = store.locate(records["configuration"].artifact_id)
+    assert configuration is not None
+    configuration.write_bytes(b'{"resolved":false}')
+    with pytest.raises(ManifestBindingError, match="failed verification"):
+        ManifestGenerator(store).publish(manifest)
 
 
 def test_scan_classifies_complete_unsupported_and_corrupt(tmp_path: Path) -> None:
