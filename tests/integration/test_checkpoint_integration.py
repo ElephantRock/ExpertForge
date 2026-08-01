@@ -1315,7 +1315,7 @@ class TestRound3Item2IntermediateDirSymlinkRace:
 
         import pytest
 
-        if not hasattr(os, "openat") or sys.platform == "win32":
+        if not hasattr(os, "O_NOFOLLOW") or sys.platform == "win32":
             pytest.skip(
                 "openat descriptor-chain defense is POSIX-only; "
                 "Windows uses the documented path-name fallback"

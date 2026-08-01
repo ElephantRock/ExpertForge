@@ -137,6 +137,7 @@ class CheckpointArchive:
         "_tar_bytes",
         "_content_digest",
         "_byte_size",
+        "_temp_paths",
     )
 
     def __init__(
@@ -152,13 +153,27 @@ class CheckpointArchive:
         self._manifest = manifest
         self._members_by_name = {m.name: m for m in members}
         self._record = record
-        # tar_bytes is None on the large (streaming) path: the whole archive is
-        # never retained. content_digest / byte_size are always populated (they
-        # are computed incrementally during the streaming read, before any
-        # member is parsed).
         self._tar_bytes = tar_bytes
         self._content_digest = content_digest
         self._byte_size = byte_size
+        # Track temp spill files for deterministic cleanup.
+        self._temp_paths: list[Path] = [m.temp_path for m in members if m.temp_path is not None]
+
+    def cleanup_temp_files(self) -> None:
+        """Remove any spill temp files owned by this archive."""
+        for tp in self._temp_paths:
+            try:
+                tp.unlink()
+            except OSError:
+                pass
+        self._temp_paths.clear()
+
+    def __del__(self) -> None:
+        # Best-effort cleanup if the caller forgot to call cleanup_temp_files().
+        try:
+            self.cleanup_temp_files()
+        except Exception:
+            pass
 
     @property
     def manifest(self) -> CheckpointManifest:
@@ -893,17 +908,27 @@ class CheckpointStore:
             raise CheckpointCorruptError(f"missing members: {sorted(missing)!r}")
         for name, (sha, size) in expected.items():
             m = by_name[name]
-            member_data = (
-                m.data if m.data is not None else (m.temp_path.read_bytes() if m.temp_path else b"")
-            )
-            actual_sha = hashlib.sha256(member_data).hexdigest()
+            if m.size != size:
+                raise CheckpointCorruptError(
+                    f"member {name!r} size mismatch: {m.size!r} != {size!r}"
+                )
+            # Stream-hash to avoid loading large tensors into heap.
+            h = hashlib.sha256()
+            if m.data is not None:
+                h.update(m.data)
+            elif m.temp_path is not None:
+                with open(m.temp_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+            else:
+                raise CheckpointCorruptError(f"member {name!r} has no data")
+            actual_sha = h.hexdigest()
             if actual_sha != sha:
                 raise CheckpointCorruptError(
                     f"member {name!r} digest mismatch: {actual_sha!r} != {sha!r}"
-                )
-            if len(member_data) != size:
-                raise CheckpointCorruptError(
-                    f"member {name!r} size mismatch: {len(member_data)!r} != {size!r}"
                 )
         # No metadata.json (amendment B).
         if "metadata.json" in by_name:
@@ -1218,10 +1243,10 @@ class CheckpointStore:
             return CheckpointInspection(
                 status="corrupt", diagnostic=str(e), archive_byte_size=archive_byte_size
             )
-        # Validate the complete archive: scan all members to verify the tar
-        # terminator, member order, and that every declared member exists with
-        # the correct size. This prevents a damaged/truncated archive from being
-        # misclassified as "complete" (review 4833143258 item 3).
+        # Validate the complete archive using streaming parse (bounded memory):
+        # verify tar structure, member order, member count, AND authenticate
+        # every member's hash and size against the manifest. Payload corruption
+        # is detected and classified as "corrupt", not "complete".
         try:
             scan_fd = os.open(
                 str(path),
@@ -1232,8 +1257,11 @@ class CheckpointStore:
                 status="corrupt", diagnostic=f"re-open for scan failed: {e}"
             )
         try:
-            raw = os.read(scan_fd, archive_byte_size)
-            members = parse_ustar_archive(raw, validate_member_order=True)
+            members = parse_ustar_archive_streaming(
+                scan_fd,
+                archive_byte_size,
+                validate_member_order=True,
+            )
         except TarParseError as e:
             return CheckpointInspection(
                 status="corrupt",
@@ -1264,6 +1292,57 @@ class CheckpointStore:
                 archive_byte_size=archive_byte_size,
                 member_count=len(members),
             )
+        # Authenticate every member hash and size against the manifest.
+        by_name = {m.name: m for m in members}
+        expected: dict[str, tuple[str, int]] = {}
+        for comp in manifest.state_components:
+            expected[comp.member_name] = (comp.member_sha256, comp.member_byte_size)
+        for tensor in manifest.tensor_members:
+            expected[tensor.member_name] = (tensor.member_sha256, tensor.member_byte_size)
+        for name, (exp_sha, exp_size) in expected.items():
+            if name not in by_name:
+                return CheckpointInspection(
+                    status="corrupt",
+                    diagnostic=f"manifest-declared member {name!r} missing from archive",
+                    manifest=manifest,
+                    archive_byte_size=archive_byte_size,
+                    member_count=len(members),
+                )
+            m = by_name[name]
+            if m.size != exp_size:
+                return CheckpointInspection(
+                    status="corrupt",
+                    diagnostic=f"member {name!r} size mismatch: {m.size} != {exp_size}",
+                    manifest=manifest,
+                    archive_byte_size=archive_byte_size,
+                    member_count=len(members),
+                )
+            # Stream-hash to avoid loading large tensors into heap.
+            h = hashlib.sha256()
+            if m.data is not None:
+                h.update(m.data)
+            elif m.temp_path is not None:
+                with open(m.temp_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+            actual_sha = h.hexdigest()
+            if actual_sha != exp_sha:
+                return CheckpointInspection(
+                    status="corrupt",
+                    diagnostic=f"member {name!r} digest mismatch: {actual_sha!r} != {exp_sha!r}",
+                    manifest=manifest,
+                    archive_byte_size=archive_byte_size,
+                    member_count=len(members),
+                )
+            # Clean up spill temp files after inspection.
+            if m.temp_path is not None:
+                try:
+                    m.temp_path.unlink()
+                except OSError:
+                    pass
         return CheckpointInspection(
             status="complete",
             manifest=manifest,
