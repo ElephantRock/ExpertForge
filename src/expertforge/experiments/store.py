@@ -53,7 +53,7 @@ __all__ = [
     "scan_manifest",
 ]
 
-ParentCheckpointResolver = Callable[[ResumeLineage], ArtifactRecord]
+ParentCheckpointResolver = Callable[[ResumeLineage], tuple[ArtifactStore, ArtifactRecord]]
 
 
 class ManifestBindingError(ManifestError):
@@ -136,6 +136,17 @@ def _resolve_current_record(store: ArtifactStore, record: ArtifactRecord) -> Art
         raise ManifestBindingError(
             f"referenced artifact {record.artifact_id} immutable metadata mismatch."
         )
+    try:
+        verification = store.verify(record.artifact_id)
+    except ArtifactStoreError as exc:
+        raise ManifestBindingError(
+            f"referenced artifact {record.artifact_id} could not be verified: {exc}"
+        ) from exc
+    if not verification.status:
+        raise ManifestBindingError(
+            f"referenced artifact {record.artifact_id} failed verification: "
+            f"{verification.diagnostic_code}."
+        )
     return current
 
 
@@ -152,11 +163,18 @@ def _verify_manifest_references(
         return
     if parent_checkpoint_resolver is None:
         raise ManifestBindingError(
-            "authoritative loading of a resumed manifest requires parent_checkpoint_resolver."
+            "authoritative publication/loading of a resumed manifest requires "
+            "parent_checkpoint_resolver."
         )
-    resolved = parent_checkpoint_resolver(lineage)
+    parent_store, resolved = parent_checkpoint_resolver(lineage)
+    if (
+        parent_store.identity.run_id != lineage.parent_run_id
+        or parent_store.identity.attempt_id != lineage.parent_attempt_id
+    ):
+        raise ManifestBindingError("parent checkpoint resolver returned the wrong attempt store.")
+    current = _resolve_current_record(parent_store, resolved)
     assert manifest.resume_checkpoint is not None
-    if ExperimentManifest.immutable_artifact_identity(resolved) != (
+    if ExperimentManifest.immutable_artifact_identity(current) != (
         ExperimentManifest.immutable_artifact_identity(manifest.resume_checkpoint)
     ):
         raise ManifestBindingError("resolved parent checkpoint does not match manifest lineage.")
@@ -272,21 +290,18 @@ class ManifestGenerator:
             resume_checkpoint=resume_checkpoint,
         )
 
-    def publish(self, manifest: ExperimentManifest) -> ArtifactRecord:
+    def publish(
+        self,
+        manifest: ExperimentManifest,
+        *,
+        parent_checkpoint_resolver: ParentCheckpointResolver | None = None,
+    ) -> ArtifactRecord:
         if not _same_identity(manifest.identity, self._artifact_store.identity):
             raise ManifestBindingError("manifest identity does not match the ArtifactStore identity.")
-        parent_resolver: ParentCheckpointResolver | None = None
-        if manifest.identity.lineage is not None:
-
-            def _embedded_parent(_lineage: ResumeLineage) -> ArtifactRecord:
-                assert manifest.resume_checkpoint is not None
-                return manifest.resume_checkpoint
-
-            parent_resolver = _embedded_parent
         _verify_manifest_references(
             manifest,
             self._artifact_store,
-            parent_checkpoint_resolver=parent_resolver,
+            parent_checkpoint_resolver=parent_checkpoint_resolver,
         )
         existing = self._artifact_store.list_artifacts(category="experiment_manifest")
         payload = canonical_manifest_bytes(manifest)
@@ -329,10 +344,18 @@ class ManifestGenerator:
             raise ManifestPublicationError(f"manifest publication failed: {exc}") from exc
         return record
 
-    def finalize_attempt(self, **generate_kwargs: Any) -> ArtifactRecord:
+    def finalize_attempt(
+        self,
+        *,
+        parent_checkpoint_resolver: ParentCheckpointResolver | None = None,
+        **generate_kwargs: Any,
+    ) -> ArtifactRecord:
         """Generate and publish in one call; retained for orchestrator convenience."""
         manifest = self.generate(**generate_kwargs)
-        return self.publish(manifest)
+        return self.publish(
+            manifest,
+            parent_checkpoint_resolver=parent_checkpoint_resolver,
+        )
 
 
 def load_manifest(
@@ -382,6 +405,9 @@ def load_manifest(
 
 
 def _open_scan_path(path: Path) -> int:
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        raise OSError(f"manifest scan path {path} is a symlink.")
     flags = os.O_RDONLY
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
