@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import mmap
 import os
 import stat as stat_mod
 from datetime import datetime
@@ -40,6 +41,7 @@ from expertforge.checkpoints.models import (
     CHECKPOINT_ARCHIVE_FORMAT_VERSION,
     MAX_ARCHIVE_BYTES,
     MAX_COMPONENT_MEMBER_BYTES,
+    MAX_MANIFEST_BYTES,
     CheckpointInspection,
     CheckpointManifest,
     CompatibilityDescriptor,
@@ -139,6 +141,9 @@ class CheckpointArchive:
         "_content_digest",
         "_byte_size",
         "_temp_paths",
+        "_open_streams",
+        "_mapped_buffers",
+        "_mapped_resources",
     )
 
     def __init__(
@@ -157,17 +162,45 @@ class CheckpointArchive:
         self._tar_bytes = tar_bytes
         self._content_digest = content_digest
         self._byte_size = byte_size
-        # Track temp spill files for deterministic cleanup.
+        # Track spill resources for deterministic cleanup. Streams and
+        # memory maps are closed before unlinking so cleanup also works on
+        # platforms that reject removal of open files. Failed closes/unlinks are
+        # retained for a later retry instead of being silently forgotten.
         self._temp_paths: list[Path] = [m.temp_path for m in members if m.temp_path is not None]
+        self._open_streams: list[IO[bytes]] = []
+        self._mapped_buffers: dict[str, memoryview] = {}
+        self._mapped_resources: dict[str, tuple[memoryview, mmap.mmap]] = {}
 
     def cleanup_temp_files(self) -> None:
-        """Remove any spill temp files owned by this archive."""
+        """Close and remove spill resources, retaining failures for retry."""
+        remaining_streams: list[IO[bytes]] = []
+        for stream in self._open_streams:
+            try:
+                stream.close()
+            except Exception:
+                remaining_streams.append(stream)
+        self._open_streams = remaining_streams
+
+        remaining_mappings: dict[str, tuple[memoryview, mmap.mmap]] = {}
+        for name, (view, mapping) in self._mapped_resources.items():
+            try:
+                view.release()
+                mapping.close()
+            except Exception:
+                remaining_mappings[name] = (view, mapping)
+            else:
+                self._mapped_buffers.pop(name, None)
+        self._mapped_resources = remaining_mappings
+
+        remaining_paths: list[Path] = []
         for tp in self._temp_paths:
             try:
                 tp.unlink()
+            except FileNotFoundError:
+                continue
             except OSError:
-                pass
-        self._temp_paths.clear()
+                remaining_paths.append(tp)
+        self._temp_paths = remaining_paths
 
     def __del__(self) -> None:
         # Best-effort cleanup if the caller forgot to call cleanup_temp_files().
@@ -207,36 +240,80 @@ class CheckpointArchive:
             )
         return self._tar_bytes
 
-    def member(self, name: str) -> bytes:
-        """Return the raw bytes of member ``name`` (raises if absent).
-
-        For large spilled members this reads the full temp file. Callers that
-        need streaming access should use :meth:`member_stream` instead.
-        """
+    def _member_record(self, name: str) -> ParsedMember:
         m = self._members_by_name.get(name)
         if m is None:
             raise CheckpointCorruptError(f"missing member {name!r}")
+        return m
+
+    def member(self, name: str) -> bytes:
+        """Return member bytes; use :meth:`member_stream` for large members."""
+        m = self._member_record(name)
         if m.data is not None:
             return m.data
-        if m.temp_path is not None:
-            return m.temp_path.read_bytes()
-        raise CheckpointCorruptError(f"member {name!r} has no data and no temp_path")
+        with self.member_stream(name) as stream:
+            data = stream.read()
+        if len(data) != m.size:
+            raise CheckpointCorruptError(
+                f"member {name!r} size changed while reading: {len(data)} != {m.size}"
+            )
+        return data
 
     def member_stream(self, name: str) -> IO[bytes]:
-        """Return a binary file-like that streams member ``name`` bytes.
-
-        For spilled members this opens the temp file directly, avoiding
-        a full materialization into heap. The caller must close the file object.
-        """
-
-        m = self._members_by_name.get(name)
-        if m is None:
-            raise CheckpointCorruptError(f"missing member {name!r}")
+        """Return a binary stream for a member; caller owns closing it."""
+        m = self._member_record(name)
         if m.data is not None:
             return io.BytesIO(m.data)
-        if m.temp_path is not None:
-            return open(m.temp_path, "rb")
-        raise CheckpointCorruptError(f"member {name!r} has no data and no temp_path")
+        if m.temp_path is None:
+            raise CheckpointCorruptError(f"member {name!r} has no data and no temp_path")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(m.temp_path, flags)
+        except OSError as e:
+            raise CheckpointCorruptError(f"cannot open spill for member {name!r}: {e}") from e
+        try:
+            st = os.fstat(fd)
+            if not stat_mod.S_ISREG(st.st_mode) or st.st_size != m.size:
+                raise CheckpointCorruptError(
+                    f"spill for member {name!r} is not a regular file of size {m.size}"
+                )
+            stream = os.fdopen(fd, "rb", closefd=True)
+            fd = -1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        self._open_streams.append(stream)
+        return stream
+
+    def tensor_member_buffer(self, member_name: str) -> bytes | memoryview:
+        """Return tensor bytes without copying spilled tensors into Python heap."""
+        m = self._member_record(member_name)
+        if m.data is not None:
+            return m.data
+        cached = self._mapped_buffers.get(member_name)
+        if cached is not None:
+            return cached
+        if m.temp_path is None:
+            raise CheckpointCorruptError(
+                f"tensor member {member_name!r} has no data and no temp_path"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(m.temp_path, flags)
+        mapping: mmap.mmap | None = None
+        try:
+            st = os.fstat(fd)
+            if not stat_mod.S_ISREG(st.st_mode) or st.st_size != m.size:
+                raise CheckpointCorruptError(
+                    f"spill for tensor {member_name!r} is not a regular file of size {m.size}"
+                )
+            mapping = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        finally:
+            os.close(fd)
+        assert mapping is not None
+        view = memoryview(mapping)
+        self._mapped_buffers[member_name] = view
+        self._mapped_resources[member_name] = (view, mapping)
+        return view
 
     def component(self, role: str) -> bytes:
         """Return the raw bytes of the ``state/<role>.json`` component."""
@@ -438,35 +515,13 @@ class CheckpointStore:
         *,
         expected_identity: AttemptIdentityRecord,
     ) -> CheckpointArchive:
-        """Authoritative load by ``artifact_id`` (amendment G).
-
-        Single-fd TOCTOU-safe and parent-race-safe (item 9): obtains the record
-        through :meth:`ArtifactStore.inspect`, requires checkpoint category/
-        format/version, canonical-local storage, retained/acceptable retention,
-        and identity binding; REQUIRES the expected identity to carry a
-        :class:`ResumeLineage` naming the source checkpoint and resolves that
-        parent through the public :meth:`ArtifactStore.open_verified_content`
-        boundary (item 2); opens the content through the SAME public primitive
-        so no underscored artifact internals are imported; and streams
-        digest/size + tar parsing from the SAME descriptor (item 8). The computed
-        digest/size must equal the record; the manifest producing identity and
-        parent must equal the record fields.
-        """
+        """Authoritatively load a checkpoint with complete spill ownership."""
         record = self._inspect_record(artifact_id)
         self._assert_record_loadable(record)
-        # Identity binding: the record's run/attempt/fingerprint must match the
-        # expected identity (amendment L: V1 same-run resume only).
         self._assert_identity_binding(record, expected_identity)
-        # Native resume lineage enforcement (item 2): the expected identity MUST
-        # carry a ResumeLineage naming the source checkpoint, its fields must
-        # match the loaded record exactly, and the fully-qualified parent is
-        # resolved authoritatively through the public artifact-store boundary.
         self._assert_resume_lineage(record, expected_identity)
         self._resolve_resume_parent(record, expected_identity)
-        # Item 9: open through the PUBLIC descriptor-bound primitive so this
-        # module imports NO underscored artifact-store helpers. The descriptor is
-        # fstat-verified regular and the full chain is symlink-free inside
-        # open_verified_content (parent-race defense).
+
         try:
             fd, content_record = self._store.open_verified_content(artifact_id)
         except ArtifactNotFoundError as e:
@@ -475,65 +530,63 @@ class CheckpointStore:
             ) from e
         except ArtifactConflictError as e:
             raise CheckpointCorruptError(f"content path chain is not trusted: {e}") from e
-        if content_record.artifact_id != record.artifact_id:
-            raise CheckpointCorruptError(
-                "open_verified_content returned a record that does not match the "
-                "inspected artifact_id"
-            )
+
+        parsed_path: Path | None = None
+        members: list[ParsedMember] | None = None
         try:
+            if content_record.artifact_id != record.artifact_id:
+                raise CheckpointCorruptError(
+                    "open_verified_content returned a record that does not match the "
+                    "inspected artifact_id"
+                )
             if record.byte_size <= MAX_INMEMORY_ARCHIVE_BYTES:
-                # Small path (every realistic v1 checkpoint): materialize the
-                # whole tar in memory, hash it, and parse from the buffer.
                 tar_bytes, digest = self._read_and_hash_fd(fd, record.byte_size)
                 size_read = len(tar_bytes)
             else:
-                # Item 8 large path: stream the fd to a temp file (hashing
-                # incrementally) then re-open the verified temp file and
-                # stream-PARSE it with parse_ustar_archive_streaming. The
-                # complete archive is NEVER held in Python heap — peak heap is
-                # one member's data plus one header block. tar_bytes stays None.
                 tar_bytes = None
                 digest, size_read, parsed_path = self._read_large_fd_streaming(fd, record.byte_size)
         finally:
             os.close(fd)
-        # The content descriptor is now closed. The digest/size were computed
-        # during the read so the descriptor was the single trusted source.
-        if digest != record.content_digest:
-            raise CheckpointCorruptError(
-                f"content digest {digest!r} != record {record.content_digest!r}"
-            )
-        if size_read != record.byte_size:
-            raise CheckpointCorruptError(
-                f"content size {size_read!r} != record {record.byte_size!r}"
-            )
-        if tar_bytes is not None:
-            members = self._parse_and_validate_tar(tar_bytes)
-        else:
-            # Large path: parse the verified temp file sequentially. The temp
-            # file is unlinked after parsing; only the parsed member bytes are
-            # retained.
-            try:
+
+        try:
+            if digest != record.content_digest:
+                raise CheckpointCorruptError(
+                    f"content digest {digest!r} != record {record.content_digest!r}"
+                )
+            if size_read != record.byte_size:
+                raise CheckpointCorruptError(
+                    f"content size {size_read!r} != record {record.byte_size!r}"
+                )
+            if tar_bytes is not None:
+                members = self._parse_and_validate_tar(tar_bytes)
+            else:
+                assert parsed_path is not None
                 members = self._parse_and_validate_tar_streaming(parsed_path, record.byte_size)
-            finally:
+            try:
+                manifest = self._decode_manifest(members)
+                self._assert_manifest_record_binding(manifest, record)
+                self._bind_components(manifest, members, record)
+                return CheckpointArchive(
+                    manifest=manifest,
+                    members=members,
+                    record=record,
+                    tar_bytes=tar_bytes,
+                    content_digest=digest,
+                    byte_size=size_read,
+                )
+            except BaseException as e:
+                failed = self._cleanup_spill_files(members)
+                if failed and hasattr(e, "add_note"):
+                    e.add_note(f"failed to remove spill files: {[str(p) for p in failed]!r}")
+                raise
+        finally:
+            if parsed_path is not None:
                 try:
                     parsed_path.unlink()
+                except FileNotFoundError:
+                    pass
                 except OSError:
                     pass
-        manifest = self._decode_manifest(members)
-        try:
-            self._assert_manifest_record_binding(manifest, record)
-            self._bind_components(manifest, members, record)
-        except Exception:
-            self._cleanup_spill_files(members)
-            raise
-        return CheckpointArchive(
-            manifest=manifest,
-            members=members,
-            record=record,
-            tar_bytes=tar_bytes,
-            content_digest=digest,
-            byte_size=size_read,
-        )
 
     def _inspect_record(self, artifact_id: str) -> ArtifactRecord:
         result = self._store.inspect(artifact_id)
@@ -845,14 +898,54 @@ class CheckpointStore:
         return bytes(buf)
 
     @staticmethod
-    def _cleanup_spill_files(members: list[ParsedMember]) -> None:
-        """Remove all spill temp files from ``members`` (best-effort)."""
+    def _cleanup_spill_files(members: list[ParsedMember]) -> tuple[Path, ...]:
+        """Remove spill files and return any paths that could not be removed."""
+        failed: list[Path] = []
         for m in members:
-            if m.temp_path is not None:
-                try:
-                    m.temp_path.unlink()
-                except OSError:
-                    pass
+            if m.temp_path is None:
+                continue
+            try:
+                m.temp_path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                failed.append(m.temp_path)
+        return tuple(failed)
+
+    @staticmethod
+    def _read_member_data_streaming(member: ParsedMember, *, max_bytes: int) -> bytes:
+        """Read a bounded JSON member in chunks without Path.read_bytes()."""
+        if member.size > max_bytes:
+            raise CheckpointCorruptError(
+                f"member {member.name!r} size {member.size} exceeds limit {max_bytes}"
+            )
+        if member.data is not None:
+            return member.data
+        if member.temp_path is None:
+            raise CheckpointCorruptError(f"member {member.name!r} has no data")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(member.temp_path, flags)
+        try:
+            st = os.fstat(fd)
+            if not stat_mod.S_ISREG(st.st_mode) or st.st_size != member.size:
+                raise CheckpointCorruptError(
+                    f"spill for member {member.name!r} changed size or type"
+                )
+            out = bytearray()
+            remaining = member.size
+            while remaining:
+                chunk = os.read(fd, min(65536, remaining))
+                if not chunk:
+                    raise CheckpointCorruptError(
+                        f"unexpected EOF reading spilled member {member.name!r}"
+                    )
+                out.extend(chunk)
+                remaining -= len(chunk)
+            if os.read(fd, 1):
+                raise CheckpointCorruptError(f"spilled member {member.name!r} has trailing bytes")
+            return bytes(out)
+        finally:
+            os.close(fd)
 
     def _parse_and_validate_tar(self, tar_bytes: bytes) -> list[ParsedMember]:
         try:
@@ -890,10 +983,7 @@ class CheckpointStore:
         return members
 
     def _decode_manifest(self, members: list[ParsedMember]) -> CheckpointManifest:
-        m0 = members[0]
-        raw = (
-            m0.data if m0.data is not None else (m0.temp_path.read_bytes() if m0.temp_path else b"")
-        )
+        raw = self._read_member_data_streaming(members[0], max_bytes=MAX_MANIFEST_BYTES)
         try:
             text = raw.decode("utf-8")
             data = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
@@ -1013,11 +1103,7 @@ class CheckpointStore:
 
         def _comp(role: str) -> bytes:
             m = by_name[f"state/{role}.json"]
-            if m.data is not None:
-                return m.data
-            if m.temp_path is not None:
-                return m.temp_path.read_bytes()
-            raise CheckpointCorruptError(f"member state/{role}.json has no data")
+            return self._read_member_data_streaming(m, max_bytes=MAX_COMPONENT_MEMBER_BYTES)
 
         def _strict(payload: dict[str, Any], model_cls: Any, label: str) -> Any:
             # Item 5: validate from the canonical JSON re-encoding so list->tuple

@@ -377,26 +377,7 @@ def parse_ustar_archive_streaming(
     max_tensor_count: int | None = None,
     validate_member_order: bool = True,
 ) -> list[ParsedMember]:
-    """Stream-parse a strict ustar archive from an open descriptor (item 8).
-
-    This is the large-archive load path (Issue #11 item 8): the archive is
-    parsed SEQUENTIALLY from ``fd`` so the complete tar byte stream is NEVER
-    materialized in Python heap. Each member's header is read, validated, then
-    that member's data bytes are read individually (bounded by the per-member
-    limits); only the parsed member bytes the caller requests are retained. Peak
-    heap during the parse is one member's data plus one header block, not the
-    whole archive.
-
-    The framing/numeric/header validation is byte-for-byte identical to
-    :func:`parse_ustar_archive`: every check applied to the in-memory form is
-    applied here too (checksum, magic/version, typeflag, canonical octal
-    fields, member order, byte limits, two-block terminator, no trailing bytes).
-
-    ``expected_size`` is the record-declared archive size; the descriptor is
-    fstat-checked to be a regular file of exactly that size before any read, and
-    the descriptor MUST be positioned at the start of the archive (the caller
-    opens it fresh). Raises :class:`TarParseError` on any non-canonical framing.
-    """
+    """Stream-parse a strict ustar archive with parser-owned spill cleanup."""
     import stat as _stat
 
     archive_limit = max_archive_bytes or _get_limit("MAX_ARCHIVE_BYTES", _MAX_ARCHIVE_BYTES_DEFAULT)
@@ -408,8 +389,6 @@ def parse_ustar_archive_streaming(
         raise TarParseError(
             f"archive size {expected_size} is not a positive multiple of {USTAR_BLOCK_SIZE}"
         )
-    # The caller already fstat-verified regularity + exact size; re-assert here
-    # so this function is safe to call directly.
     st = os.fstat(fd)
     if not _stat.S_ISREG(st.st_mode):
         raise TarParseError("streaming parse requires a regular-file descriptor")
@@ -437,112 +416,114 @@ def parse_ustar_archive_streaming(
         total_read += n
         return bytes(buf)
 
+    def _write_all(target_fd: int, data: bytes) -> None:
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            written = os.write(target_fd, view[offset:])
+            if written <= 0:
+                raise OSError("os.write returned a non-positive byte count")
+            offset += written
+
     members: list[ParsedMember] = []
-    seen: set[str] = set()
-    terminator_seen = False
-    total_tensor_bytes = 0
-    n_blocks = expected_size // USTAR_BLOCK_SIZE
+    active_temp_path: Path | None = None
+    try:
+        seen: set[str] = set()
+        terminator_seen = False
+        total_tensor_bytes = 0
+        n_blocks = expected_size // USTAR_BLOCK_SIZE
+        blocks_consumed = 0
+        while blocks_consumed < n_blocks:
+            header_block = _read_exact(USTAR_BLOCK_SIZE, "header block")
+            blocks_consumed += 1
+            if header_block == b"\x00" * USTAR_BLOCK_SIZE:
+                terminator_seen = True
+                break
+            name, _typeflag, size, _data_start = _parse_header(header_block, 0)
+            if name in seen:
+                raise TarParseError(f"duplicate member name {name!r}")
+            seen.add(name)
+            if size < 0:
+                raise TarParseError(f"negative size for member {name!r}")
+            is_state = bool(_STATE_MEMBER_RE.fullmatch(name))
+            is_tensor = bool(_TENSOR_MEMBER_RE.fullmatch(name))
+            if name == "manifest.json" or is_state:
+                if size > component_member_limit:
+                    raise TarParseError(
+                        f"member {name!r} size {size} exceeds "
+                        f"MAX_COMPONENT_MEMBER_BYTES ({component_member_limit})"
+                    )
+            elif is_tensor:
+                if size > tensor_member_limit:
+                    raise TarParseError(
+                        f"member {name!r} size {size} exceeds "
+                        f"MAX_TENSOR_MEMBER_BYTES ({tensor_member_limit})"
+                    )
+                total_tensor_bytes += size
+                if total_tensor_bytes > total_tensor_limit:
+                    raise TarParseError(
+                        f"total tensor bytes {total_tensor_bytes} exceed "
+                        f"MAX_TENSOR_BYTES ({total_tensor_limit})"
+                    )
 
-    # Parse member-by-member. We cannot seek on a pipe, but the descriptor is a
-    # regular file; we still read strictly sequentially (no seeks) so the whole
-    # archive is never buffered.
-    blocks_consumed = 0
-    # We need header bytes for _parse_header, which expects the WHOLE buffer to
-    # bounds-check member data offsets. We give it a 1-block slice so it can only
-    # see the header (data is read separately below). _parse_header computes the
-    # data_start as offset + USTAR_BLOCK_SIZE but we ignore that and read data
-    # ourselves.
-    while blocks_consumed < n_blocks:
-        header_block = _read_exact(USTAR_BLOCK_SIZE, "header block")
-        blocks_consumed += 1
-        # A zero block signals the end of members.
-        if header_block == b"\x00" * USTAR_BLOCK_SIZE:
-            terminator_seen = True
-            # Must be followed by exactly one more zero block, then EOF.
-            break
-        # _parse_header validates the header (checksum, magic, typeflag, numeric
-        # fields, name/prefix, devmajor/devminor, linkname, reserved). We pass a
-        # 1-block buffer; the data-start it returns is irrelevant here.
-        name, _typeflag, size, _data_start = _parse_header(header_block, 0)
-        if name in seen:
-            raise TarParseError(f"duplicate member name {name!r}")
-        seen.add(name)
-        if size < 0:
-            raise TarParseError(f"negative size for member {name!r}")
-        # Enforce per-member byte limits DURING parsing (same as the in-memory
-        # parser).
-        is_state = bool(_STATE_MEMBER_RE.fullmatch(name))
-        is_tensor = bool(_TENSOR_MEMBER_RE.fullmatch(name))
-        if name == "manifest.json" or is_state:
-            if size > component_member_limit:
-                raise TarParseError(
-                    f"member {name!r} size {size} exceeds MAX_COMPONENT_MEMBER_BYTES "
-                    f"({component_member_limit})"
-                )
-        elif is_tensor:
-            if size > tensor_member_limit:
-                raise TarParseError(
-                    f"member {name!r} size {size} exceeds MAX_TENSOR_MEMBER_BYTES "
-                    f"({tensor_member_limit})"
-                )
-            total_tensor_bytes += size
-            if total_tensor_bytes > total_tensor_limit:
-                raise TarParseError(
-                    f"total tensor bytes {total_tensor_bytes} exceed MAX_TENSOR_BYTES "
-                    f"({total_tensor_limit})"
-                )
-        # Read the data. For large tensor members, spill to a temp file to
-        # keep peak heap bounded (review 4833143258 item 2).
-        _SPILL_THRESHOLD = 4 * 1024 * 1024  # 4 MiB
-        temp_path: Path | None = None
-        if is_tensor and size > _SPILL_THRESHOLD:
-            import tempfile
+            spill_threshold = 4 * 1024 * 1024
+            temp_path: Path | None = None
+            if is_tensor and size > spill_threshold:
+                import tempfile
 
-            fd_tmp, temp_name = tempfile.mkstemp(suffix=".tensor")
+                fd_tmp, temp_name = tempfile.mkstemp(suffix=".tensor")
+                active_temp_path = Path(temp_name)
+                try:
+                    remaining = size
+                    while remaining > 0:
+                        chunk = _read_exact(min(remaining, BLOCK_READ_CHUNK), f"data for {name!r}")
+                        _write_all(fd_tmp, chunk)
+                        remaining -= len(chunk)
+                    os.fsync(fd_tmp)
+                finally:
+                    os.close(fd_tmp)
+                data = None
+                temp_path = active_temp_path
+            else:
+                data = _read_exact(size, f"data for {name!r}") if size else b""
+
+            data_blocks = (size + USTAR_BLOCK_SIZE - 1) // USTAR_BLOCK_SIZE
+            padding_len = data_blocks * USTAR_BLOCK_SIZE - size
+            if padding_len:
+                padding = _read_exact(padding_len, f"padding for {name!r}")
+                if any(b != 0 for b in padding):
+                    raise TarParseError(f"member {name!r} has non-zero padding bytes")
+            blocks_consumed += data_blocks
+            _validate_member_name(name)
+            members.append(ParsedMember(name=name, data=data, size=size, temp_path=temp_path))
+            active_temp_path = None
+            if len(members) > member_limit:
+                raise TarParseError(f"member count exceeds max_member_count ({member_limit})")
+
+        if not terminator_seen:
+            raise TarParseError("missing two-block zero terminator")
+        if blocks_consumed >= n_blocks:
+            raise TarParseError("truncated terminator: expected two zero blocks")
+        second = _read_exact(USTAR_BLOCK_SIZE, "second terminator block")
+        if second != b"\x00" * USTAR_BLOCK_SIZE:
+            raise TarParseError("second terminator block is non-zero")
+        if total_read != expected_size:
+            raise TarParseError(f"streamed {total_read} bytes != expected_size {expected_size}")
+        if os.read(fd, 1):
+            raise TarParseError("trailing bytes after terminator are rejected")
+        if validate_member_order:
+            _validate_checkpoint_member_order(members, tensor_limit)
+        return members
+    except BaseException:
+        paths = [m.temp_path for m in members if m.temp_path is not None]
+        if active_temp_path is not None:
+            paths.append(active_temp_path)
+        for path in paths:
             try:
-                remaining = size
-                while remaining > 0:
-                    chunk_sz = min(remaining, 65536)
-                    chunk = _read_exact(chunk_sz, f"data for {name!r}")
-                    os.write(fd_tmp, chunk)
-                    remaining -= chunk_sz
-                os.fsync(fd_tmp)
-            finally:
-                os.close(fd_tmp)
-            data = None
-            temp_path = Path(temp_name)
-        else:
-            data = _read_exact(size, f"data for {name!r}") if size else b""
-        data_blocks = (size + USTAR_BLOCK_SIZE - 1) // USTAR_BLOCK_SIZE
-        padding_len = data_blocks * USTAR_BLOCK_SIZE - size
-        if padding_len:
-            padding = _read_exact(padding_len, f"padding for {name!r}")
-            if any(b != 0 for b in padding):
-                raise TarParseError(f"member {name!r} has non-zero padding bytes")
-        blocks_consumed += data_blocks
-        _validate_member_name(name)
-        members.append(ParsedMember(name=name, data=data, size=size, temp_path=temp_path))
-        if len(members) > member_limit:
-            raise TarParseError(f"member count exceeds max_member_count ({member_limit})")
-
-    if not terminator_seen:
-        raise TarParseError("missing two-block zero terminator")
-    # The terminator must be exactly two zero blocks, then EOF.
-    if blocks_consumed >= n_blocks:
-        raise TarParseError("truncated terminator: expected two zero blocks")
-    second = _read_exact(USTAR_BLOCK_SIZE, "second terminator block")
-    blocks_consumed += 1
-    if second != b"\x00" * USTAR_BLOCK_SIZE:
-        raise TarParseError("second terminator block is non-zero")
-    if total_read != expected_size:
-        raise TarParseError(f"streamed {total_read} bytes != expected_size {expected_size}")
-    # Any trailing bytes beyond the two terminator blocks are corruption.
-    extra = os.read(fd, 1)
-    if extra:
-        raise TarParseError("trailing bytes after terminator are rejected")
-    if validate_member_order:
-        _validate_checkpoint_member_order(members, tensor_limit)
-    return members
+                path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 # Streaming reads use this chunk size (bounds peak heap to one chunk + header).
