@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -31,6 +32,19 @@ RUN_ID = "run-20260101t000000z-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb"
 ATTEMPT_ID = "attempt-20260101t000000z-cccccccccccccccccccc"
 DATASET_HEX = "1" * 64
 TOKENIZER_HEX = "2" * 64
+
+
+def _schema_semantics(value: Any) -> Any:
+    """Drop descriptive JSON Schema annotations; preserve every validation keyword."""
+    if isinstance(value, dict):
+        return {
+            key: _schema_semantics(item)
+            for key, item in value.items()
+            if key not in {"title", "description"}
+        }
+    if isinstance(value, list):
+        return [_schema_semantics(item) for item in value]
+    return value
 
 
 def _identity() -> AttemptIdentityRecord:
@@ -298,19 +312,16 @@ def test_artifact_role_and_attempt_identity_are_bound(tmp_path: Path) -> None:
         )
 
 
-def test_schema_document_tracks_top_level_model_fields() -> None:
-    schema = experiment_manifest_json_schema()
-    aliases = {field.alias or name for name, field in ExperimentManifest.model_fields.items()}
-    assert aliases == set(schema["properties"])
-    assert schema["$schema"].endswith("2020-12/schema")
-    assert schema["allOf"]
+def test_schema_document_matches_model_validation_semantics() -> None:
+    generated = experiment_manifest_json_schema()
     committed = json.loads(
         (Path(__file__).resolve().parents[1] / "schemas" / "experiment-manifest-v1.json").read_text(
             encoding="utf-8"
         )
     )
-    assert set(committed["properties"]) == aliases
-    assert committed["allOf"] == schema["allOf"]
+    assert generated["$schema"].endswith("2020-12/schema")
+    assert generated["allOf"]
+    assert _schema_semantics(committed) == _schema_semantics(generated)
 
 
 def test_public_surface_is_explicit() -> None:
