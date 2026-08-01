@@ -157,7 +157,8 @@ def test_generate_publish_load_round_trip(tmp_path: Path) -> None:
     record = ManifestGenerator(store).publish(manifest)
     assert record.category == "experiment_manifest"
     assert record.format == "json"
-    assert store.list_artifacts()[-1].artifact_id == record.artifact_id
+    manifests = store.list_artifacts(category="experiment_manifest")
+    assert [item.artifact_id for item in manifests] == [record.artifact_id]
     loaded = load_manifest(
         record.artifact_id,
         artifact_store=store,
