@@ -43,6 +43,13 @@ artifacts/
 !src/expertforge/artifacts/**
 src/expertforge/artifacts/__pycache__/
 checkpoints/
+# Track the Issue #11 checkpoint source package: the broad `checkpoints/` rule
+# above is meant for generated run-output checkpoint directories, not the
+# versioned `src/expertforge/checkpoints/` import package. Re-exclude Python
+# caches so the negation does not pull __pycache__ back in.
+!src/expertforge/checkpoints/
+!src/expertforge/checkpoints/**
+src/expertforge/checkpoints/__pycache__/
 *.ckpt
 *.pt
 *.bin

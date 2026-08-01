@@ -109,6 +109,32 @@ class TestPublishPathSource:
         assert content is not None and content.read_bytes() == _PAYLOAD
 
 
+class TestOpenVerifiedContent:
+    """Item 9 (#11 round-2): the public descriptor-bound read primitive."""
+
+    def test_returns_fd_and_record_reading_canonical_bytes(self, tmp_path: Path) -> None:
+        store = make_store(tmp_path)
+        rec = store.publish(
+            _PAYLOAD,
+            category="report",
+            format="json",
+            format_version=1,
+            producing_component="training",
+        )
+        fd, record = store.open_verified_content(rec.artifact_id)
+        try:
+            assert record.artifact_id == rec.artifact_id
+            # Read directly from the descriptor (the caller owns it).
+            assert os.read(fd, len(_PAYLOAD) + 1) == _PAYLOAD
+        finally:
+            os.close(fd)
+
+    def test_unknown_artifact_raises_not_found(self, tmp_path: Path) -> None:
+        store = make_store(tmp_path)
+        with pytest.raises(ArtifactNotFoundError):
+            store.open_verified_content("artifact-v1-sha256-" + "0" * 64)
+
+
 class TestRegisterExisting:
     def test_register_existing_copies_into_store(self, tmp_path: Path) -> None:
         store = make_store(tmp_path)
