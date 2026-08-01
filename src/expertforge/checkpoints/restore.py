@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -604,12 +604,33 @@ def _materialize(
             f"component ref logical_names {tuple(entry.logical_names)!r} != manifest "
             f"logical_names {tuple(member_ref.logical_names)!r} for {entry.member_name!r}"
         )
-    raw = archive.tensor_member(entry.member_name)
-    return CapturedTensor(
+    raw = archive.tensor_member_buffer(entry.member_name)
+    if len(raw) != member_ref.member_byte_size:
+        raise RestoreError(
+            f"tensor member {entry.member_name!r} byte size changed: "
+            f"{len(raw)} != {member_ref.member_byte_size}"
+        )
+    if entry.dtype == "bool" and any(value not in (0, 1) for value in raw):
+        raise RestoreError(f"bool tensor member {entry.member_name!r} contains non-canonical bytes")
+    if isinstance(raw, bytes):
+        return CapturedTensor(
+            logical_name=entry.logical_names[0],
+            dtype=entry.dtype,
+            shape=tuple(entry.shape),
+            raw_bytes=raw,
+        )
+    # CapturedTensor's public validator is intentionally bytes-only. The archive
+    # has already authenticated size/digest and the checks above enforce the
+    # remaining raw-byte invariants, so construct the framework-neutral record
+    # with a read-only mmap-backed memoryview rather than copying up to 1 GiB.
+    return CapturedTensor.model_construct(
         logical_name=entry.logical_names[0],
         dtype=entry.dtype,
         shape=tuple(entry.shape),
-        raw_bytes=raw,
+        byte_order="little",
+        layout="contiguous",
+        raw_bytes=cast(Any, raw),
+        source_device=None,
     )
 
 
