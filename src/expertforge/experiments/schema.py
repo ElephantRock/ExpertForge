@@ -220,9 +220,25 @@ def experiment_manifest_json_schema() -> dict[str, Any]:
                 "required": ["status"],
             },
             "then": {
-                "required": ["evaluation_summary"],
+                "required": [
+                    "configuration_artifact",
+                    "provenance_artifact",
+                    "dataset_identity",
+                    "tokenizer_identity",
+                    "model_descriptor",
+                    "training_budget",
+                    "evaluation_summary",
+                    "telemetry_artifacts",
+                ],
                 "properties": {
+                    "configuration_artifact": {"type": "object"},
+                    "provenance_artifact": {"type": "object"},
+                    "dataset_identity": {"type": "object"},
+                    "tokenizer_identity": {"type": "object"},
+                    "model_descriptor": {"type": "object"},
+                    "training_budget": {"type": "object"},
                     "evaluation_summary": {"type": "object"},
+                    "telemetry_artifacts": {"type": "array", "minItems": 1},
                     "evidence": {
                         "properties": {"status": {"const": "complete"}},
                         "required": ["status"],
