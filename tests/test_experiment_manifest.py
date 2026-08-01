@@ -300,18 +300,14 @@ def test_artifact_role_and_attempt_identity_are_bound(tmp_path: Path) -> None:
 
 def test_schema_document_tracks_top_level_model_fields() -> None:
     schema = experiment_manifest_json_schema()
-    aliases = {
-        field.alias or name for name, field in ExperimentManifest.model_fields.items()
-    }
+    aliases = {field.alias or name for name, field in ExperimentManifest.model_fields.items()}
     assert aliases == set(schema["properties"])
     assert schema["$schema"].endswith("2020-12/schema")
     assert schema["allOf"]
     committed = json.loads(
-        (
-            Path(__file__).resolve().parents[1]
-            / "schemas"
-            / "experiment-manifest-v1.json"
-        ).read_text(encoding="utf-8")
+        (Path(__file__).resolve().parents[1] / "schemas" / "experiment-manifest-v1.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert set(committed["properties"]) == aliases
     assert committed["allOf"] == schema["allOf"]
