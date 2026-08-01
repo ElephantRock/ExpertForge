@@ -69,7 +69,6 @@ _ELIGIBLE_PRE_MANIFEST_CATEGORIES = frozenset(
         "telemetry",
         "checkpoint",
         "generated_sample",
-        "report",
     }
 )
 
