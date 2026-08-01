@@ -1,4 +1,4 @@
-"""Manifest generation, atomic publication, authoritative loading, and inspection."""
+"""Manifest generation, publication, authoritative loading, and inspection."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,9 +45,11 @@ from expertforge.identity.lineage import ResumeLineage
 from expertforge.identity.record import AttemptIdentityRecord
 
 __all__ = [
+    "LoadedExperimentManifest",
     "ManifestBindingError",
     "ManifestGenerator",
     "ManifestInspection",
+    "ManifestInspectionDiagnosticCode",
     "ManifestPublicationError",
     "ParentCheckpointResolver",
     "load_manifest",
@@ -54,21 +57,44 @@ __all__ = [
 ]
 
 ParentCheckpointResolver = Callable[[ResumeLineage], tuple[ArtifactStore, ArtifactRecord]]
+ManifestInspectionDiagnosticCode = Literal[
+    "unsupported_version",
+    "invalid_manifest",
+    "not_regular_file",
+]
+_ELIGIBLE_PRE_MANIFEST_CATEGORIES = frozenset(
+    {
+        "resolved_configuration",
+        "provenance",
+        "telemetry",
+        "checkpoint",
+        "generated_sample",
+        "report",
+    }
+)
 
 
 class ManifestBindingError(ManifestError):
-    """Manifest identity, lineage, or referenced-artifact binding is invalid."""
+    """Manifest identity, lineage, registry coverage, or artifact binding is invalid."""
 
 
 class ManifestPublicationError(ManifestError):
-    """Manifest publication cannot preserve the one-terminal-manifest contract."""
+    """Manifest bytes could not be published and verified as an immutable artifact."""
+
+
+@dataclass(frozen=True)
+class LoadedExperimentManifest:
+    """Authoritative manifest paired with the descriptor-bound #10 record."""
+
+    manifest: ExperimentManifest
+    artifact_record: ArtifactRecord
 
 
 @dataclass(frozen=True)
 class ManifestInspection:
-    status: Literal["complete", "unsupported", "corrupt"]
+    status: Literal["valid", "unsupported", "corrupt"]
     lifecycle_status: AttemptStatus | None = None
-    diagnostic_code: str | None = None
+    diagnostic_code: ManifestInspectionDiagnosticCode | None = None
     detail: str | None = None
 
 
@@ -180,6 +206,57 @@ def _verify_manifest_references(
         raise ManifestBindingError("resolved parent checkpoint does not match manifest lineage.")
 
 
+def _assert_registry_coverage(manifest: ExperimentManifest, store: ArtifactStore) -> None:
+    """Require every eligible registered pre-manifest artifact exactly once."""
+    registered = {
+        record.artifact_id: record
+        for record in store.list_artifacts()
+        if record.category in _ELIGIBLE_PRE_MANIFEST_CATEGORIES
+    }
+    referenced = {
+        record.artifact_id: record for record in manifest.referenced_attempt_artifacts()
+    }
+    missing = sorted(set(registered) - set(referenced))
+    unknown = sorted(set(referenced) - set(registered))
+    if missing or unknown:
+        raise ManifestBindingError(
+            "manifest registry coverage mismatch; "
+            f"unrepresented_registered={missing!r}, unregistered_references={unknown!r}."
+        )
+
+
+def _verify_manifest_artifact(
+    store: ArtifactStore,
+    record: ArtifactRecord,
+    payload: bytes,
+    identity: AttemptIdentityRecord,
+) -> ArtifactRecord:
+    try:
+        fd, current = store.open_verified_content(record.artifact_id)
+    except (ArtifactNotFoundError, ArtifactStoreError, OSError) as exc:
+        raise ManifestPublicationError(
+            f"published manifest could not be reopened authoritatively: {exc}"
+        ) from exc
+    try:
+        _assert_record_role(current)
+        _assert_record_identity(current, identity)
+        if ExperimentManifest.immutable_artifact_identity(current) != (
+            ExperimentManifest.immutable_artifact_identity(record)
+        ):
+            raise ManifestPublicationError(
+                "published manifest record changed immutable descriptor fields."
+            )
+        raw = _read_fd_bounded(fd, current.byte_size)
+    finally:
+        os.close(fd)
+    if raw != payload:
+        raise ManifestPublicationError("published manifest bytes differ from canonical input.")
+    observed_digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+    if observed_digest != current.content_digest:
+        raise ManifestPublicationError("published manifest digest does not match exact bytes.")
+    return current
+
+
 class ManifestGenerator:
     """Build and publish terminal manifests from existing typed subsystem records."""
 
@@ -194,6 +271,7 @@ class ManifestGenerator:
         self,
         *,
         identity: AttemptIdentityRecord,
+        finalized_at_utc: datetime,
         classification: ExperimentClassification,
         maturity_stage: MaturityStage,
         research_family: ResearchFamily,
@@ -204,10 +282,11 @@ class ManifestGenerator:
         provenance_artifact: ArtifactRecord | None = None,
         dataset: DatasetReference | None = None,
         tokenizer: TokenizerReference | None = None,
-        fixture: bool = True,
         model: ModelIdentity | None = None,
         training: TrainingBudget | None = None,
         evaluation: EvaluationSummary | None = None,
+        smoke_objective: str | None = None,
+        smoke_acceptance_criteria: str | None = None,
         hypothesis: str | None = None,
         control: str | None = None,
         fixed_constraints: tuple[str, ...] = (),
@@ -218,12 +297,17 @@ class ManifestGenerator:
         kill_criterion: str | None = None,
         outcome_diagnostic: ManifestDiagnosticCode | None = None,
         known_limitations: tuple[str, ...] = (),
+        checkpoint_evidence_required: bool = False,
+        generated_output_evidence_required: bool = False,
         telemetry_artifacts: tuple[ArtifactRecord, ...] = (),
         checkpoint_artifacts: tuple[ArtifactRecord, ...] = (),
         generated_output_artifacts: tuple[ArtifactRecord, ...] = (),
         review_report_artifacts: tuple[ArtifactRecord, ...] = (),
         resume_checkpoint: ArtifactRecord | None = None,
+        result: str | None = None,
+        decision: str | None = None,
     ) -> ExperimentManifest:
+        """Pure construction from explicit typed inputs; no wall clock or filesystem reads."""
         if not _same_identity(identity, self._artifact_store.identity):
             raise ManifestBindingError(
                 "ManifestGenerator identity must equal the ArtifactStore-bound identity."
@@ -243,6 +327,12 @@ class ManifestGenerator:
             missing.append("model_identity_missing")
         if training is None:
             missing.append("training_budget_missing")
+        if evaluation is None:
+            missing.append("evaluation_summary_missing")
+        if checkpoint_evidence_required and not checkpoint_artifacts:
+            missing.append("checkpoint_artifact_missing")
+        if generated_output_evidence_required and not generated_output_artifacts:
+            missing.append("generated_output_artifact_missing")
         missing_codes = tuple(sorted(missing))
         evidence = EvidenceCompleteness(
             status="complete" if not missing_codes else "partial",
@@ -250,6 +340,7 @@ class ManifestGenerator:
         )
         return ExperimentManifest(
             identity=identity,
+            finalized_at_utc=finalized_at_utc,
             issue_number=issue_number,
             pull_request_number=pull_request_number,
             maturity_stage=maturity_stage,
@@ -263,10 +354,11 @@ class ManifestGenerator:
             provenance_artifact=provenance_artifact,
             dataset_identity=dataset,
             tokenizer_identity=tokenizer,
-            fixture=fixture,
             model_descriptor=model,
             training_budget=training,
             evaluation_summary=evaluation,
+            smoke_objective=smoke_objective,
+            smoke_acceptance_criteria=smoke_acceptance_criteria,
             hypothesis=hypothesis,
             control=control,
             fixed_constraints=tuple(sorted(set(fixed_constraints))),
@@ -275,6 +367,8 @@ class ManifestGenerator:
             minimum_useful_effect=minimum_useful_effect,
             failure_threshold=failure_threshold,
             kill_criterion=kill_criterion,
+            checkpoint_evidence_required=checkpoint_evidence_required,
+            generated_output_evidence_required=generated_output_evidence_required,
             telemetry_artifacts=tuple(
                 sorted(telemetry_artifacts, key=lambda item: item.artifact_id)
             ),
@@ -288,6 +382,8 @@ class ManifestGenerator:
                 sorted(review_report_artifacts, key=lambda item: item.artifact_id)
             ),
             resume_checkpoint=resume_checkpoint,
+            result=result,
+            decision=decision,
         )
 
     def publish(
@@ -296,15 +392,27 @@ class ManifestGenerator:
         *,
         parent_checkpoint_resolver: ParentCheckpointResolver | None = None,
     ) -> ArtifactRecord:
+        """Publish after caller-owned writer quiescence and single-writer serialization.
+
+        Issue #10 does not expose a transaction spanning registry inspection and
+        publication. The orchestrator therefore owns quiescence and must not run
+        concurrent terminal finalizers for the same attempt. The checks here are
+        defensive consistency checks, not a cross-process uniqueness lock.
+        """
         if not _same_identity(manifest.identity, self._artifact_store.identity):
             raise ManifestBindingError("manifest identity does not match the ArtifactStore identity.")
+        payload = canonical_manifest_bytes(manifest)
+        if len(payload) > MAX_MANIFEST_BYTES:
+            raise ManifestPublicationError(
+                f"manifest exceeds MAX_MANIFEST_BYTES={MAX_MANIFEST_BYTES}; got {len(payload)}."
+            )
         _verify_manifest_references(
             manifest,
             self._artifact_store,
             parent_checkpoint_resolver=parent_checkpoint_resolver,
         )
+        _assert_registry_coverage(manifest, self._artifact_store)
         existing = self._artifact_store.list_artifacts(category="experiment_manifest")
-        payload = canonical_manifest_bytes(manifest)
         if existing:
             if len(existing) != 1:
                 raise ManifestPublicationError(
@@ -317,10 +425,15 @@ class ManifestGenerator:
                 existing_payload = _read_fd_bounded(fd, existing_record.byte_size)
             finally:
                 os.close(fd)
-            if existing_payload == payload:
-                return existing_record
-            raise ManifestPublicationError(
-                "attempt already has a different terminal experiment manifest."
+            if existing_payload != payload:
+                raise ManifestPublicationError(
+                    "attempt already has a different terminal experiment manifest."
+                )
+            return _verify_manifest_artifact(
+                self._artifact_store,
+                existing_record,
+                payload,
+                manifest.identity,
             )
         parent: ParentReference | None = None
         lineage = manifest.identity.lineage
@@ -342,7 +455,12 @@ class ManifestGenerator:
             )
         except (ArtifactStoreError, OSError) as exc:
             raise ManifestPublicationError(f"manifest publication failed: {exc}") from exc
-        return record
+        return _verify_manifest_artifact(
+            self._artifact_store,
+            record,
+            payload,
+            manifest.identity,
+        )
 
     def finalize_attempt(
         self,
@@ -350,7 +468,7 @@ class ManifestGenerator:
         parent_checkpoint_resolver: ParentCheckpointResolver | None = None,
         **generate_kwargs: Any,
     ) -> ArtifactRecord:
-        """Generate and publish in one call; retained for orchestrator convenience."""
+        """Generate, verify registry coverage, publish, and post-verify the terminal record."""
         manifest = self.generate(**generate_kwargs)
         return self.publish(
             manifest,
@@ -364,8 +482,8 @@ def load_manifest(
     artifact_store: ArtifactStore,
     expected_identity: AttemptIdentityRecord,
     parent_checkpoint_resolver: ParentCheckpointResolver | None = None,
-) -> ExperimentManifest:
-    """Authoritatively load a registered manifest through #10's verified descriptor."""
+) -> LoadedExperimentManifest:
+    """Authoritatively load a registered manifest and retain its #10 record."""
     if not _same_identity(artifact_store.identity, expected_identity):
         raise ManifestBindingError("artifact_store identity does not match expected_identity.")
     try:
@@ -401,7 +519,8 @@ def load_manifest(
         artifact_store,
         parent_checkpoint_resolver=parent_checkpoint_resolver,
     )
-    return manifest
+    _assert_registry_coverage(manifest, artifact_store)
+    return LoadedExperimentManifest(manifest=manifest, artifact_record=record)
 
 
 def _open_scan_path(path: Path) -> int:
@@ -430,7 +549,7 @@ def scan_manifest(path: Path) -> ManifestInspection:
             )
         raw = _read_fd_bounded(fd, st.st_size)
         manifest = parse_manifest_bytes(raw)
-        return ManifestInspection(status="complete", lifecycle_status=manifest.status)
+        return ManifestInspection(status="valid", lifecycle_status=manifest.status)
     except ManifestVersionError as exc:
         return ManifestInspection(
             status="unsupported",
