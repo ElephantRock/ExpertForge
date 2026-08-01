@@ -12,6 +12,7 @@ import pytest
 from expertforge.artifacts import ArtifactRecord, ArtifactStore
 from expertforge.experiments import (
     DatasetReference,
+    ExperimentManifest,
     ManifestBindingError,
     ManifestCorruptError,
     ManifestGenerator,
@@ -104,7 +105,7 @@ def _generate(
     store: ArtifactStore,
     records: dict[str, ArtifactRecord],
     **kwargs: Any,
-):  # type: ignore[no-untyped-def]
+) -> ExperimentManifest:
     return ManifestGenerator(store).generate(
         identity=store.identity,
         classification="smoke_test",
