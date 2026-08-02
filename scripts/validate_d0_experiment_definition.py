@@ -332,12 +332,12 @@ def build_validation_manifest(
         failure_threshold=profile_definition["failure_threshold"],
         kill_criterion=profile_definition["kill_criterion"],
         checkpoint_evidence_required=profile_definition["checkpoint_evidence_required"],
-        generated_output_evidence_required=profile_definition[
-            "generated_output_evidence_required"
-        ],
+        generated_output_evidence_required=profile_definition["generated_output_evidence_required"],
     )
     _require(manifest.evidence.missing == _EXPECTED_MISSING, f"{profile}: missing evidence changed")
-    _require(manifest.configuration_artifact is None, f"{profile}: synthetic config artifact exists")
+    _require(
+        manifest.configuration_artifact is None, f"{profile}: synthetic config artifact exists"
+    )
     _require(manifest.provenance_artifact is None, f"{profile}: synthetic provenance exists")
     _require(not manifest.telemetry_artifacts, f"{profile}: synthetic telemetry exists")
     _require(not manifest.checkpoint_artifacts, f"{profile}: synthetic checkpoint exists")
