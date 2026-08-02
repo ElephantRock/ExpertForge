@@ -191,5 +191,5 @@ def test_boolean_dimension_is_rejected() -> None:
     with pytest.raises(ContractValidationError, match="must be an exact integer"):
         count_parameter_term(
             {"shape": ["d"], "multiplicity": 1},
-            {"d": True},  # type: ignore[dict-item]
+            {"d": True},
         )
