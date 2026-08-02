@@ -60,9 +60,11 @@ def test_every_registered_validator_runs_once_in_order() -> None:
     recorded: list[str] = []
 
     report = validate_all(_passing_steps(recorded))
+    validators = report["validators"]
 
+    assert isinstance(validators, Mapping)
     assert recorded == list(EXPECTED_ORDER)
-    assert list(report["validators"]) == list(EXPECTED_ORDER)
+    assert list(validators) == list(EXPECTED_ORDER)
 
 
 def test_validator_registry_is_exact_and_immutable() -> None:
