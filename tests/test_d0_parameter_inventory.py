@@ -44,10 +44,7 @@ def test_parameter_inventory_validates() -> None:
     report = validate_all()
 
     assert report["status"] == "valid_parameter_inventory"
-    assert (
-        report["comparison"]
-        == "declarative_tensor_inventory_equals_independent_closed_form"
-    )
+    assert report["comparison"] == "declarative_tensor_inventory_equals_independent_closed_form"
     assert report["profiles"]["qualification"] == {
         "parameter_families": 11,
         "parameter_tensor_instances": 74,
