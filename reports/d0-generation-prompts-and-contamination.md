@@ -93,10 +93,10 @@ uv run python scripts/validate_d0_generation_prompts.py
 uv run pytest -q tests/test_d0_generation_prompts.py
 ```
 
-CI run 252 passed formatting, Ruff, strict mypy, the complete fast CPU suite,
-portable CPU integration, the locked smoke tier, and the one-command
-interruption/recovery gate on implementation head
-`343321bf6c5e774f2d76db22c12c7e1aceb9cbba`.
+CI run 252 passed on the implementation head. Final synchronized CI run 259
+passed formatting, Ruff, strict mypy, the complete fast CPU suite, portable CPU
+integration, the locked smoke tier, and the one-command interruption/recovery
+gate on exact head `bee4fa55904bc6dc1ea0dd983f43f0e59c3fe723`.
 
 ## Evidence boundary
 
