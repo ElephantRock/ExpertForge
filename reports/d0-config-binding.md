@@ -74,16 +74,21 @@ uv run pytest -q tests/test_d0_config_binding.py
 
 `resolved_yaml_configs_accepted_by_existing_configuration_layer`
 
-The formal experiment-definition, independent parameter-accounting, and fixed
-prompt/contamination blockers closed in subsequent tranches.
+The formal experiment-definition, independent parameter-accounting, fixed
+prompt/contamination, and permanent aggregate validation/CI-gate blockers closed
+in subsequent tranches.
 
 ## Current remaining blockers
 
-1. `contract_validation_command_and_CI_gate`
-2. `rendered_review_report`
-3. `PROJECT_STATE_synchronization`
+1. `rendered_review_report`
+2. `PROJECT_STATE_synchronization`
 
 ## Next dependency-ordered action
 
-Create one permanent D0 contract-validation command and CI gate. Model
-implementation, data processing, and training remain unauthorized.
+Render the final D0.0 review report. The permanent validation command is:
+
+```bash
+uv run --locked python -m scripts.validate_d0_ratification
+```
+
+Model implementation, data processing, and training remain unauthorized.
