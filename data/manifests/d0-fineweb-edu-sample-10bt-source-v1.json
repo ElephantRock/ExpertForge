@@ -1,0 +1,130 @@
+{
+  "schema_version": "expertforge-dataset-source-manifest/1",
+  "manifest_id": "d0-fineweb-edu-sample-10bt-source-v1",
+  "digest_policy": "sha256(canonical_json_without_manifest_sha256)",
+  "upstream": {
+    "repository": "HuggingFaceFW/fineweb-edu",
+    "revision": "84e8104e779e409e2267ac60609138e3dda2cbd2",
+    "configuration": "sample-10BT",
+    "split": "train",
+    "license": "ODC-By-1.0",
+    "source_root": "sample/10BT"
+  },
+  "schema": {
+    "available_fields": [
+      "text",
+      "id",
+      "dump",
+      "url",
+      "file_path",
+      "language",
+      "language_score",
+      "token_count",
+      "score",
+      "int_score"
+    ],
+    "consumed_fields": [
+      "id",
+      "text",
+      "url",
+      "dump",
+      "file_path"
+    ],
+    "model_input_field": "text",
+    "document_id_field": "id"
+  },
+  "normalization": {
+    "utf8_required": true,
+    "nul_rejected": true,
+    "newline_mapping": "CRLF_and_CR_to_LF",
+    "other_codepoints_and_whitespace": "preserve_exactly"
+  },
+  "ordering": {
+    "source_files": "path_lexicographic",
+    "rows_within_file": "physical_row_index_ascending"
+  },
+  "split_contract": {
+    "algorithm": "first_u64_be(sha256('expertforge-d0-split-v1\\0' || utf8(document_id))) mod 1000",
+    "train_values": "0..994",
+    "validation_values": "995..999"
+  },
+  "deduplication": {
+    "duplicate_key": "sha256(normalized_utf8_text)",
+    "keep_rule": "first_in_source_order"
+  },
+  "files": [
+    {
+      "path": "sample/10BT/000_00000.parquet",
+      "sha256": "b1ba7b2ce4cb5ea6ef42dca40263eabb85f37700d01693a68e9b30a31d78e871",
+      "size_bytes": 2152819114
+    },
+    {
+      "path": "sample/10BT/001_00000.parquet",
+      "sha256": "3fcf2dc69cd52503986276d3d2d26a8c356d0f2ea28a0de4fdbda8cf87755693",
+      "size_bytes": 2152222432
+    },
+    {
+      "path": "sample/10BT/002_00000.parquet",
+      "sha256": "547ae182d132c9f06b6ce63149567208ea9f57630bfd9b1a2938e504f0c9ebd7",
+      "size_bytes": 2151796315
+    },
+    {
+      "path": "sample/10BT/003_00000.parquet",
+      "sha256": "22184e6eb25759ddd97783751ffc73e1705dfa2542e630dae1f2a8bac8ee6ddb",
+      "size_bytes": 2152437524
+    },
+    {
+      "path": "sample/10BT/004_00000.parquet",
+      "sha256": "33557ddd87a07a4ae6fcaf7a4789c7b484e5cc0c273ca12a65b74200e6d8748b",
+      "size_bytes": 2152338550
+    },
+    {
+      "path": "sample/10BT/005_00000.parquet",
+      "sha256": "e08d79927ecb377786572cd854817c748ceb8880878b1a0eb91abf8c85d505ea",
+      "size_bytes": 2152189947
+    },
+    {
+      "path": "sample/10BT/006_00000.parquet",
+      "sha256": "554fa2613c9261d6c9c396caab881de3160175794c6c3e1856bf28a0e9cb9b76",
+      "size_bytes": 2152689867
+    },
+    {
+      "path": "sample/10BT/007_00000.parquet",
+      "sha256": "4b7d1f697d4afff7f5f65cb7aa4d83acc6db716da4d46ea23399d0c50608c6e3",
+      "size_bytes": 2150686637
+    },
+    {
+      "path": "sample/10BT/008_00000.parquet",
+      "sha256": "a6d9dcc0c72ecd7c7f0173c2d06b3a4249a2ccaa94961469d1a522ca689bbf1a",
+      "size_bytes": 2151274846
+    },
+    {
+      "path": "sample/10BT/009_00000.parquet",
+      "sha256": "f836cd3c70b95776699eb6c356b2dbf702816e25dcf39992f5c80a29029d23c3",
+      "size_bytes": 2151913277
+    },
+    {
+      "path": "sample/10BT/010_00000.parquet",
+      "sha256": "e5a2eae25f057f0856a10bfae314c6ca8ea8bb08456d2131e9e89b2b8305e2f6",
+      "size_bytes": 2152798864
+    },
+    {
+      "path": "sample/10BT/011_00000.parquet",
+      "sha256": "db71cf0425bb3d1813a09f12ff1acd6dabdfb91a2e4f141960254ee5a7f036e7",
+      "size_bytes": 2152323681
+    },
+    {
+      "path": "sample/10BT/012_00000.parquet",
+      "sha256": "08b47a3e1c25161f796d2f8dbf99ccf60affdebdcea4910833d0d5783315551f",
+      "size_bytes": 2152069689
+    },
+    {
+      "path": "sample/10BT/013_00000.parquet",
+      "sha256": "b393f51fefab26cd6f4c8f65707c1924f6666c4961a0ebebe04bb57f7ec832de",
+      "size_bytes": 540632672
+    }
+  ],
+  "file_count": 14,
+  "total_size_bytes": 28518193415,
+  "manifest_sha256": "d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df"
+}
