@@ -396,6 +396,7 @@ class ManifestGenerator:
         manifest: ExperimentManifest,
         *,
         parent_checkpoint_resolver: ParentCheckpointResolver | None = None,
+        seal: bool = False,
     ) -> ArtifactRecord:
         """Publish after caller-owned writer quiescence and single-writer serialization.
 
@@ -403,6 +404,11 @@ class ManifestGenerator:
         publication. The orchestrator therefore owns quiescence and must not run
         concurrent terminal finalizers for the same attempt. The checks here are
         defensive consistency checks, not a cross-process uniqueness lock.
+
+        ``seal`` (opt-in, default False) atomically seals the attempt inside the
+        underlying store's publish critical section (review B1). The Milestone 0
+        smoke gate passes ``seal=True`` for its terminal manifest; ordinary Issue
+        #12 manifests leave it False so later review reports remain publishable.
         """
         if not _same_identity(manifest.identity, self._artifact_store.identity):
             raise ManifestBindingError("manifest identity does not match the ArtifactStore identity.")
@@ -434,6 +440,12 @@ class ManifestGenerator:
                 raise ManifestPublicationError(
                     "attempt already has a different terminal experiment manifest."
                 )
+            # B1 artifact-bound crash-recovery: complete the seal for this exact
+            # manifest artifact_id if this is the authorized terminal retry.
+            if seal:
+                self._artifact_store._complete_seal_with_artifact_binding(
+                    existing_record.artifact_id
+                )
             return _verify_manifest_artifact(
                 self._artifact_store,
                 existing_record,
@@ -457,6 +469,7 @@ class ManifestGenerator:
                 format_version=1,
                 producing_component="experiments",
                 parent=parent,
+                seal=seal,
             )
         except (ArtifactStoreError, OSError) as exc:
             raise ManifestPublicationError(f"manifest publication failed: {exc}") from exc

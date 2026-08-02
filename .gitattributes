@@ -1,0 +1,27 @@
+# Git attribute policy for ExpertForge.
+#
+# Some files are pinned by exact bytes (SHA-256) and MUST round-trip identically
+# across platforms regardless of the platform's native line endings. Force these
+# to be stored and checked out byte-for-byte (no CRLF/LF conversion):
+#
+# - the Milestone 0 smoke fixtures (corpus + tokenizer) — their SHA-256 digests
+#   enter the specification fingerprint and the manifest dataset/tokenizer
+#   references;
+# - the dedicated smoke-gate configuration — its bytes feed the source snapshot
+#   and canonical configuration digest.
+#
+# General source files are normalized as text with LF endings so diffs stay
+# clean. The pinned-fixture rules below come AFTER the general rules so they win
+# (gitattributes: a later, equally-or-more-specific match wins).
+
+* text=auto eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+
+# Byte-exact pinned files (override the general text rules above).
+tests/fixtures/smoke/smoke_corpus.txt -text
+tests/fixtures/smoke/tokenizer.json -text
+configs/m0-smoke-gate.yaml -text

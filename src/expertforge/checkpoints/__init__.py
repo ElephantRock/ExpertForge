@@ -31,6 +31,8 @@ from expertforge.checkpoints.encoder import (
     EncoderError,
     build_archive,
     encode_safe_value,
+    safe_value_from_native,
+    safe_value_to_native,
 )
 from expertforge.checkpoints.models import (
     CHECKPOINT_ARCHIVE_FORMAT_VERSION,
@@ -198,6 +200,8 @@ __all__ = [
     "ArchiveMembers",
     "build_archive",
     "encode_safe_value",
+    "safe_value_from_native",
+    "safe_value_to_native",
     # Store + restore
     "CheckpointArchive",
     "CheckpointStore",

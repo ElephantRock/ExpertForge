@@ -64,6 +64,7 @@ from expertforge.artifacts.registry import (
 )
 from expertforge.artifacts.store import (
     BLOCK_SIZE,
+    ArtifactSealedError,
     ArtifactStore,
     ArtifactStoreError,
     RegistryReconciliation,
@@ -88,6 +89,7 @@ __all__ = [
     "ArtifactFormat",
     "ArtifactNotFoundError",
     "ArtifactRecord",
+    "ArtifactSealedError",
     "ArtifactStore",
     "ArtifactStoreError",
     "EntryKind",

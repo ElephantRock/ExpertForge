@@ -1586,10 +1586,23 @@ class CheckpointManifest(_FrozenModel):
                 "scaler state component presence must match "
                 "compatibility.scaler_descriptor presence"
             )
-        # tensor_members sorted by member_name and indices contiguous from 0.
+        # tensor_members must appear in ascending index order with indices
+        # contiguous from 0. Member names are ``tensors/{idx}.bin``; the index is
+        # a decimal integer, so the ordering must be NUMERIC, not lexicographic
+        # (lexicographic order of unpadded integers is wrong for >= 11 members:
+        # ``tensors/10.bin`` would sort before ``tensors/2.bin``). The
+        # contiguous-from-0 check below is the authoritative invariant.
         names = [m.member_name for m in self.tensor_members]
-        if names != sorted(names):
-            raise ValueError("tensor_members must be sorted by member_name")
+        indices: list[int] = []
+        for name in names:
+            match = _TENSOR_MEMBER_NAME.fullmatch(name)
+            if match is None:
+                # _TensorMemberRef's own validator already enforces the pattern;
+                # be defensive here rather than crash on malformed input.
+                raise ValueError(f"tensor_members has malformed member_name {name!r}")
+            indices.append(int(name.removeprefix("tensors/").removesuffix(".bin")))
+        if indices != sorted(indices):
+            raise ValueError("tensor_members must be sorted by ascending member index")
         for i, name in enumerate(names):
             expected = f"tensors/{i}.bin"
             if name != expected:

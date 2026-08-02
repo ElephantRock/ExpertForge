@@ -1,0 +1,72 @@
+# Milestone 0 end-to-end smoke & recovery gate configuration (Issue #14).
+#
+# This is the dedicated gate configuration ratified by amendment 5152078541
+# (amendment A). It is NOT a reuse of configs/smoke.yaml (the Issue #5
+# configuration-substrate fixture), which explicitly states it is not a
+# training configuration.
+#
+# Every declared model dimension controls real behavior in the toy
+# expertforge.smoke model: token embedding, one causal self-attention block,
+# one ordinary (ReLU) feed-forward block, and an output projection. RoPE,
+# RMSNorm, SwiGLU, and a multi-layer topology are intentionally omitted — they
+# are not gate requirements (amendment B). This is an infrastructure gate toy
+# model, not a reusable training framework or D0 precursor.
+#
+# Dimensions, learning rate, and budgets are FROZEN before the designated
+# evidence run (review clarification 5152259715 #3 / amendment J). Any change
+# to the loss threshold after observing gate evidence requires a new explicit
+# design amendment and fresh evidence.
+#
+# Update-boundary semantics (review correction #4):
+#   tokens_per_update = training.batch_size * training.seq_len (= 2 * 8 = 16)
+#   N_updates         = training.tokens        / tokens_per_update (= 128 / 16 = 8)
+#   K_updates         = checkpointing.interval_tokens / tokens_per_update (= 32 / 16 = 2)
+#   0 < K_updates(2) < N_updates(8)
+
+format_version: 1
+
+run:
+  name: m0-smoke-gate
+  description: Milestone 0 end-to-end training, checkpoint, recovery, and exact-restoration gate (#14).
+
+data:
+  dataset_id: smoke-printable16-corpus-v1
+  split: train
+  seq_len: 8
+
+tokenizer:
+  tokenizer_id: smoke-printable16-v1
+  vocab_size: 16
+
+model:
+  dim: 16
+  n_layers: 1
+  n_heads: 1
+  ffn_dim: 32
+
+training:
+  seed: 7
+  determinism_mode: reproducible
+  unsupported_determinism: error
+  tokens: 128
+  batch_size: 2
+  seq_len: 8
+  lr: 0.1
+
+evaluation:
+  eval_interval_tokens: 64
+  loss_improvement_threshold: 0.1
+
+checkpointing:
+  interval_tokens: 32
+
+logging:
+  console_enabled: false
+  fsync_interval_records: 8
+
+artifacts:
+  dir: runs
+
+hardware:
+  device: cpu
+  dtype: fp32
