@@ -156,9 +156,7 @@ def validate_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
     )
     for model_name, size_bounds in model_specs:
         model = contract["models"][model_name]
-        layers = _require_exact_int(
-            model["layers"], f"models.{model_name}.layers", minimum=1
-        )
+        layers = _require_exact_int(model["layers"], f"models.{model_name}.layers", minimum=1)
         width = _require_exact_int(
             model["model_width"], f"models.{model_name}.model_width", minimum=1
         )
