@@ -22,7 +22,9 @@ The D0.0 proposal now freezes and validates:
   accepted by the existing version-1 `ExperimentManifest` model without
   publishing attempt evidence;
 - a declarative eleven-family tensor inventory whose generic shape expansion
-  agrees exactly with the independent closed-form counter and declared totals.
+  agrees exactly with the independent closed-form counter and declared totals;
+- an ordered eight-prompt generation set with raw and canonical SHA-256
+  identities and a deterministic zero-hit contamination protocol.
 
 No model implementation, data pipeline, production training loop,
 qualification run, or canonical run is authorized by this proposal.
@@ -73,6 +75,23 @@ parameters for qualification, and 110 tensor instances and 76,738,176
 parameters for canonical. Those values must equal the separate closed-form
 contract derivation and the declared model totals.
 
+## Generation prompts and contamination
+
+`experiments/d0/generation-prompts-v1.json` freezes eight ordered prompts,
+probe substrings, prompt/probe hashes, decoding settings, and exact comparison
+rules. The immutable identities are:
+
+| Identity | SHA-256 |
+|---|---|
+| Raw prompt manifest | `851934e4a49210b515967fad51308038dac1e7bc449774ca603f6bd9f47ccf3e` |
+| Canonical prompt payload | `c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51` |
+
+The contamination scan must cover every accepted normalized, deduplicated
+document before splitting and permits zero exact full-prompt, exact probe, or
+exact contiguous 64-code-point-window hits. D0.0 validates the scanner contract
+and fixtures only; the source-bound corpus scan is a mandatory D0.1 preflight
+and has not been executed.
+
 ## Closed ratification blockers
 
 1. `tokenizer_file_sha256_and_byte_sizes`
@@ -80,13 +99,13 @@ contract derivation and the declared model totals.
 3. `resolved_yaml_configs_accepted_by_existing_configuration_layer`
 4. `formal_experiment_definition_accepted_by_existing_manifest_contract`
 5. `independent_parameter_accounting_executable_and_tests`
+6. `committed_generation_prompts_and_contamination_checks`
 
 ## Remaining ratification blockers
 
-1. `committed_generation_prompts_and_contamination_checks`
-2. `contract_validation_command_and_CI_gate`
-3. `rendered_review_report`
-4. `PROJECT_STATE_synchronization`
+1. `contract_validation_command_and_CI_gate`
+2. `rendered_review_report`
+3. `PROJECT_STATE_synchronization`
 
 ## Validation commands
 
@@ -95,17 +114,19 @@ uv run python scripts/validate_d0_source_manifests.py
 uv run python scripts/validate_d0_config_binding.py
 uv run python scripts/validate_d0_experiment_definition.py
 uv run python scripts/validate_d0_parameter_inventory.py
+uv run python scripts/validate_d0_generation_prompts.py
 uv run python scripts/validate_d0_contract.py
 uv run pytest -q \
   tests/test_d0_source_manifests.py \
   tests/test_d0_config_binding.py \
   tests/test_d0_experiment_definition.py \
   tests/test_d0_parameter_inventory.py \
+  tests/test_d0_generation_prompts.py \
   tests/test_d0_contract_proposal.py
 ```
 
 ## Next dependency-ordered action
 
-Commit the fixed generation prompts and mechanically check their contamination
-status against the frozen dataset-source contract. Model implementation and
-training remain unauthorized.
+Create one permanent D0 contract-validation command and CI gate that executes
+all ratification validators as a single fail-closed unit. Model implementation,
+data processing, and training remain unauthorized.
