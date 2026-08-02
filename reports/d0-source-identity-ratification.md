@@ -3,14 +3,15 @@
 **Issue:** #42  
 **Parent:** #41  
 **PR:** #43  
-**Status:** D0.0 draft evidence; source-identity tranche implemented
+**Status:** D0.0 draft evidence; source-identity tranche complete
 
 ## Result
 
 The D0 proposal has content-addressed source identities for both selected
 upstream inputs. The tokenizer-file and dataset-source-manifest blockers are
-removed from the machine-readable contract. Six ratification blockers now
-remain after completion of the subsequent configuration-binding tranche.
+removed from the machine-readable contract. Subsequent tranches also closed the
+configuration, formal-experiment, independent parameter-accounting, and fixed
+prompt/contamination blockers. Three ratification blockers currently remain.
 
 No model, data pipeline, training loop, qualification run, or canonical run is
 authorized by this report.
@@ -73,6 +74,8 @@ The proposed contract records, for each source:
 
 The dataset revision in the contract is constrained to the exact sample-upload
 commit. The tokenizer contract remains pinned to its original immutable commit.
+The generation-prompt contract separately binds both source-manifest identities
+for the mandatory later contamination preflight.
 
 ## Offline validation
 
@@ -102,16 +105,13 @@ contract-binding drift, semantic edits, and the superseded dataset revision.
 1. `tokenizer_file_sha256_and_byte_sizes`
 2. `content_addressed_dataset_source_manifest`
 
-## Remaining blockers
+## Current remaining blockers
 
-1. `formal_experiment_definition_accepted_by_existing_manifest_contract`
-2. `independent_parameter_accounting_executable_and_tests`
-3. `committed_generation_prompts_and_contamination_checks`
-4. `contract_validation_command_and_CI_gate`
-5. `rendered_review_report`
-6. `PROJECT_STATE_synchronization`
+1. `contract_validation_command_and_CI_gate`
+2. `rendered_review_report`
+3. `PROJECT_STATE_synchronization`
 
 ## Next dependency-ordered action
 
-Bind the D0 question, hypothesis, control, metrics, thresholds, budgets, and
-replication/recovery policy into the existing experiment-manifest contract.
+Create one permanent D0 contract-validation command and CI gate. Model
+implementation, data processing, and training remain unauthorized.
