@@ -1,0 +1,118 @@
+{
+  "schema_version": "expertforge-d0-formal-experiment-definition/1",
+  "status": "prospective_not_executed",
+  "issue": 42,
+  "parent_issue": 41,
+  "pull_request": 43,
+  "manifest_contract": {
+    "schema": "expertforge.experiment-manifest",
+    "schema_version": 1,
+    "format_version": 1,
+    "classification": "formal_experiment",
+    "validation_fixture_status": "interrupted",
+    "validation_fixture_outcome_diagnostic": "handled_interruption",
+    "publication_authorized": false
+  },
+  "profiles": {
+    "qualification": {
+      "config_path": "configs/d0/qualification.yaml",
+      "fingerprint_path": "experiments/d0/qualification-fingerprint.json",
+      "specification_fingerprint": "spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe",
+      "hypothesis": "Training the frozen qualification model for 262144000 target tokens will improve fixed-validation loss by at least 0.50 natural-log nats relative to update zero while satisfying every declared stability, recovery, systems, checkpoint, and generation gate.",
+      "control": "The same frozen model at update zero under the identical specification fingerprint and fixed validation protocol.",
+      "fixed_constraints": [
+        "architecture=decoder_only_transformer",
+        "attention=exact_causal_multi_head_self_attention",
+        "batch.global_sequences_per_update=64",
+        "batch.target_tokens_per_update=65536",
+        "configuration.specification_fingerprint=spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe",
+        "dataset.manifest.sha256=d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df",
+        "evaluation.validation_target_tokens_per_boundary=8388608",
+        "model.model_id=d0-qualification-19m-v1",
+        "model.trainable_parameters=19685888",
+        "optimizer=AdamW(beta1=0.9,beta2=0.95,epsilon=1e-08,weight_decay=0.1,gradient_clip_global_l2_norm=1.0)",
+        "precision.parameter_and_compute_dtype=bfloat16",
+        "seeds.master_seed=2026080200",
+        "sequence.model_context_tokens=1024",
+        "sequence.processed_token_definition=non_padding_target_tokens_participating_in_training_loss",
+        "tokenizer.manifest.sha256=eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c",
+        "training.optimizer_updates=4000",
+        "training.target_tokens=262144000"
+      ],
+      "independent_variable": "optimizer_update_count_and_equivalent_accumulated_target_token_exposure",
+      "dependent_variables": [
+        "checkpoint_read_seconds",
+        "checkpoint_write_seconds",
+        "generation_completion",
+        "non_finite_event_count",
+        "peak_device_memory_fraction",
+        "peak_host_memory_fraction",
+        "perplexity",
+        "recovery_state_equality",
+        "skipped_optimizer_updates",
+        "throughput_target_tokens_per_second",
+        "validation_loss_nats"
+      ],
+      "minimum_useful_effect": "Final fixed-validation loss improves by at least 0.50 natural-log nats relative to update zero.",
+      "failure_threshold": "{\"common\":{\"maximum_checkpoint_read_seconds\":300,\"maximum_checkpoint_write_seconds\":300,\"maximum_peak_host_memory_fraction\":0.9,\"maximum_rejected_recovery_attempts_before_kill\":1,\"minimum_loss_improvement_at_quarter_budget_nats\":0.1},\"profile\":{\"maximum_peak_device_memory_fraction\":0.95,\"maximum_skipped_updates\":0,\"minimum_final_validation_loss_improvement_nats\":0.5,\"requires_exact_checkpoint_round_trip\":true,\"requires_locked_environment_resume_equality\":true}}",
+      "kill_criterion": "{\"any_checkpoint_or_resume_state_mismatch\":true,\"any_non_finite_value\":true,\"any_skipped_optimizer_update\":true,\"maximum_failed_recovery_attempts\":2,\"maximum_out_of_memory_failures_after_remediation\":1,\"minimum_loss_improvement_at_half_budget_nats\":0.1}",
+      "known_limitations": [
+        "This prospective definition is not a terminal attempt manifest.",
+        "Training seed variance is not claimed.",
+        "Validation uses synthetic interrupted identities and publishes no artifacts."
+      ],
+      "checkpoint_evidence_required": true,
+      "generated_output_evidence_required": true
+    },
+    "canonical": {
+      "config_path": "configs/d0/canonical.yaml",
+      "fingerprint_path": "experiments/d0/canonical-fingerprint.json",
+      "specification_fingerprint": "spec-v1-sha256-2167b1f07873c3aed6112c38c7de5cdcece6ac3b94d91acde2d605ec2decfb0b",
+      "hypothesis": "Training the frozen canonical model for 2097152000 target tokens will improve fixed-validation loss by at least 1.00 natural-log nats relative to update zero while satisfying every declared stability, recovery, systems, checkpoint, and generation gate.",
+      "control": "The same frozen model at update zero under the identical specification fingerprint and fixed validation protocol.",
+      "fixed_constraints": [
+        "architecture=decoder_only_transformer",
+        "attention=exact_causal_multi_head_self_attention",
+        "batch.global_sequences_per_update=64",
+        "batch.target_tokens_per_update=65536",
+        "configuration.specification_fingerprint=spec-v1-sha256-2167b1f07873c3aed6112c38c7de5cdcece6ac3b94d91acde2d605ec2decfb0b",
+        "dataset.manifest.sha256=d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df",
+        "evaluation.validation_target_tokens_per_boundary=8388608",
+        "model.model_id=d0-canonical-76m-v1",
+        "model.trainable_parameters=76738176",
+        "optimizer=AdamW(beta1=0.9,beta2=0.95,epsilon=1e-08,weight_decay=0.1,gradient_clip_global_l2_norm=1.0)",
+        "precision.parameter_and_compute_dtype=bfloat16",
+        "seeds.master_seed=2026080200",
+        "sequence.model_context_tokens=1024",
+        "sequence.processed_token_definition=non_padding_target_tokens_participating_in_training_loss",
+        "tokenizer.manifest.sha256=eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c",
+        "training.optimizer_updates=32000",
+        "training.target_tokens=2097152000"
+      ],
+      "independent_variable": "optimizer_update_count_and_equivalent_accumulated_target_token_exposure",
+      "dependent_variables": [
+        "checkpoint_read_seconds",
+        "checkpoint_write_seconds",
+        "generation_completion",
+        "non_finite_event_count",
+        "peak_device_memory_fraction",
+        "peak_host_memory_fraction",
+        "perplexity",
+        "recovery_state_equality",
+        "skipped_optimizer_updates",
+        "throughput_target_tokens_per_second",
+        "validation_loss_nats"
+      ],
+      "minimum_useful_effect": "Final fixed-validation loss improves by at least 1.00 natural-log nats relative to update zero.",
+      "failure_threshold": "{\"common\":{\"maximum_checkpoint_read_seconds\":300,\"maximum_checkpoint_write_seconds\":300,\"maximum_peak_host_memory_fraction\":0.9,\"maximum_rejected_recovery_attempts_before_kill\":1,\"minimum_loss_improvement_at_quarter_budget_nats\":0.1},\"profile\":{\"maximum_consecutive_regressing_validation_boundaries\":2,\"maximum_final_loss_above_best_prior_nats\":0.05,\"maximum_peak_device_memory_fraction\":0.95,\"maximum_skipped_updates\":0,\"minimum_final_to_initial_throughput_ratio\":0.8,\"minimum_final_validation_loss_improvement_nats\":1.0,\"regression_boundary_delta_nats\":0.1}}",
+      "kill_criterion": "{\"any_checkpoint_or_resume_state_mismatch\":true,\"any_non_finite_value\":true,\"any_skipped_optimizer_update\":true,\"maximum_failed_recovery_attempts\":2,\"maximum_out_of_memory_failures_after_remediation\":1,\"minimum_loss_improvement_at_half_budget_nats\":0.1}",
+      "known_limitations": [
+        "This prospective definition is not a terminal attempt manifest.",
+        "Training seed variance is not claimed.",
+        "Validation uses synthetic interrupted identities and publishes no artifacts."
+      ],
+      "checkpoint_evidence_required": true,
+      "generated_output_evidence_required": true
+    }
+  }
+}
