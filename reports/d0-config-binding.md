@@ -3,14 +3,19 @@
 **Issue:** #42  
 **Parent:** #41  
 **PR:** #43  
-**Status:** D0.0 draft evidence; configuration-binding tranche implemented
+**Status:** D0.0 draft evidence; configuration-binding tranche complete
 
 ## Result
 
-The qualification and canonical D0 configurations now resolve through the
-existing strict, frozen configuration layer. The additive `d0` section remains
-optional for legacy configurations and is excluded from canonical serialization
-when absent, preserving existing behavioral fingerprints.
+The qualification and canonical D0 configurations resolve through the existing
+strict, frozen configuration layer. The additive `d0` section remains optional
+for legacy configurations and is excluded from canonical serialization when
+absent, preserving existing behavioral fingerprints.
+
+CI run 192 passed the quality/fast tier, strict typing, portable CPU integration,
+locked smoke tier, and one-command interruption/recovery gate on the
+configuration-binding decision-record head. The machine-readable contract now
+closes the resolved-configuration blocker; six D0.0 blockers remain.
 
 No model implementation, data pipeline, qualification run, or canonical run is
 authorized by this report.
