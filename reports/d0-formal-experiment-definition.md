@@ -85,14 +85,19 @@ uv run pytest -q tests/test_d0_experiment_definition.py
 formal_experiment_definition_accepted_by_existing_manifest_contract
 ```
 
-The declarative tensor-inventory/parameter-accounting and fixed
-prompt/contamination blockers closed in subsequent tranches.
+The declarative parameter-accounting, fixed prompt/contamination, and permanent
+aggregate validation/CI-gate blockers closed in subsequent tranches.
 
 ## Current remaining dependency order
 
-1. permanent D0 contract validation command and CI gate;
-2. final rendered review report;
-3. `PROJECT_STATE.md` synchronization.
+1. final rendered review report;
+2. `PROJECT_STATE.md` synchronization.
+
+The permanent validation command is:
+
+```bash
+uv run --locked python -m scripts.validate_d0_ratification
+```
 
 No model implementation, data processing, qualification run, or canonical run
 is authorized.
