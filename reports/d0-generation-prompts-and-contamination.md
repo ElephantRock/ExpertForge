@@ -127,11 +127,19 @@ amendment rather than silent prompt replacement.
 committed_generation_prompts_and_contamination_checks
 ```
 
-## Remaining dependency order
+The permanent aggregate validation command and dedicated CI gate closed in the
+subsequent tranche.
 
-1. permanent D0 contract validation command and CI gate;
-2. final rendered review report;
-3. `PROJECT_STATE.md` synchronization.
+## Current remaining dependency order
+
+1. final rendered review report;
+2. `PROJECT_STATE.md` synchronization.
+
+The permanent validation command is:
+
+```bash
+uv run --locked python -m scripts.validate_d0_ratification
+```
 
 No model implementation, data processing, qualification run, or canonical run
 is authorized.
