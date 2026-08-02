@@ -12,10 +12,10 @@ strict, frozen configuration layer. The additive `d0` section remains optional
 for legacy configurations and is excluded from canonical serialization when
 absent, preserving existing behavioral fingerprints.
 
-CI run 192 passed the quality/fast tier, strict typing, portable CPU integration,
-locked smoke tier, and one-command interruption/recovery gate on the
-configuration-binding decision-record head. The machine-readable contract now
-closes the resolved-configuration blocker; six D0.0 blockers remain.
+CI run 200 passed the quality/fast tier, strict typing, portable CPU integration,
+locked smoke tier, and one-command interruption/recovery gate on the final
+configuration-binding head. The machine-readable contract closes the resolved
+configuration blocker.
 
 No model implementation, data pipeline, qualification run, or canonical run is
 authorized by this report.
@@ -70,17 +70,17 @@ uv run pytest -q tests/test_d0_config_binding.py
 
 `resolved_yaml_configs_accepted_by_existing_configuration_layer`
 
-## Remaining blockers
+## Current remaining blockers
 
-1. `formal_experiment_definition_accepted_by_existing_manifest_contract`
-2. `independent_parameter_accounting_executable_and_tests`
-3. `committed_generation_prompts_and_contamination_checks`
-4. `contract_validation_command_and_CI_gate`
-5. `rendered_review_report`
-6. `PROJECT_STATE_synchronization`
+1. `independent_parameter_accounting_executable_and_tests`
+2. `committed_generation_prompts_and_contamination_checks`
+3. `contract_validation_command_and_CI_gate`
+4. `rendered_review_report`
+5. `PROJECT_STATE_synchronization`
+
+The formal experiment-definition blocker closed in the subsequent tranche.
 
 ## Next dependency-ordered action
 
-Bind the D0 question, hypothesis, control, metrics, thresholds, budgets, and
-replication/recovery policy into the existing formal experiment-manifest
-contract. Declarative tensor inventory can proceed immediately afterward.
+Commit the declarative tensor inventory and independent executable parameter
+comparison. Model implementation remains unauthorized.
