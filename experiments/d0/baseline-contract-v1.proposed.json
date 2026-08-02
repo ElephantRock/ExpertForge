@@ -249,7 +249,6 @@
     }
   },
   "ratification_blockers": [
-    "formal_experiment_definition_accepted_by_existing_manifest_contract",
     "independent_parameter_accounting_executable_and_tests",
     "committed_generation_prompts_and_contamination_checks",
     "contract_validation_command_and_CI_gate",
