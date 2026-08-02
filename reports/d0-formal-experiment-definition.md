@@ -3,7 +3,7 @@
 **Issue:** #42  
 **Parent:** #41  
 **PR:** #43  
-**Status:** D0.0 draft evidence; formal-definition tranche implemented pending final synchronized CI
+**Status:** D0.0 draft evidence; formal-definition tranche complete
 
 ## Result
 
@@ -65,23 +65,24 @@ The validator rejects:
 - any disagreement with the existing configuration-binding validator;
 - any synthetic artifact or publication path.
 
-## Commands
+## Evidence
+
+CI run 212 passed on the implementation head, including formatting, Ruff,
+strict mypy, the complete fast CPU suite, portable CPU integration, the locked
+smoke tier, and the one-command interruption/recovery gate.
+
+Commands:
 
 ```bash
 uv run python scripts/validate_d0_experiment_definition.py
 uv run pytest -q tests/test_d0_experiment_definition.py
 ```
 
-## Blocker state
-
-The blocker
+## Closed blocker
 
 ```text
 formal_experiment_definition_accepted_by_existing_manifest_contract
 ```
-
-may close only after the complete repository CI, integration, locked smoke, and
-one-command interruption/recovery gates pass on the exact synchronized head.
 
 ## Remaining dependency order
 
