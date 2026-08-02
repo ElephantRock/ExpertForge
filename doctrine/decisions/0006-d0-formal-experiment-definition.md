@@ -107,16 +107,21 @@ existing field types.
 Rejected because their model identities, token budgets, schedules, minimum
 useful effects, failure thresholds, and specification fingerprints differ.
 
+## Evidence
+
+CI run 212 passed formatting, Ruff, strict mypy, the complete fast CPU suite,
+portable CPU integration, the locked smoke tier, and the one-command
+interruption/recovery gate on the formal-definition implementation head.
+
 ## Consequences
 
 - The D0 question and decision boundary are machine-readable before execution.
-- Both profiles can be validated against the production formal-manifest model
-  without creating run evidence.
+- Both profiles validate against the production formal-manifest model without
+  creating run evidence.
 - Any hypothesis, control, variable, constraint, threshold, source, config, or
   fingerprint drift fails validation.
-- The formal-experiment-definition blocker may close only after all repository
-  CI, integration, smoke, and recovery gates pass on the exact synchronized
-  head.
+- The formal-experiment-definition ratification blocker is closed.
+- Five D0.0 ratification blockers remain.
 - No model implementation, data processing, qualification run, or canonical run
   is authorized by this decision.
 
