@@ -262,7 +262,7 @@ def validate_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
     blockers = contract.get("ratification_blockers")
     if not isinstance(blockers, list):
         raise ContractValidationError("ratification_blockers must be a list")
-    _require(len(blockers) == 6, "proposal must enumerate six remaining blockers")
+    _require(len(blockers) == 5, "proposal must enumerate five remaining blockers")
     _require(len(set(blockers)) == len(blockers), "ratification blockers must be unique")
 
     return {
