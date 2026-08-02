@@ -108,9 +108,7 @@ def _expected_d0_payload(contract: Mapping[str, Any], profile: Profile) -> dict[
             ),
             "maximum_checkpoint_write_seconds": failure["maximum_checkpoint_write_seconds"],
             "maximum_checkpoint_read_seconds": failure["maximum_checkpoint_read_seconds"],
-            "maximum_peak_host_memory_fraction": failure[
-                "maximum_peak_host_memory_fraction"
-            ],
+            "maximum_peak_host_memory_fraction": failure["maximum_peak_host_memory_fraction"],
             "minimum_loss_improvement_at_quarter_budget_nats": failure[
                 "minimum_loss_improvement_at_quarter_budget_nats"
             ],
@@ -177,8 +175,7 @@ def _validate_core_binding(
         f"{profile}: data.seq_len mismatch",
     )
     _require(
-        config.tokenizer.tokenizer_id
-        == f"{tokenizer['repository']}@{tokenizer['revision']}",
+        config.tokenizer.tokenizer_id == f"{tokenizer['repository']}@{tokenizer['revision']}",
         f"{profile}: tokenizer.tokenizer_id mismatch",
     )
     _require(
