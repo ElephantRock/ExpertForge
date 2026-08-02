@@ -2,118 +2,83 @@
 
 **Issue:** #42  
 **Parent:** #41  
-**Status:** proposal under review; not ratified  
-**Branch:** `local/42-d0-baseline-contract`
+**PR:** #43  
+**Status:** Proposed, not ratified
 
-## Review objective
+## Current evidence state
 
-Convert the architecturally fixed D0 baseline into exact candidate dimensions, token accounting, optimization, data/tokenizer identities, precision bounds, evaluation procedures, and mechanically decidable acceptance/failure/kill rules before implementation work begins.
+The D0.0 proposal now freezes and validates:
 
-## Proposed model configurations
+- exact dense-baseline architecture, model sizes, parameter formula, batch,
+  schedules, precision, evaluation, acceptance, failure, and kill semantics;
+- content-addressed GPT-NeoX tokenizer and FineWeb-Edu `sample-10BT` source
+  manifests;
+- exact qualification and canonical YAML configurations accepted by the existing
+  strict configuration resolver;
+- stable, distinct specification fingerprints bound to the dataset and tokenizer
+  manifest digests;
+- backward compatibility for existing format-version-1 configurations.
 
-| Configuration | Layers | Width | Heads | Head dim | SwiGLU width | Parameters |
+No model implementation, data pipeline, production training loop,
+qualification run, or canonical run is authorized by this proposal.
+
+## Frozen model profiles
+
+| Profile | Layers | Width | Heads | Head dim | SwiGLU width | Parameters |
 |---|---:|---:|---:|---:|---:|---:|
 | Qualification | 8 | 256 | 4 | 64 | 768 | 19,685,888 |
 | Canonical | 12 | 576 | 9 | 64 | 1,536 | 76,738,176 |
 
-Parameter accounting is independent of future model code:
+## Source identities
 
-```text
-V*d + L*(4*d^2 + 3*d*f + 2*d) + d
-```
+| Input | Revision | Files | Bytes | Manifest SHA-256 |
+|---|---|---:|---:|---|
+| GPT-NeoX tokenizer | `364ae95407723fadd1d47b023c1efb92a4d891c3` | 5 | 3,647,931 | `eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c` |
+| FineWeb-Edu `sample-10BT` | `84e8104e779e409e2267ac60609138e3dda2cbd2` | 14 | 28,518,193,415 | `d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df` |
 
-The count assumes tied token embedding/output weights, no biases, two RMSNorm vectors per block, one final RMSNorm vector, and no trainable RoPE parameters.
+The earlier FineWeb-Edu revision in the initial proposal is superseded because
+it predates the selected sample inventory.
 
-## Proposed token and update budgets
+## Configuration identities
 
-```text
-context target tokens/sequence  = 1,024
-devices                         = 1
-microbatch sequences/device     = 4
-gradient accumulation steps     = 16
-global sequences/update         = 64
-target tokens/update            = 65,536
-```
+| Profile | Canonical config SHA-256 | Specification fingerprint |
+|---|---|---|
+| Qualification | `4e1bdd0ad30bf8b2e1b61f83ff9e387acdab1c0e0d1cb975e7627db95273a960` | `spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe` |
+| Canonical | `fbc699757b91ad0883fc4d30295a938df86d60f784a9fb91fb39385bbe3e6a4e` | `spec-v1-sha256-2167b1f07873c3aed6112c38c7de5cdcece6ac3b94d91acde2d605ec2decfb0b` |
 
-| Configuration | Target-token budget | Optimizer updates | Warmup updates |
-|---|---:|---:|---:|
-| Qualification | 262,144,000 | 4,000 | 200 |
-| Canonical | 2,097,152,000 | 32,000 | 1,600 |
+Both fingerprints include `dataset.manifest` and `tokenizer.manifest` as
+immutable inputs. Existing `configs/smoke.yaml` retains canonical SHA-256
+`f6cf719aab809aaaf0d59b79cfba15bda7138c9138089bc7bbd4495cca087217`.
 
-“Processed tokens” means target tokens participating in training loss. Validation, generation, profiling warmup, and input-only lookback tokens are excluded.
+## Closed ratification blockers
 
-## Proposed immutable external identities
+1. `tokenizer_file_sha256_and_byte_sizes`
+2. `content_addressed_dataset_source_manifest`
+3. `resolved_yaml_configs_accepted_by_existing_configuration_layer`
 
-### Dataset
+## Remaining ratification blockers
 
-- `HuggingFaceFW/fineweb-edu`
-- revision `21974026070c0d94eb843d8eba56d02550f4c0b5`
-- configuration `sample-10BT`
-- ODC-By 1.0 upstream declaration
-- deterministic normalization, exact-text deduplication, split, ordering, and document-termination rules are specified in Decision Record 0003.
+1. `formal_experiment_definition_accepted_by_existing_manifest_contract`
+2. `independent_parameter_accounting_executable_and_tests`
+3. `committed_generation_prompts_and_contamination_checks`
+4. `contract_validation_command_and_CI_gate`
+5. `rendered_review_report`
+6. `PROJECT_STATE_synchronization`
 
-### Tokenizer
-
-- `EleutherAI/gpt-neox-20b`
-- tokenizer commit `364ae95407723fadd1d47b023c1efb92a4d891c3`
-- byte-level BPE, 50,257 tokens
-- token ID 0 is BOS/EOS/UNK and the packed-stream document terminator
-- `add_prefix_space = false`
-
-Repository-local byte sizes and SHA-256 values for all tokenizer files remain a ratification blocker. Mutable `main` references are not accepted.
-
-## Proposed optimizer and precision policy
-
-- AdamW, betas 0.9/0.95, epsilon 1e-8.
-- Weight decay 0.1 on attention and SwiGLU matrix weights only.
-- Global gradient clipping at L2 norm 1.0.
-- BF16 primary compute, FP32 master parameters, optimizer state, gradient accumulation, and loss reduction.
-- Canonical D0 fails closed without native BF16.
-- Qualification may use FP32 only as distinct, non-equivalent fallback evidence.
-- FP16 is not authorized.
-
-## Proposed acceptance boundary
-
-Qualification requires at least 0.50 nat validation-loss improvement, zero skipped updates, no non-finite state, exact checkpoint round-trip, locked-environment uninterrupted/resumed equality, complete generation, and full systems reporting.
-
-Canonical requires at least 1.00 nat improvement, no material late loss regression, final-window throughput at least 80% of the initial steady-state window, all qualification conditions, and a complete terminal evidence chain.
-
-Any non-finite value, skipped optimizer update, checkpoint/resume state mismatch, repeated recovery failure, or failure to achieve 0.10 nat improvement by half-budget kills the active configuration and requires an amendment.
-
-## Validation command
+## Validation commands
 
 ```bash
+uv run python scripts/validate_d0_source_manifests.py
+uv run python scripts/validate_d0_config_binding.py
 uv run python scripts/validate_d0_contract.py
-uv run pytest -q tests/test_d0_contract_proposal.py
+uv run pytest -q \
+  tests/test_d0_source_manifests.py \
+  tests/test_d0_config_binding.py \
+  tests/test_d0_contract_proposal.py
 ```
 
-The independent validator checks:
+## Next dependency-ordered action
 
-- frozen architecture values;
-- immutable 40-character lowercase revision identities;
-- head geometry;
-- SwiGLU rounding;
-- exact parameter totals;
-- batch and target-token arithmetic;
-- token-budget/update alignment;
-- finite and ordered learning rates;
-- rejection of approximate placeholder language;
-- explicit ratification blockers.
-
-## Ratification blockers
-
-This draft does not close #42. Remaining required work:
-
-1. tokenizer file hashes and sizes;
-2. content-addressed dataset source manifest;
-3. formal experiment definition accepted by existing manifest contracts;
-4. backward-compatible resolved-configuration schema and two valid YAML configs;
-5. independently instantiated parameter-count comparison;
-6. generation prompts and contamination checks;
-7. permanent CI integration;
-8. final rendered report;
-9. `PROJECT_STATE.md` synchronization.
-
-## Claim boundary
-
-The proposal is a reviewable candidate contract. It does not authorize model implementation or training, and it does not claim that the selected data, hyperparameters, resource envelope, or thresholds will succeed. D0.1 and D0.2 remain blocked until #42 is ratified.
+Bind the D0 question, hypothesis, control, metrics, thresholds, budgets, and
+replication/recovery policy into the existing formal experiment-manifest
+contract. The declarative tensor inventory follows that binding.
