@@ -70,17 +70,18 @@ uv run pytest -q tests/test_d0_config_binding.py
 
 `resolved_yaml_configs_accepted_by_existing_configuration_layer`
 
+The formal experiment-definition and independent parameter-accounting blockers
+closed in subsequent tranches.
+
 ## Current remaining blockers
 
-1. `independent_parameter_accounting_executable_and_tests`
-2. `committed_generation_prompts_and_contamination_checks`
-3. `contract_validation_command_and_CI_gate`
-4. `rendered_review_report`
-5. `PROJECT_STATE_synchronization`
-
-The formal experiment-definition blocker closed in the subsequent tranche.
+1. `committed_generation_prompts_and_contamination_checks`
+2. `contract_validation_command_and_CI_gate`
+3. `rendered_review_report`
+4. `PROJECT_STATE_synchronization`
 
 ## Next dependency-ordered action
 
-Commit the declarative tensor inventory and independent executable parameter
-comparison. Model implementation remains unauthorized.
+Commit the fixed generation prompts and mechanically check their contamination
+status against the frozen dataset-source contract. Model implementation remains
+unauthorized.
