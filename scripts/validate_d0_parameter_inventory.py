@@ -156,7 +156,11 @@ def _resolve_factor(
         return _require_exact_int(value, field, minimum=1)
     if isinstance(value, str):
         _require(value in dimensions, f"{field} references unknown dimension {value!r}")
-        return dimensions[value]
+        return _require_exact_int(
+            dimensions[value],
+            f"{field} resolved dimension {value!r}",
+            minimum=1,
+        )
     raise ContractValidationError(f"{field} must be an integer or dimension symbol")
 
 
