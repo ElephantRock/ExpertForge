@@ -67,11 +67,10 @@ The validator rejects:
 
 ## Evidence
 
-CI run 212 passed on the implementation head. Final synchronized CI run 219
-passed on exact head `a57635671661ff091f7fe5b9b69fb43901b47f38`, including
-formatting, Ruff, strict mypy, the complete fast CPU suite, portable CPU
-integration, the locked smoke tier, and the one-command interruption/recovery
-gate.
+CI run 222 passed on exact head `a0b616d0b198345a0c0645ad8d609340967b6172`,
+including formatting, Ruff, strict mypy, the complete fast CPU suite, portable
+CPU integration, the locked smoke tier, and the one-command
+interruption/recovery gate.
 
 Commands:
 
@@ -86,13 +85,15 @@ uv run pytest -q tests/test_d0_experiment_definition.py
 formal_experiment_definition_accepted_by_existing_manifest_contract
 ```
 
-## Remaining dependency order
+The declarative tensor-inventory and independent parameter-accounting blocker
+closed in the subsequent tranche.
 
-1. declarative tensor inventory and independent executable parameter comparison;
-2. committed generation prompts and contamination checks;
-3. permanent D0 contract validation command and CI gate;
-4. final rendered review report;
-5. `PROJECT_STATE.md` synchronization.
+## Current remaining dependency order
+
+1. committed generation prompts and contamination checks;
+2. permanent D0 contract validation command and CI gate;
+3. final rendered review report;
+4. `PROJECT_STATE.md` synchronization.
 
 No model implementation, data processing, qualification run, or canonical run
 is authorized.
