@@ -156,7 +156,7 @@ def test_prompt_text_hash_drift_is_rejected() -> None:
 def test_short_probe_is_rejected() -> None:
     manifest, raw = _manifest()
     prompt = manifest["prompts"][0]
-    prompt["contamination_probe_text"] = prompt["text"][:32]
+    prompt["contamination_probe_text"] = prompt["text"][:32].rstrip()
     prompt["contamination_probe_sha256"] = hashlib.sha256(
         prompt["contamination_probe_text"].encode("utf-8")
     ).hexdigest()
