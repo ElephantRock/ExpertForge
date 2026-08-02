@@ -98,6 +98,9 @@ passed formatting, Ruff, strict mypy, the complete fast CPU suite, portable CPU
 integration, the locked smoke tier, and the one-command interruption/recovery
 gate on exact head `bee4fa55904bc6dc1ea0dd983f43f0e59c3fe723`.
 
+The documentation-inclusive head `ea5316b3b4fa1eb10e3c795ac389d02131ced832`
+subsequently passed the same complete gate set in CI run 260.
+
 ## Evidence boundary
 
 The validator report explicitly states:
