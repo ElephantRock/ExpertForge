@@ -31,8 +31,8 @@ from scripts.validate_d0_config_binding import (
     CONTRACT_PATH,
     FINGERPRINT_PATHS,
     ROOT,
-    validate_all as validate_config_bindings,
 )
+from scripts.validate_d0_config_binding import validate_all as validate_config_bindings
 from scripts.validate_d0_source_manifests import ContractValidationError, load_json_object
 
 DEFINITION_PATH = ROOT / "experiments/d0/formal-experiment-definition-v1.json"
