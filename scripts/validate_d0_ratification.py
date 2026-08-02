@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from scripts.validate_d0_config_binding import ROOT, validate_all as validate_config_bindings
+from scripts.validate_d0_config_binding import ROOT
+from scripts.validate_d0_config_binding import validate_all as validate_config_bindings
 from scripts.validate_d0_contract import validate_contract
 from scripts.validate_d0_experiment_definition import validate_all as validate_experiment_definition
 from scripts.validate_d0_generation_prompts import (
