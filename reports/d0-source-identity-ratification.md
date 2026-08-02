@@ -10,8 +10,9 @@
 The D0 proposal has content-addressed source identities for both selected
 upstream inputs. The tokenizer-file and dataset-source-manifest blockers are
 removed from the machine-readable contract. Subsequent tranches also closed the
-configuration, formal-experiment, independent parameter-accounting, and fixed
-prompt/contamination blockers. Three ratification blockers currently remain.
+configuration, formal-experiment, independent parameter-accounting, fixed
+prompt/contamination, and permanent aggregate validation/CI-gate blockers. Two
+ratification blockers currently remain.
 
 No model, data pipeline, training loop, qualification run, or canonical run is
 authorized by this report.
@@ -107,11 +108,15 @@ contract-binding drift, semantic edits, and the superseded dataset revision.
 
 ## Current remaining blockers
 
-1. `contract_validation_command_and_CI_gate`
-2. `rendered_review_report`
-3. `PROJECT_STATE_synchronization`
+1. `rendered_review_report`
+2. `PROJECT_STATE_synchronization`
 
 ## Next dependency-ordered action
 
-Create one permanent D0 contract-validation command and CI gate. Model
-implementation, data processing, and training remain unauthorized.
+Render the final D0.0 review report. The permanent validation command is:
+
+```bash
+uv run --locked python -m scripts.validate_d0_ratification
+```
+
+Model implementation, data processing, and training remain unauthorized.
