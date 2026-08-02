@@ -138,7 +138,7 @@ def test_permanent_command_succeeds(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_ci_invokes_exact_permanent_gate_command() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    command = "uv run --locked python scripts/validate_d0_ratification.py > /dev/null"
+    command = "uv run --locked python -m scripts.validate_d0_ratification > /dev/null"
 
     assert "- name: Validate D0 ratification bundle" in workflow
     assert workflow.count(command) == 1
