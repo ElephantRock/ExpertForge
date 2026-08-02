@@ -120,6 +120,11 @@ Regression tests additionally require that YAML key ordering does not affect the
 fingerprint, meaningful configuration or immutable-input changes do affect it,
 and the legacy smoke canonical digest remains unchanged.
 
+CI run 192 passed formatting, Ruff, strict mypy, the full fast CPU suite,
+portable CPU integration, the locked smoke tier, and the one-command
+interruption/recovery gate on the exact configuration-binding decision-record
+head.
+
 ## Alternatives rejected
 
 ### Add all D0 fields to existing sections
@@ -153,8 +158,8 @@ specification fingerprint.
   no D0 section is present.
 - Any material D0 configuration or source-manifest change produces a new
   specification fingerprint.
-- The resolved-configuration ratification blocker may close only after all
-  repository CI, integration, smoke, and recovery gates pass on the exact head.
+- The resolved-configuration ratification blocker is closed; six D0.0 blockers
+  remain.
 - No model implementation, qualification run, or canonical run is authorized by
   this decision.
 
