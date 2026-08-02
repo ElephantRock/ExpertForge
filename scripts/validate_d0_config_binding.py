@@ -253,8 +253,9 @@ def validate_profile(
     _require(actual == expected, f"{profile}: resolved D0 section disagrees with contract")
     _validate_core_binding(envelope.config, contract, profile)
 
-    fingerprint_value = load_json_object(resolved_fingerprint_path)
-    record = SpecificationFingerprintRecord.model_validate(fingerprint_value)
+    record = SpecificationFingerprintRecord.model_validate_json(
+        resolved_fingerprint_path.read_text(encoding="utf-8")
+    )
     inputs = _immutable_inputs(envelope.config)
     verify_fingerprint(record, canonical_bytes(envelope), inputs)
 
