@@ -55,9 +55,10 @@ def test_both_d0_profiles_validate() -> None:
     report = validate_all()
 
     assert set(report) == {"qualification", "canonical"}
-    assert report["qualification"]["specification_fingerprint"] == EXPECTED_FINGERPRINTS[
-        "qualification"
-    ]
+    assert (
+        report["qualification"]["specification_fingerprint"]
+        == EXPECTED_FINGERPRINTS["qualification"]
+    )
     assert report["canonical"]["specification_fingerprint"] == EXPECTED_FINGERPRINTS["canonical"]
 
 
@@ -69,7 +70,9 @@ def test_committed_fingerprint_records_are_self_consistent() -> None:
 
 
 def test_legacy_smoke_canonical_bytes_are_unchanged() -> None:
-    digest = hashlib.sha256(canonical_bytes(resolve_config(ROOT / "configs/smoke.yaml"))).hexdigest()
+    digest = hashlib.sha256(
+        canonical_bytes(resolve_config(ROOT / "configs/smoke.yaml"))
+    ).hexdigest()
     assert digest == LEGACY_SMOKE_CANONICAL_SHA256
 
 
