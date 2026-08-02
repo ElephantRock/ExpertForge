@@ -64,7 +64,9 @@ def test_both_d0_profiles_validate() -> None:
 
 def test_committed_fingerprint_records_are_self_consistent() -> None:
     for profile, path in FINGERPRINT_PATHS.items():
-        record = SpecificationFingerprintRecord.model_validate(load_json_object(path))
+        record = SpecificationFingerprintRecord.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
         record.verify_digest()
         assert record.digest_str == EXPECTED_FINGERPRINTS[profile]
 
