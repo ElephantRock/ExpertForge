@@ -53,7 +53,9 @@ def test_proposed_contract_validates() -> None:
     assert report["models"]["canonical"]["derived_parameters"] == 76_738_176
     assert report["schedules"]["qualification"]["derived_updates"] == 4_000
     assert report["schedules"]["canonical"]["derived_updates"] == 32_000
-    assert report["ratification_blocker_count"] == 9
+    assert report["source_manifests"]["tokenizer"]["file_count"] == 5
+    assert report["source_manifests"]["dataset"]["file_count"] == 14
+    assert report["ratification_blocker_count"] == 7
 
 
 def test_parameter_drift_is_rejected() -> None:
