@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from scripts.validate_d0_contract import (
-    CONTRACT_PATH,
     ContractValidationError,
+    CONTRACT_PATH,
     load_contract,
     parameter_count,
     swiglu_width,
