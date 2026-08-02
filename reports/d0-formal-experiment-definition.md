@@ -67,9 +67,11 @@ The validator rejects:
 
 ## Evidence
 
-CI run 212 passed on the implementation head, including formatting, Ruff,
-strict mypy, the complete fast CPU suite, portable CPU integration, the locked
-smoke tier, and the one-command interruption/recovery gate.
+CI run 212 passed on the implementation head. Final synchronized CI run 219
+passed on exact head `a57635671661ff091f7fe5b9b69fb43901b47f38`, including
+formatting, Ruff, strict mypy, the complete fast CPU suite, portable CPU
+integration, the locked smoke tier, and the one-command interruption/recovery
+gate.
 
 Commands:
 
