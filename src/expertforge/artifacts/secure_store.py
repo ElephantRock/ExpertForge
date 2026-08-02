@@ -45,9 +45,7 @@ def _validate_intent_bytes(raw: bytes) -> str:
     if not text:
         raise ArtifactStoreError("sealing intent marker is blank (corrupt)")
     if not ARTIFACT_ID_PATTERN.fullmatch(text):
-        raise ArtifactStoreError(
-            f"sealing intent marker contains an invalid artifact_id {text!r}"
-        )
+        raise ArtifactStoreError(f"sealing intent marker contains an invalid artifact_id {text!r}")
     return text
 
 
@@ -155,9 +153,7 @@ class ArtifactStore(_ArtifactStore):
                     "sealing intent marker was replaced between lstat and open"
                 )
             if _file_identity(after_st, source="post-open path") != fd_identity:
-                raise ArtifactStoreError(
-                    "sealing intent marker changed after open"
-                )
+                raise ArtifactStoreError("sealing intent marker changed after open")
             try:
                 raw = os.read(fd, _MAX_SEALING_INTENT_BYTES + 1)
             except OSError as exc:
