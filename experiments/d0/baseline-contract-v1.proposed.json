@@ -249,7 +249,6 @@
     }
   },
   "ratification_blockers": [
-    "independent_parameter_accounting_executable_and_tests",
     "committed_generation_prompts_and_contamination_checks",
     "contract_validation_command_and_CI_gate",
     "rendered_review_report",
