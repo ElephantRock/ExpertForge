@@ -10,9 +10,9 @@ import pytest
 from expertforge.identity.fingerprint import SpecificationFingerprintRecord
 from scripts.validate_d0_config_binding import FINGERPRINT_PATHS
 from scripts.validate_d0_experiment_definition import (
+    _EXPECTED_MISSING,
     DEFINITION_PATH,
     Profile,
-    _EXPECTED_MISSING,
     build_validation_manifest,
     validate_all,
     validate_definition,
