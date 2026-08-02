@@ -35,11 +35,13 @@
       "tokenizer_config.json",
       "special_tokens_map.json"
     ],
-    "ratification_requires_local_file_digests": true
+    "ratification_requires_local_file_digests": false,
+    "source_manifest_path": "tokenizers/manifests/d0-gpt-neox-v1.json",
+    "source_manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
   },
   "dataset": {
     "repository": "HuggingFaceFW/fineweb-edu",
-    "revision": "21974026070c0d94eb843d8eba56d02550f4c0b5",
+    "revision": "84e8104e779e409e2267ac60609138e3dda2cbd2",
     "configuration": "sample-10BT",
     "license_declaration": "ODC-By-1.0",
     "consumed_fields": [
@@ -68,7 +70,9 @@
     },
     "training_order": "ascending sha256('expertforge-d0-order-v1\\0' || uint64_be(epoch) || uint64_be(data_seed) || utf8(document_id)), then document_id",
     "validation_order": "ascending sha256('expertforge-d0-validation-v1\\0' || utf8(document_id)), then document_id",
-    "ratification_requires_local_source_manifest": true
+    "ratification_requires_local_source_manifest": false,
+    "source_manifest_path": "data/manifests/d0-fineweb-edu-sample-10bt-source-v1.json",
+    "source_manifest_sha256": "d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df"
   },
   "sequence_semantics": {
     "model_context_tokens": 1024,
@@ -144,7 +148,7 @@
     "qualification": {
       "peak_learning_rate": 0.0006,
       "warmup_updates": 200,
-      "final_learning_rate": 0.00006,
+      "final_learning_rate": 6e-05,
       "decay": "cosine",
       "training_target_tokens": 262144000,
       "optimizer_updates": 4000,
@@ -156,7 +160,7 @@
     "canonical": {
       "peak_learning_rate": 0.0004,
       "warmup_updates": 1600,
-      "final_learning_rate": 0.00004,
+      "final_learning_rate": 4e-05,
       "decay": "cosine",
       "training_target_tokens": 2097152000,
       "optimizer_updates": 32000,
@@ -245,8 +249,6 @@
     }
   },
   "ratification_blockers": [
-    "tokenizer_file_sha256_and_byte_sizes",
-    "content_addressed_dataset_source_manifest",
     "formal_experiment_definition_accepted_by_existing_manifest_contract",
     "resolved_yaml_configs_accepted_by_existing_configuration_layer",
     "independent_parameter_accounting_executable_and_tests",
