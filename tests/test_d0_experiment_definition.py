@@ -24,7 +24,7 @@ _PROFILES: tuple[Profile, ...] = ("qualification", "canonical")
 
 
 def _definition() -> dict[str, Any]:
-    return copy.deepcopy(load_json_object(DEFINITION_PATH))
+    return copy.deepcopy(dict(load_json_object(DEFINITION_PATH)))
 
 
 def _fingerprint(profile: Profile) -> SpecificationFingerprintRecord:
