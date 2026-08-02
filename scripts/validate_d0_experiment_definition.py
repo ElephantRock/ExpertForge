@@ -312,7 +312,7 @@ def build_validation_manifest(
         training_budget=TrainingBudget(
             token_budget=config.training.tokens,
             batch_size=config.training.batch_size,
-            seq_len=config.training.seq_len,
+            seq_len=config.d0.sequence.model_context_tokens,
             learning_rate=config.training.lr,
             seed=config.training.seed,
             accumulation_factor=config.d0.batch.gradient_accumulation_steps,
