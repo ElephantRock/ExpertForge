@@ -201,6 +201,12 @@
     "validation_loss_units": "natural_log_nats",
     "perplexity": "exp(validation_loss)",
     "generation_prompt_count": 8,
+    "generation_prompt_manifest_path": "experiments/d0/generation-prompts-v1.json",
+    "generation_prompt_manifest_sha256": "851934e4a49210b515967fad51308038dac1e7bc449774ca603f6bd9f47ccf3e",
+    "generation_prompt_payload_sha256": "c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51",
+    "generation_contamination_corpus_scope": "all_accepted_normalized_deduplicated_documents_before_split",
+    "generation_contamination_partial_window_codepoints": 64,
+    "generation_contamination_maximum_allowed_hits": 0,
     "generation_max_new_tokens": 128,
     "generation_temperature": 0.8,
     "generation_top_p": 0.95,
@@ -249,7 +255,6 @@
     }
   },
   "ratification_blockers": [
-    "committed_generation_prompts_and_contamination_checks",
     "contract_validation_command_and_CI_gate",
     "rendered_review_report",
     "PROJECT_STATE_synchronization"
