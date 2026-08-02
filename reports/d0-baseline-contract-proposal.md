@@ -24,7 +24,9 @@ The D0.0 proposal now freezes and validates:
 - a declarative eleven-family tensor inventory whose generic shape expansion
   agrees exactly with the independent closed-form counter and declared totals;
 - an ordered eight-prompt generation set with raw and canonical SHA-256
-  identities and a deterministic zero-hit contamination protocol.
+  identities and a deterministic zero-hit contamination protocol;
+- one permanent fail-closed ratification command, deterministic validator-report
+  identities, and a dedicated CI step covering all six authoritative validators.
 
 No model implementation, data pipeline, production training loop,
 qualification run, or canonical run is authorized by this proposal.
@@ -92,6 +94,23 @@ exact contiguous 64-code-point-window hits. D0.0 validates the scanner contract
 and fixtures only; the source-bound corpus scan is a mandatory D0.1 preflight
 and has not been executed.
 
+## Permanent ratification gate
+
+The authoritative command is:
+
+```bash
+uv run --locked python -m scripts.validate_d0_ratification
+```
+
+It executes the baseline contract, source manifests, configuration bindings,
+formal experiment definition, parameter inventory, and generation prompt and
+contamination validators in an immutable order. Each canonical report is hashed
+and the ordered report-digest inventory receives an aggregate SHA-256.
+
+CI invokes the command in a dedicated `Validate D0 ratification bundle` step
+after strict typing and before the full fast suite. Integration and smoke jobs
+cannot start if the aggregate gate fails.
+
 ## Closed ratification blockers
 
 1. `tokenizer_file_sha256_and_byte_sizes`
@@ -100,33 +119,26 @@ and has not been executed.
 4. `formal_experiment_definition_accepted_by_existing_manifest_contract`
 5. `independent_parameter_accounting_executable_and_tests`
 6. `committed_generation_prompts_and_contamination_checks`
+7. `contract_validation_command_and_CI_gate`
 
 ## Remaining ratification blockers
 
-1. `contract_validation_command_and_CI_gate`
-2. `rendered_review_report`
-3. `PROJECT_STATE_synchronization`
+1. `rendered_review_report`
+2. `PROJECT_STATE_synchronization`
 
-## Validation commands
+## Validation command
 
 ```bash
-uv run python scripts/validate_d0_source_manifests.py
-uv run python scripts/validate_d0_config_binding.py
-uv run python scripts/validate_d0_experiment_definition.py
-uv run python scripts/validate_d0_parameter_inventory.py
-uv run python scripts/validate_d0_generation_prompts.py
-uv run python scripts/validate_d0_contract.py
-uv run pytest -q \
-  tests/test_d0_source_manifests.py \
-  tests/test_d0_config_binding.py \
-  tests/test_d0_experiment_definition.py \
-  tests/test_d0_parameter_inventory.py \
-  tests/test_d0_generation_prompts.py \
-  tests/test_d0_contract_proposal.py
+uv run --locked python -m scripts.validate_d0_ratification
 ```
+
+CI run 272 passed the implementation head
+`187c1dc6ea0aafda91999b8d5bda8f94943fd09e`, including the dedicated aggregate
+D0 gate, complete fast and CPU integration suites, locked smoke tier, and the
+one-command interruption and recovery gate.
 
 ## Next dependency-ordered action
 
-Create one permanent D0 contract-validation command and CI gate that executes
-all ratification validators as a single fail-closed unit. Model implementation,
-data processing, and training remain unauthorized.
+Render the final D0.0 review report from the committed machine-readable contract
+and ratification evidence. Model implementation, data processing, and training
+remain unauthorized.
