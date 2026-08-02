@@ -24,9 +24,7 @@ _PROFILES: tuple[Profile, ...] = ("qualification", "canonical")
 
 _EXPECTED_COUNTING_SEMANTICS = {
     "counted_quantity": "trainable_parameter_elements",
-    "tensor_instance_definition": (
-        "distinct_parameter_tensors_after_layer_multiplicity_expansion"
-    ),
+    "tensor_instance_definition": ("distinct_parameter_tensors_after_layer_multiplicity_expansion"),
     "shape_rule": "product_of_resolved_positive_integer_dimensions",
     "multiplicity_rule": "positive_integer_or_profile_dimension_symbol",
     "aliases_counted_once": True,
@@ -312,7 +310,9 @@ def _validate_zero_components(inventory: Mapping[str, Any]) -> None:
             f"{expected_name} must remain zero",
         )
         reason = component["reason"]
-        _require(isinstance(reason, str) and bool(reason.strip()), f"{expected_name} reason is blank")
+        _require(
+            isinstance(reason, str) and bool(reason.strip()), f"{expected_name} reason is blank"
+        )
 
 
 def _profile_dimensions(
