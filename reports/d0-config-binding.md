@@ -42,6 +42,10 @@ when absent. The existing `configs/smoke.yaml` canonical SHA-256 remains:
 
 `f6cf719aab809aaaf0d59b79cfba15bda7138c9138089bc7bbd4495cca087217`
 
+Prompt-set identity is bound in a separate top-level D0 contract section rather
+than altering the configuration schema, so these configuration identities remain
+unchanged.
+
 ## Binding coverage
 
 The validator compares each resolved configuration with the machine-readable
@@ -70,18 +74,16 @@ uv run pytest -q tests/test_d0_config_binding.py
 
 `resolved_yaml_configs_accepted_by_existing_configuration_layer`
 
-The formal experiment-definition and independent parameter-accounting blockers
-closed in subsequent tranches.
+The formal experiment-definition, independent parameter-accounting, and fixed
+prompt/contamination blockers closed in subsequent tranches.
 
 ## Current remaining blockers
 
-1. `committed_generation_prompts_and_contamination_checks`
-2. `contract_validation_command_and_CI_gate`
-3. `rendered_review_report`
-4. `PROJECT_STATE_synchronization`
+1. `contract_validation_command_and_CI_gate`
+2. `rendered_review_report`
+3. `PROJECT_STATE_synchronization`
 
 ## Next dependency-ordered action
 
-Commit the fixed generation prompts and mechanically check their contamination
-status against the frozen dataset-source contract. Model implementation remains
-unauthorized.
+Create one permanent D0 contract-validation command and CI gate. Model
+implementation, data processing, and training remain unauthorized.
