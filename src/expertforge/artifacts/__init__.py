@@ -62,10 +62,10 @@ from expertforge.artifacts.registry import (
     registry_path_for_attempt,
     scan_registry,
 )
+from expertforge.artifacts.secure_store import ArtifactStore
 from expertforge.artifacts.store import (
     BLOCK_SIZE,
     ArtifactSealedError,
-    ArtifactStore,
     ArtifactStoreError,
     RegistryReconciliation,
     sha256_stream,
