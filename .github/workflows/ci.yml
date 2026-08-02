@@ -52,7 +52,7 @@ jobs:
         run: uv run --locked mypy src tests
 
       - name: Validate D0 ratification bundle
-        run: uv run --locked python scripts/validate_d0_ratification.py > /dev/null
+        run: uv run --locked python -m scripts.validate_d0_ratification > /dev/null
 
       - name: Run fast CPU suite
         run: uv run --locked pytest -m "not integration and not smoke and not accelerator"
