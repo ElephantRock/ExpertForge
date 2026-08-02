@@ -102,13 +102,18 @@ uv run pytest -q tests/test_d0_parameter_inventory.py
 independent_parameter_accounting_executable_and_tests
 ```
 
-The fixed generation-prompt and contamination-check blocker closed in the
-subsequent tranche.
+The fixed generation-prompt/contamination blocker and permanent aggregate
+validation/CI-gate blocker closed in subsequent tranches.
 
 ## Current remaining dependency order
 
-1. permanent D0 contract validation command and CI gate;
-2. final rendered review report;
-3. `PROJECT_STATE.md` synchronization.
+1. final rendered review report;
+2. `PROJECT_STATE.md` synchronization.
+
+The permanent validation command is:
+
+```bash
+uv run --locked python -m scripts.validate_d0_ratification
+```
 
 No model implementation, data processing, or material run is authorized.
