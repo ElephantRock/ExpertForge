@@ -17,7 +17,10 @@ The D0.0 proposal now freezes and validates:
   strict configuration resolver;
 - stable, distinct specification fingerprints bound to the dataset and tokenizer
   manifest digests;
-- backward compatibility for existing format-version-1 configurations.
+- backward compatibility for existing format-version-1 configurations;
+- separate prospective qualification and canonical formal experiment contracts
+  accepted by the existing version-1 `ExperimentManifest` model without
+  publishing attempt evidence.
 
 No model implementation, data pipeline, production training loop,
 qualification run, or canonical run is authorized by this proposal.
@@ -50,35 +53,46 @@ Both fingerprints include `dataset.manifest` and `tokenizer.manifest` as
 immutable inputs. Existing `configs/smoke.yaml` retains canonical SHA-256
 `f6cf719aab809aaaf0d59b79cfba15bda7138c9138089bc7bbd4495cca087217`.
 
+## Formal experiment binding
+
+`experiments/d0/formal-experiment-definition-v1.json` freezes profile-specific
+hypotheses, update-zero controls, fixed constraints, variables, minimum useful
+effects, failure thresholds, kill criteria, and evidence requirements. Each
+profile is validated using an in-memory interrupted, partial
+`formal_experiment` manifest. The validation creates and publishes no run or
+attempt artifacts.
+
 ## Closed ratification blockers
 
 1. `tokenizer_file_sha256_and_byte_sizes`
 2. `content_addressed_dataset_source_manifest`
 3. `resolved_yaml_configs_accepted_by_existing_configuration_layer`
+4. `formal_experiment_definition_accepted_by_existing_manifest_contract`
 
 ## Remaining ratification blockers
 
-1. `formal_experiment_definition_accepted_by_existing_manifest_contract`
-2. `independent_parameter_accounting_executable_and_tests`
-3. `committed_generation_prompts_and_contamination_checks`
-4. `contract_validation_command_and_CI_gate`
-5. `rendered_review_report`
-6. `PROJECT_STATE_synchronization`
+1. `independent_parameter_accounting_executable_and_tests`
+2. `committed_generation_prompts_and_contamination_checks`
+3. `contract_validation_command_and_CI_gate`
+4. `rendered_review_report`
+5. `PROJECT_STATE_synchronization`
 
 ## Validation commands
 
 ```bash
 uv run python scripts/validate_d0_source_manifests.py
 uv run python scripts/validate_d0_config_binding.py
+uv run python scripts/validate_d0_experiment_definition.py
 uv run python scripts/validate_d0_contract.py
 uv run pytest -q \
   tests/test_d0_source_manifests.py \
   tests/test_d0_config_binding.py \
+  tests/test_d0_experiment_definition.py \
   tests/test_d0_contract_proposal.py
 ```
 
 ## Next dependency-ordered action
 
-Bind the D0 question, hypothesis, control, metrics, thresholds, budgets, and
-replication/recovery policy into the existing formal experiment-manifest
-contract. The declarative tensor inventory follows that binding.
+Commit the declarative tensor inventory and compare its independent executable
+parameter total with both frozen profile declarations. Model implementation and
+training remain unauthorized.
