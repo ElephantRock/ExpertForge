@@ -214,8 +214,7 @@ def _validate_envelope(
         "contract.generation_prompt_contract",
     )
     _require(
-        prompt_contract["manifest_path"]
-        == PROMPT_MANIFEST_PATH.relative_to(ROOT).as_posix(),
+        prompt_contract["manifest_path"] == PROMPT_MANIFEST_PATH.relative_to(ROOT).as_posix(),
         "contract generation prompt manifest path changed",
     )
     _require(
@@ -228,13 +227,11 @@ def _validate_envelope(
     )
     for source in ("dataset", "tokenizer"):
         _require(
-            manifest[f"{source}_manifest_path"]
-            == contract[source]["source_manifest_path"],
+            manifest[f"{source}_manifest_path"] == contract[source]["source_manifest_path"],
             f"generation prompt {source} manifest path changed",
         )
         _require(
-            manifest[f"{source}_manifest_sha256"]
-            == contract[source]["source_manifest_sha256"],
+            manifest[f"{source}_manifest_sha256"] == contract[source]["source_manifest_sha256"],
             f"generation prompt {source} manifest SHA-256 changed",
         )
     return prompt_contract
@@ -246,8 +243,7 @@ def _validate_protocol(
     prompt_contract: Mapping[str, Any],
 ) -> None:
     _require(
-        dict(_mapping(manifest["canonicalization"], "canonicalization"))
-        == _CANONICALIZATION,
+        dict(_mapping(manifest["canonicalization"], "canonicalization")) == _CANONICALIZATION,
         "generation prompt canonicalization changed",
     )
     evaluation = _mapping(contract["evaluation"], "contract.evaluation")
@@ -257,9 +253,7 @@ def _validate_protocol(
         "generation_temperature": evaluation["generation_temperature"],
         "generation_top_p": evaluation["generation_top_p"],
         "generation_top_k": evaluation["generation_top_k"],
-        "generation_repetition_penalty": evaluation[
-            "generation_repetition_penalty"
-        ],
+        "generation_repetition_penalty": evaluation["generation_repetition_penalty"],
         "generation_stop_token_id": evaluation["generation_stop_token_id"],
         "generation_seeds": seeds["canonical_generation_seeds"],
     }
@@ -270,8 +264,7 @@ def _validate_protocol(
 
     policy = _mapping(manifest["contamination_policy"], "contamination_policy")
     _require(
-        tuple(_sequence(policy["checks_in_precedence_order"], "checks"))
-        == _CHECKS,
+        tuple(_sequence(policy["checks_in_precedence_order"], "checks")) == _CHECKS,
         "contamination checks changed",
     )
     _require(
@@ -328,8 +321,7 @@ def _validate_protocol(
         "contamination hit action changed",
     )
     _require(
-        policy["actual_corpus_scan_stage"]
-        == "D0.1_preflight_before_packing_or_training",
+        policy["actual_corpus_scan_stage"] == "D0.1_preflight_before_packing_or_training",
         "contamination scan stage changed",
     )
 
@@ -341,10 +333,7 @@ def _validate_prompts(
     prompts = _sequence(manifest["prompts"], "prompts")
     count = _integer(manifest["prompt_count"], "prompt_count", minimum=1)
     _require(
-        count
-        == len(prompts)
-        == contract["evaluation"]["generation_prompt_count"]
-        == 8,
+        count == len(prompts) == contract["evaluation"]["generation_prompt_count"] == 8,
         "generation prompt count changed",
     )
     seen_texts: set[str] = set()
@@ -395,8 +384,7 @@ def _validate_prompts(
             f"{prompt['id']} text SHA-256 mismatch",
         )
         _require(
-            prompt["contamination_probe_sha256"]
-            == _sha256(probe.encode("utf-8")),
+            prompt["contamination_probe_sha256"] == _sha256(probe.encode("utf-8")),
             f"{prompt['id']} probe SHA-256 mismatch",
         )
         _require(text not in seen_texts, f"{prompt['id']} duplicates prompt text")
