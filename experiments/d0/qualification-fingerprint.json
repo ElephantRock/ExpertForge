@@ -1,0 +1,21 @@
+{
+  "schema": "expertforge.specification-fingerprint",
+  "version": 1,
+  "canonical_config": {
+    "algorithm": "sha256",
+    "digest": "4e1bdd0ad30bf8b2e1b61f83ff9e387acdab1c0e0d1cb975e7627db95273a960"
+  },
+  "immutable_inputs": [
+    {
+      "name": "dataset.manifest",
+      "algorithm": "sha256",
+      "digest": "d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df"
+    },
+    {
+      "name": "tokenizer.manifest",
+      "algorithm": "sha256",
+      "digest": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
+    }
+  ],
+  "digest_str": "spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe"
+}
