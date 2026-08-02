@@ -51,6 +51,9 @@ jobs:
       - name: Run mypy
         run: uv run --locked mypy src tests
 
+      - name: Validate D0 ratification bundle
+        run: uv run --locked python scripts/validate_d0_ratification.py > /dev/null
+
       - name: Run fast CPU suite
         run: uv run --locked pytest -m "not integration and not smoke and not accelerator"
 
@@ -124,4 +127,3 @@ jobs:
             --artifact-root runs/m0-smoke-ci \
             --config configs/m0-smoke-gate.yaml \
             --repo .
-
