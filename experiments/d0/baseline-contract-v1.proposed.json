@@ -257,7 +257,6 @@
     }
   },
   "ratification_blockers": [
-    "contract_validation_command_and_CI_gate",
     "rendered_review_report",
     "PROJECT_STATE_synchronization"
   ]
