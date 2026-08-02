@@ -3,16 +3,15 @@
 **Issue:** #42  
 **Parent:** #41  
 **PR:** #43  
-**Status:** D0.0 draft evidence; declarative parameter-accounting tranche implemented
+**Status:** D0.0 draft evidence; declarative parameter-accounting tranche complete
 
 ## Result
 
-A versioned declarative tensor inventory now provides an independently
-executable derivation of the qualification and canonical parameter totals. The
-generic inventory counter expands symbolic tensor shapes and layer
-multiplicities, while the existing D0 contract validator independently evaluates
-the frozen closed-form expression. Both methods must equal the declared contract
-total.
+A versioned declarative tensor inventory provides an independently executable
+derivation of the qualification and canonical parameter totals. The generic
+inventory counter expands symbolic tensor shapes and layer multiplicities, while
+the existing D0 contract validator independently evaluates the frozen closed-form
+expression. Both methods must equal the declared contract total.
 
 No production model object, framework parameter, data pipeline, training loop,
 qualification run, or canonical run is created by this evidence.
@@ -97,23 +96,19 @@ uv run python scripts/validate_d0_parameter_inventory.py
 uv run pytest -q tests/test_d0_parameter_inventory.py
 ```
 
-## Blocker state
-
-The blocker
+## Closed blocker
 
 ```text
 independent_parameter_accounting_executable_and_tests
 ```
 
-may close after the complete repository CI, portable CPU integration, locked
-smoke, and one-command interruption/recovery gates pass on the synchronized
-contract-and-evidence head.
+The fixed generation-prompt and contamination-check blocker closed in the
+subsequent tranche.
 
-## Remaining dependency order
+## Current remaining dependency order
 
-1. committed generation prompts and contamination checks;
-2. permanent D0 contract validation command and CI gate;
-3. final rendered review report;
-4. `PROJECT_STATE.md` synchronization.
+1. permanent D0 contract validation command and CI gate;
+2. final rendered review report;
+3. `PROJECT_STATE.md` synchronization.
 
-No model implementation or material run is authorized.
+No model implementation, data processing, or material run is authorized.
