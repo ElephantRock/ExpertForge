@@ -6,14 +6,13 @@ from pathlib import Path
 import pytest
 
 from scripts.validate_d0_contract import (
-    ContractValidationError,
     CONTRACT_PATH,
+    ContractValidationError,
     load_contract,
     parameter_count,
     swiglu_width,
     validate_contract,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
