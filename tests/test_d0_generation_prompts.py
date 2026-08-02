@@ -52,7 +52,9 @@ def test_generation_prompt_contract_validates() -> None:
         "prompt_payload_sha256": (
             "c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51"
         ),
-        "manifest_sha256": ("851934e4a49210b515967fad51308038dac1e7bc449774ca603f6bd9f47ccf3e"),
+        "manifest_sha256": (
+            "851934e4a49210b515967fad51308038dac1e7bc449774ca603f6bd9f47ccf3e"
+        ),
         "contamination_checks": [
             "exact_normalized_prompt_substring",
             "exact_normalized_probe_substring",
@@ -131,7 +133,7 @@ def test_boolean_row_index_is_rejected() -> None:
 def test_contract_manifest_digest_drift_is_rejected() -> None:
     manifest, raw = _manifest()
     contract = _contract()
-    contract["evaluation"]["generation_prompt_manifest_sha256"] = "0" * 64
+    contract["generation_prompt_contract"]["manifest_sha256"] = "0" * 64
 
     with pytest.raises(ContractValidationError, match="manifest SHA-256 mismatch"):
         validate_generation_prompts(contract, manifest, raw)
@@ -182,7 +184,7 @@ def test_canonical_payload_digest_drift_is_rejected() -> None:
     manifest, raw = _manifest()
     manifest["prompt_payload_sha256"] = "0" * 64
     contract = _contract()
-    contract["evaluation"]["generation_prompt_payload_sha256"] = "0" * 64
+    contract["generation_prompt_contract"]["prompt_payload_sha256"] = "0" * 64
 
     with pytest.raises(ContractValidationError, match="canonical payload SHA-256 mismatch"):
         validate_generation_prompts(contract, manifest, raw)
