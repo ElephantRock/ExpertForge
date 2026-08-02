@@ -7,7 +7,7 @@
 
 ## Result
 
-Qualification and canonical D0 now have separate prospective formal experiment
+Qualification and canonical D0 have separate prospective formal experiment
 definitions accepted by the existing version-1 `ExperimentManifest` model.
 Validation is in-memory and non-publishing: no run directory, attempt artifact,
 completed status, result, decision, or execution evidence is created.
@@ -85,15 +85,14 @@ uv run pytest -q tests/test_d0_experiment_definition.py
 formal_experiment_definition_accepted_by_existing_manifest_contract
 ```
 
-The declarative tensor-inventory and independent parameter-accounting blocker
-closed in the subsequent tranche.
+The declarative tensor-inventory/parameter-accounting and fixed
+prompt/contamination blockers closed in subsequent tranches.
 
 ## Current remaining dependency order
 
-1. committed generation prompts and contamination checks;
-2. permanent D0 contract validation command and CI gate;
-3. final rendered review report;
-4. `PROJECT_STATE.md` synchronization.
+1. permanent D0 contract validation command and CI gate;
+2. final rendered review report;
+3. `PROJECT_STATE.md` synchronization.
 
 No model implementation, data processing, qualification run, or canonical run
 is authorized.
