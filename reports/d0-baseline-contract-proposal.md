@@ -20,7 +20,9 @@ The D0.0 proposal now freezes and validates:
 - backward compatibility for existing format-version-1 configurations;
 - separate prospective qualification and canonical formal experiment contracts
   accepted by the existing version-1 `ExperimentManifest` model without
-  publishing attempt evidence.
+  publishing attempt evidence;
+- a declarative eleven-family tensor inventory whose generic shape expansion
+  agrees exactly with the independent closed-form counter and declared totals.
 
 No model implementation, data pipeline, production training loop,
 qualification run, or canonical run is authorized by this proposal.
@@ -62,20 +64,29 @@ profile is validated using an in-memory interrupted, partial
 `formal_experiment` manifest. The validation creates and publishes no run or
 attempt artifacts.
 
+## Independent parameter accounting
+
+`experiments/d0/parameter-inventory-v1.json` declares eleven trainable tensor
+families, a tied output-head alias, and six zero-parameter component classes.
+The generic inventory expansion produces 74 tensor instances and 19,685,888
+parameters for qualification, and 110 tensor instances and 76,738,176
+parameters for canonical. Those values must equal the separate closed-form
+contract derivation and the declared model totals.
+
 ## Closed ratification blockers
 
 1. `tokenizer_file_sha256_and_byte_sizes`
 2. `content_addressed_dataset_source_manifest`
 3. `resolved_yaml_configs_accepted_by_existing_configuration_layer`
 4. `formal_experiment_definition_accepted_by_existing_manifest_contract`
+5. `independent_parameter_accounting_executable_and_tests`
 
 ## Remaining ratification blockers
 
-1. `independent_parameter_accounting_executable_and_tests`
-2. `committed_generation_prompts_and_contamination_checks`
-3. `contract_validation_command_and_CI_gate`
-4. `rendered_review_report`
-5. `PROJECT_STATE_synchronization`
+1. `committed_generation_prompts_and_contamination_checks`
+2. `contract_validation_command_and_CI_gate`
+3. `rendered_review_report`
+4. `PROJECT_STATE_synchronization`
 
 ## Validation commands
 
@@ -83,16 +94,18 @@ attempt artifacts.
 uv run python scripts/validate_d0_source_manifests.py
 uv run python scripts/validate_d0_config_binding.py
 uv run python scripts/validate_d0_experiment_definition.py
+uv run python scripts/validate_d0_parameter_inventory.py
 uv run python scripts/validate_d0_contract.py
 uv run pytest -q \
   tests/test_d0_source_manifests.py \
   tests/test_d0_config_binding.py \
   tests/test_d0_experiment_definition.py \
+  tests/test_d0_parameter_inventory.py \
   tests/test_d0_contract_proposal.py
 ```
 
 ## Next dependency-ordered action
 
-Commit the declarative tensor inventory and compare its independent executable
-parameter total with both frozen profile declarations. Model implementation and
+Commit the fixed generation prompts and mechanically check their contamination
+status against the frozen dataset-source contract. Model implementation and
 training remain unauthorized.
