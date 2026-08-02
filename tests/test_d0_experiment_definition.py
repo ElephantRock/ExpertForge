@@ -124,9 +124,7 @@ def test_definition_rejects_threshold_and_constraint_drift() -> None:
         validate_definition(definition)
 
     definition = _definition()
-    definition["profiles"]["qualification"]["fixed_constraints"].append(
-        "untracked.constraint=true"
-    )
+    definition["profiles"]["qualification"]["fixed_constraints"].append("untracked.constraint=true")
     with pytest.raises(ContractValidationError, match="disagrees with frozen contract"):
         validate_definition(definition)
 
@@ -145,9 +143,7 @@ def test_definition_file_is_deterministic_json() -> None:
 
 
 def test_validator_has_no_artifact_publication_path() -> None:
-    source = (ROOT / "scripts/validate_d0_experiment_definition.py").read_text(
-        encoding="utf-8"
-    )
+    source = (ROOT / "scripts/validate_d0_experiment_definition.py").read_text(encoding="utf-8")
     assert "ArtifactStore" not in source
     assert "ManifestGenerator" not in source
     assert ".publish(" not in source
