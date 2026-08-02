@@ -123,7 +123,9 @@ def _validate_step_registry(steps: Sequence[ValidationStep]) -> None:
     _require(len(set(names)) == len(names), "D0 ratification validator names must be unique")
     for step in steps:
         _require(bool(step.name.strip()), "D0 ratification validator name is blank")
-        _require(callable(step.validator), f"D0 ratification validator {step.name!r} is not callable")
+        _require(
+            callable(step.validator), f"D0 ratification validator {step.name!r} is not callable"
+        )
 
 
 def _validate_remaining_blockers(contract: Mapping[str, Any]) -> tuple[str, ...]:
