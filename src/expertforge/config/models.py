@@ -141,10 +141,30 @@ class TrainingConfig(_Section):
 
 
 class EvaluationConfig(_Section):
-    """Evaluation cadence. Concrete metrics arrive with later issues."""
+    """Evaluation cadence. Concrete metrics arrive with later issues.
+
+    ``loss_improvement_threshold`` is an optional, predeclared finite
+    loss-improvement criterion used by the Milestone 0 smoke gate (Issue #14
+    amendment J): a run is accepted only when its final fixed-validation loss
+    improves over the initial value by at least this threshold. It is optional
+    here so existing configurations remain valid; the dedicated smoke-gate
+    configuration sets it explicitly and the smoke orchestrator rejects a
+    missing value. A non-smoke run leaves it unset. Any threshold change after
+    observing gate evidence requires an explicit design amendment and fresh
+    evidence.
+    """
 
     eval_interval_tokens: int = Field(
         default=1024, gt=0, description="Evaluate every N processed tokens."
+    )
+    loss_improvement_threshold: float | None = Field(
+        default=None,
+        gt=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Predeclared finite validation-loss improvement required for smoke-gate "
+            "acceptance (Issue #14 amendment J). Optional; the dedicated gate config sets it."
+        ),
     )
 
 

@@ -91,3 +91,37 @@ jobs:
 
       - name: Run portable CPU integration suite
         run: uv run --locked pytest -m "integration and not smoke and not accelerator"
+
+  smoke:
+    name: Milestone 0 smoke gate
+    needs: integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Sync locked environment
+        run: uv sync --locked
+
+      - name: Run locked smoke tier
+        run: uv run --locked pytest -m "smoke and not accelerator"
+
+      - name: Run the one-command smoke gate
+        run: |
+          uv run --locked python -m expertforge.smoke.run \
+            --artifact-root runs/m0-smoke-ci \
+            --config configs/m0-smoke-gate.yaml \
+            --repo .
+

@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -76,6 +77,18 @@ BLOCK_SIZE = 64 * 1024
 
 class ArtifactStoreError(Exception):
     """Raised on store-level failures (publication, IO, identity binding)."""
+
+
+class ArtifactSealedError(ArtifactStoreError):
+    """Raised when a publication/registration is attempted on a sealed attempt.
+
+    A sealed attempt rejects every publication and registration operation
+    (including through a freshly reconstructed store), while reads remain
+    unrestricted. Sealing is durable: it is recorded as a marker file in the
+    attempt directory, which is deterministically derived from the artifact
+    root and the attempt identity, so any store bound to the same root and
+    identity observes the seal.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +617,14 @@ class ArtifactStore:
             self._artifact_root, identity.run_id, identity.attempt_id
         )
         self._lock_path = self._attempt_dir / "registry.lock"
+        # B1 crash-injection hook (test-only): if set to a string, raises a
+        # RuntimeError at the named point inside the locked publish critical
+        # section, simulating a crash. Points: "after_intent", "after_rename",
+        # "after_append".
+        self.crash_injection: str | None = None
+        # Test-only TOCTOU injection hook for the intent reader: called between
+        # lstat and open so a regression can replace the marker.
+        self.sealing_read_inject: Any = None
 
     # -- accessors ---------------------------------------------------------
 
@@ -626,6 +647,390 @@ class ArtifactStore:
     @property
     def specification_fingerprint(self) -> str:
         return self._identity.fingerprint_digest_str()
+
+    @property
+    def sealed_marker_path(self) -> Path:
+        """The durable seal marker for this attempt.
+
+        The marker lives in the attempt directory, which is deterministically
+        derived from the artifact root and the attempt identity. A store
+        reconstructed from the same root and identity resolves the same path,
+        so it observes the seal.
+        """
+        return self._attempt_dir / "sealed"
+
+    @property
+    def sealing_marker_path(self) -> Path:
+        """The durable seal-INTENT marker (carries the bound artifact_id)."""
+        return self._attempt_dir / "sealing"
+
+    @property
+    def is_sealed(self) -> bool:
+        """Whether this attempt is sealed or sealing (fail-closed on I/O).
+
+        Uses ``lstat`` (no symlink following) so a replaced or dangling symlink
+        fails closed (treated as sealed). A nonregular file at the marker path
+        also fails closed.
+        """
+        for marker in (self.sealed_marker_path, self.sealing_marker_path):
+            try:
+                st = marker.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True  # fail-closed
+            if not stat.S_ISREG(st.st_mode):
+                return True  # nonregular file → fail-closed
+            return True
+        return False
+
+    def _read_sealing_intent_artifact_id(self) -> str | None:
+        """Read the artifact_id bound to the sealing intent (fd-bound, bounded, typed).
+
+        Opens the marker with O_NOFOLLOW | O_NONBLOCK (where available), then
+        fstats the opened fd to verify it is a regular file — closing the
+        TOCTOU window between lstat and open. Verifies stable device/inode
+        identity between the lstat'd path and the opened fd. All failures
+        (nonregular, symlink on no-O_NOFOLLOW platforms, FIFO/device, invalid
+        UTF-8, invalid artifact-ID, oversized, empty) raise typed
+        ``ArtifactStoreError``. Returns ``None`` only for genuinely absent.
+
+        Returns:
+          - The artifact_id string if the intent exists and is well-formed.
+          - None if the intent file is absent.
+        Raises:
+          ArtifactStoreError for any present-but-invalid state (fail-closed).
+        """
+        marker = self.sealing_marker_path
+        # Step 1: lstat the path to detect absence early.
+        try:
+            path_st = marker.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise ArtifactStoreError(f"sealing intent marker unreadable: {e}") from e
+        # Test-only TOCTOU injection hook: if set, called between lstat and open
+        # so a regression can atomically replace the marker and verify the
+        # identity-mismatch check fires.
+        if self.sealing_read_inject is not None:
+            self.sealing_read_inject(marker)
+        if not stat.S_ISREG(path_st.st_mode):
+            raise ArtifactStoreError("sealing intent marker is not a regular file")
+        # Step 2: open with O_NOFOLLOW | O_NONBLOCK (where available).
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        try:
+            fd = os.open(marker, flags)
+        except OSError as e:
+            raise ArtifactStoreError(f"cannot open sealing intent marker: {e}") from e
+        try:
+            # Step 3: fstat the opened fd and verify it is a regular file.
+            try:
+                fd_st = os.fstat(fd)
+            except OSError as e:
+                raise ArtifactStoreError(f"cannot fstat sealing intent fd: {e}") from e
+            if not stat.S_ISREG(fd_st.st_mode):
+                raise ArtifactStoreError(
+                    "sealing intent fd is not a regular file (TOCTOU replacement)"
+                )
+            # Step 4: verify stable device/inode identity (path ↔ fd).
+            # Fail-CLOSED: if reliable file identity cannot be established
+            # (missing/zero ino or dev attributes), raise a typed error rather
+            # than accepting the fd (review finding #1).
+            path_ino = getattr(path_st, "st_ino", None)
+            fd_ino = getattr(fd_st, "st_ino", None)
+            path_dev = getattr(path_st, "st_dev", None)
+            fd_dev = getattr(fd_st, "st_dev", None)
+            if path_ino is None or fd_ino is None or path_ino == 0 or fd_ino == 0:
+                raise ArtifactStoreError(
+                    "sealing intent marker: inode identity unavailable "
+                    "(st_ino missing or zero); cannot verify path/fd binding"
+                )
+            if path_dev is None or fd_dev is None or path_dev == 0 or fd_dev == 0:
+                raise ArtifactStoreError(
+                    "sealing intent marker: device identity unavailable "
+                    "(st_dev missing or zero); cannot verify path/fd binding"
+                )
+            if path_ino != fd_ino:
+                raise ArtifactStoreError(
+                    "sealing intent marker was replaced between lstat and open "
+                    f"(inode mismatch: path={path_ino} fd={fd_ino})"
+                )
+            if path_dev != fd_dev:
+                raise ArtifactStoreError(
+                    "sealing intent marker device changed between lstat and open "
+                    f"(device mismatch: path={path_dev} fd={fd_dev})"
+                )
+            # Step 5: bounded read.
+            max_read = 256
+            try:
+                raw = os.read(fd, max_read + 1)
+            except OSError as e:
+                raise ArtifactStoreError(f"cannot read sealing intent marker: {e}") from e
+        finally:
+            os.close(fd)
+        # Step 6: content validation.
+        if len(raw) > max_read:
+            raise ArtifactStoreError("sealing intent marker exceeds bounded read")
+        if not raw:
+            raise ArtifactStoreError("sealing intent marker is empty (corrupt)")
+        try:
+            text = raw.decode("utf-8").strip()
+        except UnicodeDecodeError as e:
+            raise ArtifactStoreError(f"sealing intent marker is not valid UTF-8: {e}") from e
+        if not text:
+            raise ArtifactStoreError("sealing intent marker is blank (corrupt)")
+        from expertforge.artifacts.models import ARTIFACT_ID_PATTERN
+
+        if not ARTIFACT_ID_PATTERN.fullmatch(text):
+            raise ArtifactStoreError(
+                f"sealing intent marker contains an invalid artifact_id {text!r}"
+            )
+        return text
+
+    def seal_attempt(self) -> None:
+        """Durably seal this attempt (standalone; no artifact binding).
+
+        Rejects if a bound ``sealing`` intent exists (only the bound artifact may
+        complete a pending intent). Used only for non-publish sealing (e.g. tests).
+        """
+        try:
+            with AttemptLock(self._lock_path):
+                intent = self._read_sealing_intent_artifact_id()
+                if intent is not None:
+                    raise ArtifactSealedError(
+                        f"attempt {self._identity.attempt_id!r} has a pending sealing "
+                        f"intent for artifact {intent!r}; only that artifact's publish "
+                        "may complete the seal."
+                    )
+                self._write_sealed_marker_locked()
+        except LockUnavailableError as e:
+            raise ArtifactStoreError(f"could not acquire seal lock: {e}") from e
+
+    def _complete_seal_with_artifact_binding(self, artifact_id: str) -> None:
+        """Complete the seal verifying the intent binds ``artifact_id`` (lock acquired).
+
+        Used by ManifestGenerator.publish's idempotent early-return path.
+        If no intent exists, verifies the manifest is the terminal (final)
+        registry publication before creating a bound intent and completing.
+        """
+        try:
+            with AttemptLock(self._lock_path):
+                intent = self._read_sealing_intent_artifact_id()
+                if intent is not None:
+                    if intent != artifact_id:
+                        raise ArtifactSealedError(
+                            f"sealing intent binding mismatch: intent={intent!r} "
+                            f"expected={artifact_id!r}"
+                        )
+                else:
+                    # No intent exists — verify this manifest is the terminal
+                    # (final-sequence) registry publication before retroactive sealing.
+                    self._verify_terminal_registry_publication(artifact_id)
+                    self._write_seal_intent_locked(artifact_id)
+                self._write_sealed_marker_locked()
+                self._remove_sealing_intent_locked()
+        except LockUnavailableError as e:
+            raise ArtifactStoreError(f"could not acquire seal lock: {e}") from e
+
+    def _verify_terminal_registry_publication(self, artifact_id: str) -> None:
+        """Verify ``artifact_id``'s initial_publication is the highest-sequence entry (lock held).
+
+        Ensures no artifact was registered after the manifest during a crash window.
+        Locates the manifest's ``initial_publication`` entry specifically (not any
+        later transition carrying the same artifact_id) and requires that entry's
+        sequence to equal the registry maximum.
+        """
+        entries = self._load_registry()
+        if not entries:
+            raise ArtifactStoreError("registry is empty; cannot verify terminal publication")
+        target_seq = None
+        max_seq = -1
+        for entry in entries:
+            entry_aid = entry.payload.get("artifact_id", "")
+            entry_seq = entry.sequence
+            # Match only the initial_publication of this artifact (not later
+            # retention/verification transitions that carry the same artifact_id).
+            if entry_aid == artifact_id and entry.entry_kind == "initial_publication":
+                target_seq = entry_seq
+            if entry_seq > max_seq:
+                max_seq = entry_seq
+        if target_seq is None:
+            raise ArtifactStoreError(f"artifact {artifact_id!r} is not registered; cannot seal")
+        if target_seq < max_seq:
+            raise ArtifactSealedError(
+                f"artifact {artifact_id!r} initial_publication (sequence {target_seq}) is not "
+                f"the final registry entry (max {max_seq}); a later artifact was "
+                "registered — cannot seal."
+            )
+
+    def _write_seal_intent_locked(self, artifact_id: str) -> None:
+        """Write the durable seal-INTENT marker bound to ``artifact_id`` (lock held).
+
+        Created through an fd with O_EXCL, O_NOFOLLOW, bounded full-write, fsync(fd),
+        close, then directory fsync — so the intent survives a power loss intact.
+        Rejects if an intent for a different artifact already exists.
+        """
+        marker = self.sealing_marker_path
+        _safe_makedirs(self._artifact_root, self._attempt_dir)
+        # Check existing intent (raises on malformed/corrupt).
+        existing = self._read_sealing_intent_artifact_id()
+        if existing is not None and existing != artifact_id:
+            raise ArtifactSealedError(
+                f"attempt {self._identity.attempt_id!r} has a sealing intent for a "
+                f"different artifact ({existing!r}); cannot proceed."
+            )
+        if existing == artifact_id:
+            return  # idempotent
+        payload = (artifact_id + "\n").encode("utf-8")
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = os.open(marker, flags, 0o644)
+            try:
+                _full_write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except FileExistsError:
+            # Race: another process created it between our check and open.
+            # Re-read and verify.
+            current = self._read_sealing_intent_artifact_id()
+            if current != artifact_id:
+                raise ArtifactSealedError(
+                    f"sealing intent race: expected {artifact_id!r}, got {current!r}"
+                ) from None
+        except OSError as e:
+            raise ArtifactStoreError(f"could not write seal-intent marker {marker}: {e}") from e
+        _fsync_dir(self._attempt_dir)
+
+    def _write_sealed_marker_locked(self) -> None:
+        """Write the terminal ``sealed`` marker (durable, idempotent, lock held).
+
+        On ``FileExistsError`` (the marker already exists), verifies the existing
+        path is a canonical regular file via ``lstat``. A nonregular file
+        (symlink, directory, FIFO) at the marker path raises a typed
+        ``ArtifactStoreError`` (fail-closed) so the caller does NOT discard the
+        ``sealing`` intent for a non-canonical state.
+        """
+        sealed = self.sealed_marker_path
+        _safe_makedirs(self._artifact_root, self._attempt_dir)
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = os.open(sealed, flags, 0o644)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except FileExistsError:
+            # Verify the existing path is a canonical regular sealed marker.
+            try:
+                existing_st = sealed.lstat()
+            except OSError as e:
+                raise ArtifactStoreError(f"sealed marker exists but is unreadable: {e}") from e
+            if not stat.S_ISREG(existing_st.st_mode):
+                raise ArtifactStoreError(
+                    f"sealed marker path {sealed} is not a regular file "
+                    "(symlink/directory/FIFO); refusing to treat as sealed"
+                ) from None
+        except OSError as e:
+            raise ArtifactStoreError(f"could not write seal marker {sealed}: {e}") from e
+        _fsync_dir(self._attempt_dir)
+
+    def _remove_sealing_intent_locked(self) -> None:
+        """Remove the ``sealing`` intent marker (lock held)."""
+        sealing = self.sealing_marker_path
+        try:
+            sealing.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            raise ArtifactStoreError(f"could not remove seal-intent marker {sealing}: {e}") from e
+        _fsync_dir(self._attempt_dir)
+
+    def _complete_seal_locked(self, *, bound_artifact_id: str) -> None:
+        """Complete the seal for ``bound_artifact_id`` (lock held).
+
+        Verifies the intent binds the exact artifact_id (fail-closed on absent,
+        malformed, or mismatched intent). Writes ``sealed``, removes ``sealing``.
+        """
+        intent = self._read_sealing_intent_artifact_id()
+        if intent is None:
+            # No intent — this shouldn't happen in the publish path (intent is
+            # always written before completion). Fail-closed.
+            raise ArtifactSealedError(
+                f"cannot complete seal for {bound_artifact_id!r}: no sealing intent exists"
+            )
+        if intent != bound_artifact_id:
+            raise ArtifactSealedError(
+                f"sealing intent binding mismatch: intent={intent!r} expected={bound_artifact_id!r}"
+            )
+        self._write_sealed_marker_locked()
+        self._remove_sealing_intent_locked()
+
+    def sealed_marker_path_exists_or_ioerror(self) -> bool:
+        """Check ``sealed`` marker existence (lstat, fail-closed, symlink-safe)."""
+        try:
+            st = self.sealed_marker_path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return stat.S_ISREG(st.st_mode) or True  # any file → sealed
+
+    def sealing_marker_path_exists_or_ioerror(self) -> bool:
+        """Check ``sealing`` marker existence (lstat, fail-closed, symlink-safe)."""
+        try:
+            st = self.sealing_marker_path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return stat.S_ISREG(st.st_mode) or True  # any file → sealing
+
+    def _assert_not_sealed(self) -> None:
+        """Pre-lock guard for register_* paths (no artifact context).
+
+        Rejects if ``sealed`` OR ``sealing`` exists. The register paths never
+        carry ``seal=True``, so they are always rejected by either marker.
+        """
+        if self.is_sealed:
+            raise ArtifactSealedError(
+                f"attempt {self._identity.attempt_id!r} is sealed; "
+                "no further publication or registration is allowed."
+            )
+
+    def _assert_not_sealed_publish(self, *, seal: bool, artifact_id: str | None) -> None:
+        """Pre-lock guard for publish() with artifact-bound recovery context.
+
+        Uses lstat (symlink-safe). ``sealed`` exists → always reject.
+        ``sealing`` exists + ``seal=True`` + intent binds ``artifact_id`` → ALLOW
+        (authorized terminal retry). Otherwise → reject.
+        """
+        if self.sealed_marker_path_exists_or_ioerror():
+            raise ArtifactSealedError(
+                f"attempt {self._identity.attempt_id!r} is sealed; "
+                "no further publication or registration is allowed."
+            )
+        if self.sealing_marker_path_exists_or_ioerror():
+            intent_artifact = self._read_sealing_intent_artifact_id()
+            if seal and artifact_id is not None and intent_artifact == artifact_id:
+                return  # authorized recovery
+            raise ArtifactSealedError(
+                f"attempt {self._identity.attempt_id!r} is sealing"
+                + (f" for artifact {intent_artifact!r}" if intent_artifact else "")
+                + "; no further publication or registration is allowed."
+            )
 
     # -- descriptor builder -----------------------------------------------
 
@@ -665,6 +1070,7 @@ class ArtifactStore:
         format_version: int,
         producing_component: str,
         parent: ParentReference | None = None,
+        seal: bool = False,
     ) -> ArtifactRecord:
         """Publish ``content`` as a canonical atomic bundle (amendment C).
 
@@ -676,6 +1082,14 @@ class ArtifactStore:
         verified payload is idempotent; any mismatch is
         :class:`ArtifactConflictError`.
         """
+        # Fast pre-lock rejection for already-sealed attempts (``sealed`` marker).
+        # Uses lstat (symlink-safe). The full context-aware check (including
+        # ``sealing`` intent recovery) happens inside the lock below.
+        if self.sealed_marker_path_exists_or_ioerror():
+            raise ArtifactSealedError(
+                f"attempt {self._identity.attempt_id!r} is sealed; "
+                "no further publication or registration is allowed."
+            )
         self._validate_category_format(category, format)
         self._validate_parent(parent)
 
@@ -734,28 +1148,44 @@ class ArtifactStore:
             # bundle with matching immutable metadata and returns it (item #6).
             try:
                 with AttemptLock(self._lock_path):
+                    # B1 artifact-bound in-lock recheck: ``sealed`` always rejects.
+                    # ``sealing`` rejects UNLESS ``seal=True`` AND the intent binds
+                    # this exact artifact_id (authorized crash-recovery retry).
+                    self._assert_not_sealed_publish(seal=seal, artifact_id=artifact_id)
                     if final_bundle.exists() or _is_symlink(final_bundle):
-                        # Idempotency vs. conflict. The existing bundle's recorded
-                        # timestamp is authoritative; preserve it (do not overwrite
-                        # with this publish's created_at_utc).
+                        # Idempotency vs. conflict.
                         self._assert_idempotent(final_bundle, record)
-                        # Remove the temp bundle; do not append a duplicate entry.
                         self._remove_tree(tmp_bundle)
-                        # The existing bundle's record (with its original
-                        # timestamp) is the authoritative immutable metadata;
-                        # index using it so the registry entry and the bundle
-                        # agree on created_at_utc.
                         meta_bytes = _read_bytes_no_follow(final_bundle / "artifact.json")
                         existing_record = _record_from_bundle_bytes(meta_bytes)
                         self._ensure_indexed(
                             existing_record, entry_kind="initial_publication", hold_lock=True
                         )
+                        # B1 crash-recovery: complete the seal if this is the
+                        # authorized terminal retry (artifact-bound).
+                        if seal:
+                            self._complete_seal_locked(bound_artifact_id=artifact_id)
                         return existing_record
+                    # B1 crash-safety: write the artifact-bound seal INTENT BEFORE
+                    # the terminal commit. A crash after this blocks every
+                    # mutating path; only a retry of the SAME artifact with
+                    # seal=True may recover.
+                    if seal:
+                        self._write_seal_intent_locked(artifact_id)
+                    if self.crash_injection == "after_intent":
+                        raise RuntimeError("crash-injection: after_intent")
                     # Atomic directory rename (no os.replace for directories).
                     os.rename(tmp_bundle, final_bundle)
                     _fsync_dir(cdir)
+                    if self.crash_injection == "after_rename":
+                        raise RuntimeError("crash-injection: after_rename")
                     # Registry append (lock-free path: the lock is held above).
                     self._ensure_indexed(record, entry_kind="initial_publication", hold_lock=True)
+                    if self.crash_injection == "after_append":
+                        raise RuntimeError("crash-injection: after_append")
+                    # B1: complete the seal (write ``sealed``, remove ``sealing``).
+                    if seal:
+                        self._complete_seal_locked(bound_artifact_id=artifact_id)
                     return record
             except LockUnavailableError as e:
                 raise ArtifactStoreError(f"could not acquire publish lock: {e}") from e
@@ -968,6 +1398,7 @@ class ArtifactStore:
                 "which verifies the stream through the public telemetry loader "
                 "before canonical registration (item #9)."
             )
+        self._assert_not_sealed()
         self._validate_category_format(category, format)
         self._validate_parent(parent)
         self._assert_regular_source(path)
@@ -1006,6 +1437,7 @@ class ArtifactStore:
         """
         from expertforge.telemetry.loader import TelemetryLoadError, load_telemetry_stream
 
+        self._assert_not_sealed()
         self._validate_parent(parent)
         self._assert_regular_source(path)
         # Copy the source bytes into a store-owned temporary buffer owned by this
@@ -1120,6 +1552,7 @@ class ArtifactStore:
         ``unavailable``; a location is never verified evidence without digest
         and size verification through a caller-supplied resolver.
         """
+        self._assert_not_sealed()
         self._validate_category_format(category, format)
         self._validate_parent(parent)
         # Build the immutable record metadata bound to this attempt's identity.
@@ -1182,6 +1615,10 @@ class ArtifactStore:
         # idempotently.
         try:
             with AttemptLock(self._lock_path):
+                # B1 in-lock seal recheck: a register_external that passed the
+                # pre-lock check but waited while the terminal manifest sealed
+                # the attempt is rejected here.
+                self._assert_not_sealed()
                 self._write_metadata_only_bundle(record, ext)
                 # Append a single logically atomic external_registration entry
                 # whose payload carries both the record and its external
@@ -1340,7 +1777,8 @@ class ArtifactStore:
         try:
             if hold_lock:
                 # Caller already holds the attempt lock; use the lock-free inner
-                # append to avoid re-acquiring the non-reentrant lock.
+                # append to avoid re-acquiring the non-reentrant lock. The caller
+                # (publish) has already rechecked the seal under the lock.
                 return _append_under_lock(
                     self._registry_path,
                     run_id=self._identity.run_id,
@@ -1350,6 +1788,14 @@ class ArtifactStore:
                     payload=payload,
                     recorded_at_utc=datetime.now(UTC),
                 )
+
+            # B1 race-safety: recheck the seal INSIDE the lock via the transition
+            # validator, which allocate_and_append runs under AttemptLock. A
+            # register_* call that passed the pre-lock _assert_not_sealed() but
+            # waited while another publisher sealed is rejected here.
+            def _seal_recheck(_history: Any) -> None:
+                self._assert_not_sealed()
+
             return allocate_and_append(
                 self._registry_path,
                 lock_path=self._lock_path,
@@ -1359,6 +1805,7 @@ class ArtifactStore:
                 entry_kind=entry_kind,
                 payload=payload,
                 recorded_at_utc=datetime.now(UTC),
+                transition_validator=_seal_recheck,
             )
         except RegistryError as e:
             raise ArtifactStoreError(f"registry append failed: {e}") from e

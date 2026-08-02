@@ -129,6 +129,19 @@ Pytest markers are strict:
 - `accelerator` identifies optional hardware/runtime-dependent tests, which must
   skip with an explicit reason when unavailable.
 
+Permanent locked smoke tier + the one-command gate (Issue #14):
+
+```bash
+uv run --locked pytest -m "smoke and not accelerator"
+uv run --locked python -m expertforge.smoke.run --artifact-root runs/m0-smoke
+```
+
+The gate runs the U0/R0/R1 topology (baseline, interrupted, resumed) through the
+full substrate and compares U0@N versus R1@N for exact computational-state
+reproducibility. It never deletes or overwrites prior canonical runs; generated
+artifacts are gitignored. The permanent `.github/workflows/ci.yml` smoke job
+runs both the locked smoke tier and the one-command gate.
+
 ### Minimum per-PR review set
 
 | Check | Command |

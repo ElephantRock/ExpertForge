@@ -90,3 +90,6 @@ credentials*
 *.swp
 .DS_Store
 Thumbs.db
+
+# --- Local agent/session tooling (never committed) ---
+.zcode/

@@ -188,9 +188,21 @@ uv run --locked pytest -m "integration and not smoke and not accelerator"
 Markers are strict. Tests requiring accelerators use `accelerator` and skip with
 an explicit reason when their hardware/runtime is unavailable. End-to-end
 training/recovery tests use `smoke`; Issue #14 owns the final smoke-and-recovery
-gate. The permanent `.github/workflows/ci.yml` workflow runs the quality/fast
-and CPU integration tiers on pull requests and pushes to `main` with read-only
-repository permissions.
+gate. The permanent `.github/workflows/ci.yml` workflow runs the quality/fast,
+CPU integration, and locked smoke tiers on pull requests and pushes to `main`
+with read-only repository permissions.
+
+Permanent locked smoke tier + the one-command gate (Issue #14):
+
+```bash
+uv run --locked pytest -m "smoke and not accelerator"
+uv run --locked python -m expertforge.smoke.run --artifact-root runs/m0-smoke
+```
+
+The gate command runs the U0/R0/R1 topology (baseline, interrupted, resumed)
+through the full substrate and compares U0@N versus R1@N for exact
+computational-state reproducibility. It never deletes or overwrites prior
+canonical runs; generated artifacts are gitignored.
 
 Developer fix commands:
 

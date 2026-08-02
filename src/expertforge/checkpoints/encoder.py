@@ -173,11 +173,71 @@ def _safe_value_obj(value: Any) -> Any:
     raise EncoderError(f"cannot encode value of type {type(value).__name__!r}")
 
 
+def safe_value_from_native(value: Any) -> Any:
+    """Build a SafeValue model object from a native Python value (public API).
+
+    The symmetric counterpart to :func:`safe_value_to_native`. Returns the typed
+    SafeValue model instance (one of the ``_Safe*`` variants) suitable for
+    assignment to ``CapturedCheckpointState.optimizer_scalar_state`` /
+    ``scheduler_scalar_state`` and optimizer-option values. Nested
+    mappings/sequences recurse.
+    """
+    return _safe_value_obj(value)
+
+
+def safe_value_to_native(value: Any) -> Any:
+    """Decode a SafeValue model object back to a native Python value (public API).
+
+    The symmetric counterpart to :func:`safe_value_from_native`. Walks the closed
+    SafeValue tagged union and returns native ``None``/``bool``/``int``/``float``/
+    ``bytes``/``str``/``list``/``dict``. Used by restore factories to consume
+    decoded optimizer/scheduler scalar state.
+    """
+    from expertforge.checkpoints.models import (
+        _SafeBool,
+        _SafeBytes,
+        _SafeFloat,
+        _SafeInt,
+        _SafeMapping,
+        _SafeNull,
+        _SafeSequence,
+        _SafeString,
+    )
+
+    if isinstance(value, _SafeNull):
+        return None
+    if isinstance(value, _SafeBool):
+        return value.value
+    if isinstance(value, _SafeInt):
+        return int(value.value)
+    if isinstance(value, _SafeFloat):
+        return struct_unpack_float(int(value.bit_pattern))
+    if isinstance(value, _SafeBytes):
+        import base64
+
+        return base64.b64decode(value.value.encode("ascii"))
+    if isinstance(value, _SafeString):
+        return value.value
+    if isinstance(value, _SafeSequence):
+        return [safe_value_to_native(v) for v in value.value]
+    if isinstance(value, _SafeMapping):
+        return {k: safe_value_to_native(v) for k, v in value.value}
+    raise EncoderError(f"unknown SafeValue variant {type(value).__name__!r}")
+
+
 def struct_pack_float(value: float) -> int:
     """Return the exact 64-bit IEEE-754 pattern of ``value`` (NaN/Inf/-0 exact)."""
     import struct
 
     return int.from_bytes(struct.pack(">d", value), "big", signed=False)
+
+
+def struct_unpack_float(bit_pattern: int) -> float:
+    """Inverse of :func:`struct_pack_float`: 64-bit IEEE-754 pattern -> float."""
+    import struct
+
+    out: float = struct.unpack(">d", bit_pattern.to_bytes(8, "big", signed=False))[0]
+    return out
 
 
 class ArchiveMembers:

@@ -62,9 +62,10 @@ from expertforge.artifacts.registry import (
     registry_path_for_attempt,
     scan_registry,
 )
+from expertforge.artifacts.secure_store import ArtifactStore
 from expertforge.artifacts.store import (
     BLOCK_SIZE,
-    ArtifactStore,
+    ArtifactSealedError,
     ArtifactStoreError,
     RegistryReconciliation,
     sha256_stream,
@@ -88,6 +89,7 @@ __all__ = [
     "ArtifactFormat",
     "ArtifactNotFoundError",
     "ArtifactRecord",
+    "ArtifactSealedError",
     "ArtifactStore",
     "ArtifactStoreError",
     "EntryKind",
