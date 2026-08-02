@@ -234,8 +234,7 @@ def _validate_envelope(
         "generation prompt manifest SHA-256 mismatch",
     )
     _require(
-        manifest["prompt_payload_sha256"]
-        == evaluation["generation_prompt_payload_sha256"],
+        manifest["prompt_payload_sha256"] == evaluation["generation_prompt_payload_sha256"],
         "generation prompt payload SHA-256 disagrees with contract",
     )
     _require(
@@ -486,7 +485,13 @@ def main(argv: list[str] | None = None) -> int:
         contract = load_json_object(args.contract)
         manifest, raw = load_prompt_manifest(args.prompts)
         report = validate_generation_prompts(contract, manifest, raw)
-    except (ContractValidationError, KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (
+        ContractValidationError,
+        KeyError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as error:
         sys.stderr.write(f"D0 GENERATION PROMPTS INVALID: {error}\n")
         return 1
     sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
