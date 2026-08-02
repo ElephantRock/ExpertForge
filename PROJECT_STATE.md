@@ -75,34 +75,35 @@ locked smoke tiers, including the one-command gate.
 
 ## Known blockers
 
-- None. Milestone 0 implementation is complete; only merge + umbrella closure
-  remain.
+- No known implementation blocker remains. Merge still requires successful
+  exact-head CI and final acceptance review.
 
 ## Latest accepted experiment
 
 - **Milestone 0 smoke & recovery gate (Issue #14).** Maturity stage Milestone 0,
-  classification smoke_test. The designated evidence run (source commit E
-  `991b50a`, clean tree) compares U0@N vs R1@N with identical computational
-  digests (`925fbd96…`) and loss improvement 0.438 ≥ threshold 0.1. The earlier
-  `58acd64`/`b2abe623…`, `f0730e1`, `fc043c1`, `298799a`, `537da2b`, `fd6d4d1`,
-  `71666a2`, `27b8a00`, `2890d69`, and `dfdad78` evidence runs were invalidated
-  by blocking reviews `4835261100`, `4835379984`, `4835574284`, `4835657284`,
-  `4835782418`, `4835844853`, `4835902575`, `4837672450`, `4837842027`, and
-  `4838345569` and superseded.
-  Full evidence in
-  [reports/milestone-0-smoke-gate.md](reports/milestone-0-smoke-gate.md).
+  classification smoke_test. The designated clean evidence source commit E is
+  `42c7de1`; CI run `30753390845` passed the quality/fast tier (1248 tests), CPU
+  integration tier (114 tests), locked smoke tier (39 tests), and one-command
+  gate. U0@N and R1@N have identical computational digests (`925fbd96…`) and
+  loss improvement 0.438 ≥ threshold 0.1.
+- Earlier evidence source commits `58acd64`/`b2abe623…`, `f0730e1`, `fc043c1`,
+  `298799a`, `537da2b`, `fd6d4d1`, `71666a2`, `27b8a00`, `2890d69`, `dfdad78`,
+  `2aa359f`, and `991b50a` were invalidated by blocking reviews `4835261100`,
+  `4835379984`, `4835574284`, `4835657284`, `4835782418`, `4835844853`,
+  `4835902575`, `4837672450`, `4837842027`, `4838345569`, `4838509896`, and
+  `4838854599`, respectively, and are superseded.
+- Full evidence: [reports/milestone-0-smoke-gate.md](reports/milestone-0-smoke-gate.md).
 
 ## Next recommended action
 
-1. Merge the **#14 smoke-gate PR** (closes #13 and #14).
-2. Verify all 11 children of **#3** are closed, then close **#3** (umbrella)
-   separately.
+1. Complete exact-head review and merge the **#14 smoke-gate PR** (closes #13 and #14).
+2. Verify all 11 children of **#3** are closed, then close **#3** separately.
 3. Begin **D0** (minimal dense baseline, F0 exact-attention control).
 
 ## Critical path
 
 ```text
-merge #14 (closes #13, #14) → close #3 → D0
+exact-head acceptance → merge #14 (closes #13, #14) → close #3 → D0
 ```
 
 ## Relationship to ExpertOS
