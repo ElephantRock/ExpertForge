@@ -52,7 +52,7 @@ _SYNTHETIC_IDS = {
         "attempt-20260101t000000z-cccccccccccccccccccc",
     ),
     "canonical": (
-        "run-20260101t000000z-dddddddddddd-eeeeeeeeeeeeeeeeeeeeeeee",
+        "run-20260101t000000z-dddddddddddd-eeeeeeeeeeeeeeeeeeee",
         "attempt-20260101t000000z-ffffffffffffffffffff",
     ),
 }
