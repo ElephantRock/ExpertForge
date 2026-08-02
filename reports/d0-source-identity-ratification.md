@@ -7,9 +7,10 @@
 
 ## Result
 
-The D0 proposal now has content-addressed source identities for both selected
+The D0 proposal has content-addressed source identities for both selected
 upstream inputs. The tokenizer-file and dataset-source-manifest blockers are
-removed from the machine-readable contract. Seven ratification blockers remain.
+removed from the machine-readable contract. Six ratification blockers now
+remain after completion of the subsequent configuration-binding tranche.
 
 No model, data pipeline, training loop, qualification run, or canonical run is
 authorized by this report.
@@ -63,7 +64,7 @@ The five frozen files are:
 
 ## Contract bindings
 
-The proposed contract now records, for each source:
+The proposed contract records, for each source:
 
 - exact upstream repository and revision;
 - repository-local manifest path;
@@ -104,17 +105,13 @@ contract-binding drift, semantic edits, and the superseded dataset revision.
 ## Remaining blockers
 
 1. `formal_experiment_definition_accepted_by_existing_manifest_contract`
-2. `resolved_yaml_configs_accepted_by_existing_configuration_layer`
-3. `independent_parameter_accounting_executable_and_tests`
-4. `committed_generation_prompts_and_contamination_checks`
-5. `contract_validation_command_and_CI_gate`
-6. `rendered_review_report`
-7. `PROJECT_STATE_synchronization`
+2. `independent_parameter_accounting_executable_and_tests`
+3. `committed_generation_prompts_and_contamination_checks`
+4. `contract_validation_command_and_CI_gate`
+5. `rendered_review_report`
+6. `PROJECT_STATE_synchronization`
 
 ## Next dependency-ordered action
 
-Add backward-compatible D0 configuration fields and exact qualification and
-canonical YAML files, then prove that both resolve through the existing
-configuration layer with stable behavioral fingerprints. Formal experiment
-manifest binding can proceed alongside that work where schema dependencies
-permit.
+Bind the D0 question, hypothesis, control, metrics, thresholds, budgets, and
+replication/recovery policy into the existing experiment-manifest contract.
