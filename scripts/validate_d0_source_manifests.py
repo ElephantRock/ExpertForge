@@ -70,9 +70,7 @@ def _validate_inventory(manifest: Mapping[str, Any], field: str) -> dict[str, in
         if not isinstance(path, str) or not path:
             raise ContractValidationError(f"{field}.files[{index}].path invalid")
         if not (
-            isinstance(digest, str)
-            and len(digest) == 64
-            and set(digest) <= set("0123456789abcdef")
+            isinstance(digest, str) and len(digest) == 64 and set(digest) <= set("0123456789abcdef")
         ):
             raise ContractValidationError(f"{field}.files[{index}].sha256 invalid")
         if type(size) is not int or size < 0:
