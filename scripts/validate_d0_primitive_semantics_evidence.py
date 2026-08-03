@@ -13,7 +13,7 @@ from typing import Any
 from expertforge.config.resolve import canonical_bytes, resolve_config
 from expertforge.identity.fingerprint import (
     ImmutableInput,
-    SpecificationFingerprint,
+    SpecificationFingerprintRecord,
     verify_fingerprint,
 )
 from scripts.materialize_d0_primitive_semantics_amendment import materialize
@@ -128,7 +128,7 @@ def _validate_profile(
     config_path = ROOT / expected["config_path"]
     fingerprint_path = ROOT / expected["fingerprint_path"]
     envelope = resolve_config(config_path)
-    semantics = envelope.effective.d0_primitive_semantics
+    semantics = envelope.config.d0_primitive_semantics
     _require(semantics is not None, f"{profile} primitive semantics are missing")
     _require(
         semantics.amendment_path == "experiments/d0/primitive-semantics-amendment-v1.proposed.json",
@@ -155,7 +155,9 @@ def _validate_profile(
         config_sha256 == expected["canonical_config_sha256"],
         f"{profile} canonical configuration digest changed",
     )
-    fingerprint = SpecificationFingerprint.model_validate(load_json_object(fingerprint_path))
+    fingerprint = SpecificationFingerprintRecord.model_validate(
+        load_json_object(fingerprint_path)
+    )
     verify_fingerprint(fingerprint, config_bytes, _immutable_inputs())
     _require(
         fingerprint.digest_str == expected["specification_fingerprint"],
