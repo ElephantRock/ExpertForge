@@ -6,7 +6,7 @@ import importlib
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 from expertforge.d0.errors import MissingOptionalDependencyError, SourceVerificationError
 
