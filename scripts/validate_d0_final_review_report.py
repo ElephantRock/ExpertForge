@@ -123,7 +123,7 @@ def validate_final_review_report(
     )
     _require(
         manifest["remaining_ratification_blockers"] == ["PROJECT_STATE_synchronization"],
-        "final review remaining blocker changed",
+        "final review historical blocker state changed",
     )
     for field in (
         "material_execution_authorized",
@@ -134,8 +134,8 @@ def validate_final_review_report(
         _require(manifest[field] is False, f"{field} must remain false")
 
     _require(
-        contract["ratification_blockers"] == ["PROJECT_STATE_synchronization"],
-        "contract blocker state disagrees with final review",
+        contract["ratification_blockers"] == [],
+        "contract blocker state must be terminal after project-state synchronization",
     )
     dataset = _require_mapping(contract["dataset"], "dataset")
     tokenizer = _require_mapping(contract["tokenizer"], "tokenizer")
@@ -195,7 +195,9 @@ def validate_final_review_report(
         "report_sha256": report_sha256,
         "report_bytes": len(report_bytes),
         "required_heading_count": len(_REQUIRED_HEADINGS),
-        "remaining_ratification_blockers": ["PROJECT_STATE_synchronization"],
+        "review_time_remaining_ratification_blockers": ["PROJECT_STATE_synchronization"],
+        "remaining_ratification_blockers": [],
+        "remaining_ratification_blocker_count": 0,
         "material_execution_authorized": False,
     }
 
