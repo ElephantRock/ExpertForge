@@ -131,17 +131,24 @@ def _validate_profile(
     semantics = envelope.effective.d0_primitive_semantics
     _require(semantics is not None, f"{profile} primitive semantics are missing")
     _require(
-        semantics.amendment_path == "experiments/d0/primitive-semantics-amendment-v1.proposed.json",
+        semantics.amendment_path
+        == "experiments/d0/primitive-semantics-amendment-v1.proposed.json",
         f"{profile} amendment path changed",
     )
-    _require(semantics.amendment_sha256 == _PROPOSAL_SHA256, f"{profile} amendment digest changed")
+    _require(
+        semantics.amendment_sha256 == _PROPOSAL_SHA256,
+        f"{profile} amendment digest changed",
+    )
     resolved_semantics = {
         "rope": semantics.rope.model_dump(mode="json"),
         "attention": semantics.attention.model_dump(mode="json"),
         "rmsnorm": semantics.rmsnorm.model_dump(mode="json"),
         "swiglu": semantics.swiglu.model_dump(mode="json"),
     }
-    _require(resolved_semantics == dict(proposal_semantics), f"{profile} semantics differ from proposal")
+    _require(
+        resolved_semantics == dict(proposal_semantics),
+        f"{profile} semantics differ from proposal",
+    )
 
     config_bytes = canonical_bytes(envelope)
     config_sha256 = hashlib.sha256(config_bytes).hexdigest()
@@ -173,8 +180,14 @@ def _validate_review(
         review.get("status") == "preparation_complete_pending_acceptance",
         "primitive-semantics review status changed",
     )
-    _require(review.get("issue") == 48 and review.get("pull_request") == 50, "review binding changed")
-    _require(review.get("proposal_sha256") == _PROPOSAL_SHA256, "review proposal identity changed")
+    _require(
+        review.get("issue") == 48 and review.get("pull_request") == 50,
+        "review binding changed",
+    )
+    _require(
+        review.get("proposal_sha256") == _PROPOSAL_SHA256,
+        "review proposal identity changed",
+    )
     _require(
         review.get("materialization_command")
         == "uv run --locked python -m scripts.materialize_d0_primitive_semantics_amendment --check",
@@ -195,16 +208,24 @@ def _validate_review(
         == _EXPECTED_ACCEPTANCE_BLOCKERS,
         "remaining amendment acceptance blockers changed",
     )
-    _require(review.get("d0_2_acceptance_authorized") is False, "D0.2 acceptance was authorized")
+    _require(
+        review.get("d0_2_acceptance_authorized") is False,
+        "D0.2 acceptance was authorized",
+    )
     _require(review.get("d0_3_authorized") is False, "D0.3 was authorized")
-    _require(review.get("material_execution_authorized") is False, "material execution was authorized")
+    _require(
+        review.get("material_execution_authorized") is False,
+        "material execution was authorized",
+    )
     _validate_self_digest(
         review,
         field="review_sha256",
         policy="sha256(canonical_json_without_review_sha256)",
         expected=_REVIEW_SHA256,
     )
-    proposal_blockers = _string_list(proposal.get("ratification_blockers"), "ratification_blockers")
+    proposal_blockers = _string_list(
+        proposal.get("ratification_blockers"), "ratification_blockers"
+    )
     _require(
         "affected_profile_fingerprints_not_yet_regenerated" in proposal_blockers,
         "historical proposal preparation blocker was rewritten",
@@ -221,13 +242,28 @@ def _validate_state(state: Mapping[str, Any]) -> None:
         state.get("status") == "ratified_with_pending_primitive_semantics_amendment",
         "amended project-state status changed",
     )
-    _require(state.get("primitive_semantics_amendment_sha256") == _PROPOSAL_SHA256, "state proposal identity changed")
-    _require(state.get("historical_records_mutated") is False, "state claims historical mutation")
+    _require(
+        state.get("primitive_semantics_amendment_sha256") == _PROPOSAL_SHA256,
+        "state proposal identity changed",
+    )
+    _require(
+        state.get("historical_records_mutated") is False,
+        "state claims historical mutation",
+    )
     _require(state.get("d0_1_authorized") is True, "D0.1 authorization changed")
-    _require(state.get("d0_2_implementation_authorized") is True, "D0.2 implementation changed")
-    _require(state.get("d0_2_acceptance_authorized") is False, "D0.2 acceptance must remain blocked")
+    _require(
+        state.get("d0_2_implementation_authorized") is True,
+        "D0.2 implementation changed",
+    )
+    _require(
+        state.get("d0_2_acceptance_authorized") is False,
+        "D0.2 acceptance must remain blocked",
+    )
     _require(state.get("d0_3_authorized") is False, "D0.3 must remain blocked")
-    _require(state.get("material_execution_authorized") is False, "material execution must remain blocked")
+    _require(
+        state.get("material_execution_authorized") is False,
+        "material execution must remain blocked",
+    )
     _require(
         _string_list(state.get("remaining_amendment_blockers"), "remaining_amendment_blockers")
         == _EXPECTED_ACCEPTANCE_BLOCKERS,
@@ -246,13 +282,25 @@ def _validate_formal(formal: Mapping[str, Any]) -> None:
         formal.get("schema_version") == "expertforge-d0-formal-experiment-definition/2",
         "amended formal-definition schema changed",
     )
-    _require(formal.get("issue") == 48 and formal.get("pull_request") == 50, "formal binding changed")
-    _require(formal.get("primitive_semantics_amendment_sha256") == _PROPOSAL_SHA256, "formal proposal identity changed")
-    _require(formal.get("prior_d0_model_attempts_invalidated") is False, "formal definition invalidates prior attempts")
+    _require(
+        formal.get("issue") == 48 and formal.get("pull_request") == 50,
+        "formal binding changed",
+    )
+    _require(
+        formal.get("primitive_semantics_amendment_sha256") == _PROPOSAL_SHA256,
+        "formal proposal identity changed",
+    )
+    _require(
+        formal.get("prior_d0_model_attempts_invalidated") is False,
+        "formal definition invalidates prior attempts",
+    )
     profiles = _mapping(formal.get("profiles"), "formal.profiles")
     for profile, expected in _EXPECTED_PROFILES.items():
         entry = _mapping(profiles.get(profile), f"formal.profiles.{profile}")
-        _require(entry.get("config_path") == expected["config_path"], f"{profile} formal config path changed")
+        _require(
+            entry.get("config_path") == expected["config_path"],
+            f"{profile} formal config path changed",
+        )
         _require(
             entry.get("fingerprint_path") == expected["fingerprint_path"],
             f"{profile} formal fingerprint path changed",
@@ -271,7 +319,10 @@ def validate_all() -> dict[str, object]:
     state = load_json_object(STATE_PATH)
     formal = load_json_object(FORMAL_PATH)
 
-    _require(proposal.get("amendment_sha256") == _PROPOSAL_SHA256, "proposal digest changed")
+    _require(
+        proposal.get("amendment_sha256") == _PROPOSAL_SHA256,
+        "proposal digest changed",
+    )
     identities = _validate_review(review, proposal)
     _validate_state(state)
     _validate_formal(formal)
@@ -292,10 +343,14 @@ def validate_all() -> dict[str, object]:
         "review formal-definition path changed",
     )
     _require(
-        identities.get("project_state_path") == "experiments/d0/project-state-v3.proposed.json",
+        identities.get("project_state_path")
+        == "experiments/d0/project-state-v3.proposed.json",
         "review project-state path changed",
     )
-    _require(identities.get("project_state_sha256") == _STATE_SHA256, "review state identity changed")
+    _require(
+        identities.get("project_state_sha256") == _STATE_SHA256,
+        "review state identity changed",
+    )
 
     materialize(check=True)
     return {
