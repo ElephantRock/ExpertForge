@@ -34,6 +34,16 @@ def _refresh_digest(manifest: dict[str, object]) -> None:
     manifest["manifest_sha256"] = canonical_manifest_digest(manifest)
 
 
+def _contract_bound_to_dataset_manifest(manifest: dict[str, object]) -> dict[str, object]:
+    contract = copy.deepcopy(_contract())
+    dataset = contract["dataset"]
+    assert isinstance(dataset, dict)
+    digest = manifest["manifest_sha256"]
+    assert isinstance(digest, str)
+    dataset["source_manifest_sha256"] = digest
+    return contract
+
+
 def test_source_manifests_validate() -> None:
     report = validate_source_manifests(_contract(), _tokenizer_manifest(), _dataset_manifest())
     assert report["tokenizer"]["file_count"] == 5
@@ -63,8 +73,9 @@ def test_duplicate_dataset_path_is_rejected() -> None:
     assert isinstance(second, dict)
     second["path"] = first["path"]
     _refresh_digest(dataset_manifest)
+    contract = _contract_bound_to_dataset_manifest(dataset_manifest)
     with pytest.raises(ContractValidationError, match="file paths must be unique"):
-        validate_source_manifests(_contract(), _tokenizer_manifest(), dataset_manifest)
+        validate_source_manifests(contract, _tokenizer_manifest(), dataset_manifest)
 
 
 def test_dataset_manifest_binding_drift_is_rejected() -> None:
@@ -100,8 +111,9 @@ def test_dataset_ordering_drift_is_rejected() -> None:
     assert isinstance(ordering, dict)
     ordering["source_files"] = "repository_api_order"
     _refresh_digest(manifest)
+    contract = _contract_bound_to_dataset_manifest(manifest)
     with pytest.raises(ContractValidationError, match="dataset ordering mismatch"):
-        validate_source_manifests(_contract(), _tokenizer_manifest(), manifest)
+        validate_source_manifests(contract, _tokenizer_manifest(), manifest)
 
 
 def test_dataset_dedup_keep_rule_drift_is_rejected() -> None:
@@ -110,8 +122,9 @@ def test_dataset_dedup_keep_rule_drift_is_rejected() -> None:
     assert isinstance(deduplication, dict)
     deduplication["keep_rule"] = "last_in_source_order"
     _refresh_digest(manifest)
+    contract = _contract_bound_to_dataset_manifest(manifest)
     with pytest.raises(ContractValidationError, match="dataset deduplication mismatch"):
-        validate_source_manifests(_contract(), _tokenizer_manifest(), manifest)
+        validate_source_manifests(contract, _tokenizer_manifest(), manifest)
 
 
 def test_dataset_provenance_drift_is_rejected() -> None:
@@ -120,5 +133,6 @@ def test_dataset_provenance_drift_is_rejected() -> None:
     assert isinstance(provenance, dict)
     provenance["retention_status"] = "temporary"
     _refresh_digest(manifest)
+    contract = _contract_bound_to_dataset_manifest(manifest)
     with pytest.raises(ContractValidationError, match="retention status changed"):
-        validate_source_manifests(_contract(), _tokenizer_manifest(), manifest)
+        validate_source_manifests(contract, _tokenizer_manifest(), manifest)
