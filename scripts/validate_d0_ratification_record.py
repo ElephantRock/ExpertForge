@@ -147,8 +147,7 @@ def validate_ratification_record(
         "tokenizer identity drift",
     )
     _require(
-        record["qualification_specification_fingerprint"]
-        == _fingerprint_digest("qualification"),
+        record["qualification_specification_fingerprint"] == _fingerprint_digest("qualification"),
         "qualification fingerprint drift",
     )
     _require(
