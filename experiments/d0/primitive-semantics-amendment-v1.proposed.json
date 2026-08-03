@@ -82,23 +82,6 @@
     "prior_d0_model_attempts_invalidated": false,
     "reason_no_attempt_invalidated": "no_D0_model_attempt_exists"
   },
-  "superseding_identities": {
-    "qualification": {
-      "config_path": "configs/d0/qualification-primitive-v2.yaml",
-      "canonical_config_sha256": "c1f0a4893a56bad1019352c6d534c556d1db0c63e4d7c43c4676c322cc244ea1",
-      "fingerprint_path": "experiments/d0/qualification-fingerprint-v2.json",
-      "specification_fingerprint": "spec-v1-sha256-8f1390a73ddad0f22d2354a2b45a42c5563c448b08ee317dd80e7d0ac83dfe91"
-    },
-    "canonical": {
-      "config_path": "configs/d0/canonical-primitive-v2.yaml",
-      "canonical_config_sha256": "49def2ad8500bde97c9aac792bf498f03aed062cc2a4120d1877491822544506",
-      "fingerprint_path": "experiments/d0/canonical-fingerprint-v2.json",
-      "specification_fingerprint": "spec-v1-sha256-edd02b2b7b130caaeb05b653729f9952a53f64f149204a602a3f657a4f05edfb"
-    },
-    "formal_experiment_definition_path": "experiments/d0/formal-experiment-definition-v2.json",
-    "project_state_path": "experiments/d0/project-state-v3.proposed.json",
-    "project_state_sha256": "4f745fca068196dc55c025115db62ea03a23ca15b1e134106ac57294c2ea3c2c"
-  },
   "acceptance_requirements": {
     "machine_validator": true,
     "affected_fingerprints_regenerated": true,
@@ -107,9 +90,10 @@
     "blocking_review_findings_resolved": true
   },
   "ratification_blockers": [
+    "affected_profile_fingerprints_not_yet_regenerated",
     "amendment_review_not_yet_accepted",
     "exact_head_ci_not_yet_accepted"
   ],
   "digest_policy": "sha256(canonical_json_without_amendment_sha256)",
-  "amendment_sha256": "80068251184aee71edded4441c15d297ca737d913df78fb2394e1748c426af3c"
+  "amendment_sha256": "5bc196942697833c4dfe9f227b16e2b69c6cafd07b05396a70650ecb34cebab0"
 }
