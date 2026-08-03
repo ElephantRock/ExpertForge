@@ -25,6 +25,7 @@ EXPECTED_ORDER = (
     "parameter_inventory",
     "generation_prompts_and_contamination",
     "final_review_report",
+    "project_state",
 )
 
 
@@ -45,12 +46,14 @@ def test_committed_ratification_bundle_validates() -> None:
     report = validate_all()
 
     assert report["status"] == "valid_d0_ratification_bundle"
-    assert report["validator_count"] == 7
+    assert report["validator_count"] == 8
     assert report["validator_order"] == list(EXPECTED_ORDER)
-    assert report["remaining_ratification_blockers"] == ["PROJECT_STATE_synchronization"]
-    assert report["remaining_ratification_blocker_count"] == 1
+    assert report["remaining_ratification_blockers"] == []
+    assert report["remaining_ratification_blocker_count"] == 0
     assert report["actual_corpus_scan_completed"] is False
     assert report["actual_corpus_scan_stage"] == "D0.1_preflight_before_packing_or_training"
+    assert report["d0_1_authorized"] is False
+    assert report["d0_2_authorized"] is False
     assert report["material_execution_authorized"] is False
 
 
@@ -116,12 +119,7 @@ def test_aggregate_report_digest_is_deterministic() -> None:
 def test_remaining_blocker_drift_is_rejected() -> None:
     with pytest.raises(ContractValidationError, match="permanent gate state"):
         _validate_remaining_blockers(
-            {
-                "ratification_blockers": [
-                    "rendered_review_report",
-                    "PROJECT_STATE_synchronization",
-                ]
-            }
+            {"ratification_blockers": ["PROJECT_STATE_synchronization"]}
         )
 
 
