@@ -23,10 +23,7 @@ def _contract() -> dict[str, object]:
 def test_parameter_accounting_known_answers() -> None:
     assert swiglu_width(256) == 768
     assert swiglu_width(576) == 1536
-    assert (
-        parameter_count(vocabulary_size=50_257, layers=8, width=256, ffn_width=768)
-        == 19_685_888
-    )
+    assert parameter_count(vocabulary_size=50_257, layers=8, width=256, ffn_width=768) == 19_685_888
     assert (
         parameter_count(
             vocabulary_size=50_257,
