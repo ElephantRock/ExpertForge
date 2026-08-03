@@ -130,6 +130,7 @@ def _validate_profile(
     envelope = resolve_config(config_path)
     semantics = envelope.config.d0_primitive_semantics
     _require(semantics is not None, f"{profile} primitive semantics are missing")
+    assert semantics is not None  # narrowed for mypy after _require
     _require(
         semantics.amendment_path == "experiments/d0/primitive-semantics-amendment-v1.proposed.json",
         f"{profile} amendment path changed",
@@ -155,8 +156,8 @@ def _validate_profile(
         config_sha256 == expected["canonical_config_sha256"],
         f"{profile} canonical configuration digest changed",
     )
-    fingerprint = SpecificationFingerprintRecord.model_validate(
-        load_json_object(fingerprint_path)
+    fingerprint = SpecificationFingerprintRecord.model_validate_json(
+        fingerprint_path.read_text(encoding="utf-8")
     )
     verify_fingerprint(fingerprint, config_bytes, _immutable_inputs())
     _require(
