@@ -191,9 +191,7 @@ def build_scan_report(
     rejected_documents_by_reason: dict[str, int] = {}
     for shard in shards:
         for reason, count in shard.rejected_documents_by_reason:
-            rejected_documents_by_reason[reason] = (
-                rejected_documents_by_reason.get(reason, 0) + count
-            )
+            rejected_documents_by_reason[reason] = rejected_documents_by_reason.get(reason, 0) + count
 
     ordered_hits = sort_hit_records(hits)
     per_tier_match_counts: dict[str, int] = {check: 0 for check in _CHECKS}
