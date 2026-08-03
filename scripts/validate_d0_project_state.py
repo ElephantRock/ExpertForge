@@ -122,8 +122,7 @@ def validate_project_state(
         "current milestone changed",
     )
     _require(
-        manifest["d0_0_state"]
-        == "ratification_ready_pending_acceptance_merge_and_issue_closure",
+        manifest["d0_0_state"] == "ratification_ready_pending_acceptance_merge_and_issue_closure",
         "D0.0 project state changed",
     )
     _require(manifest["remaining_ratification_blockers"] == [], "project-state blocker drift")
