@@ -147,12 +147,8 @@ def _validate_models(contract: Mapping[str, Any]) -> dict[str, dict[str, int]]:
         ("canonical", (50_000_000, 100_000_000)),
     ):
         model = _mapping(_mapping(contract["models"], "models")[name], f"models.{name}")
-        layers = _require_exact_int(
-            model["layers"], f"models.{name}.layers", minimum=1
-        )
-        width = _require_exact_int(
-            model["model_width"], f"models.{name}.model_width", minimum=1
-        )
+        layers = _require_exact_int(model["layers"], f"models.{name}.layers", minimum=1)
+        width = _require_exact_int(model["model_width"], f"models.{name}.model_width", minimum=1)
         heads = _require_exact_int(
             model["attention_heads"], f"models.{name}.attention_heads", minimum=1
         )
@@ -278,8 +274,7 @@ def _validate_data_order_seed(contract: Mapping[str, Any]) -> int:
         "data seed root binding changed",
     )
     _require(
-        record.get("projection")
-        == "seed_u64_first_8_sha256_bytes_big_endian_unsigned",
+        record.get("projection") == "seed_u64_first_8_sha256_bytes_big_endian_unsigned",
         "data seed projection changed",
     )
     context = _mapping(record.get("context"), "seeds.data_order_seed.context")
@@ -324,15 +319,9 @@ def validate_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
     source_reports = validate_source_manifests(
         contract,
         load_json_object(
-            Path(
-                _mapping(contract["tokenizer"], "tokenizer")[
-                    "source_manifest_path"
-                ]
-            )
+            Path(_mapping(contract["tokenizer"], "tokenizer")["source_manifest_path"])
         ),
-        load_json_object(
-            Path(_mapping(contract["dataset"], "dataset")["source_manifest_path"])
-        ),
+        load_json_object(Path(_mapping(contract["dataset"], "dataset")["source_manifest_path"])),
     )
     target_tokens_per_update = _validate_batch(contract)
     models = _validate_models(contract)
@@ -368,9 +357,7 @@ def load_contract(path: Path) -> Mapping[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Validate the proposed D0 baseline contract"
-    )
+    parser = argparse.ArgumentParser(description="Validate the proposed D0 baseline contract")
     parser.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     return parser
 
