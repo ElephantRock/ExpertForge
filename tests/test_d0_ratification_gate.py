@@ -24,6 +24,7 @@ EXPECTED_ORDER = (
     "formal_experiment_definition",
     "parameter_inventory",
     "generation_prompts_and_contamination",
+    "final_review_report",
 )
 
 
@@ -44,13 +45,10 @@ def test_committed_ratification_bundle_validates() -> None:
     report = validate_all()
 
     assert report["status"] == "valid_d0_ratification_bundle"
-    assert report["validator_count"] == 6
+    assert report["validator_count"] == 7
     assert report["validator_order"] == list(EXPECTED_ORDER)
-    assert report["remaining_ratification_blockers"] == [
-        "rendered_review_report",
-        "PROJECT_STATE_synchronization",
-    ]
-    assert report["remaining_ratification_blocker_count"] == 2
+    assert report["remaining_ratification_blockers"] == ["PROJECT_STATE_synchronization"]
+    assert report["remaining_ratification_blocker_count"] == 1
     assert report["actual_corpus_scan_completed"] is False
     assert report["actual_corpus_scan_stage"] == "D0.1_preflight_before_packing_or_training"
     assert report["material_execution_authorized"] is False
@@ -120,7 +118,6 @@ def test_remaining_blocker_drift_is_rejected() -> None:
         _validate_remaining_blockers(
             {
                 "ratification_blockers": [
-                    "contract_validation_command_and_CI_gate",
                     "rendered_review_report",
                     "PROJECT_STATE_synchronization",
                 ]
