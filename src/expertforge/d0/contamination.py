@@ -257,10 +257,10 @@ class ContaminationMatcher:
             selected_check: CheckName | None = None
             selected: tuple[int, int] | None = None
             for check in _CHECKS:
-                candidate = candidates.get((prompt.prompt_id, check))
-                if candidate is not None:
+                prompt_candidate = candidates.get((prompt.prompt_id, check))
+                if prompt_candidate is not None:
                     selected_check = check
-                    selected = candidate
+                    selected = prompt_candidate
                     break
             if selected_check is None or selected is None:
                 continue
