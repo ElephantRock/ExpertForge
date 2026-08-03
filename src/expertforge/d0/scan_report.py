@@ -109,9 +109,7 @@ def canonical_report_bytes(report: Mapping[str, object]) -> bytes:
         raise ScanReportError("report_sha256 is missing")
     actual = report_sha256(report)
     if expected != actual:
-        raise ScanReportError(
-            f"scan report digest mismatch: expected {expected}, actual {actual}"
-        )
+        raise ScanReportError(f"scan report digest mismatch: expected {expected}, actual {actual}")
     return canonical_json_bytes(dict(report))
 
 
@@ -134,18 +132,12 @@ def build_scan_report(
     """Build a truthful complete or partial content-addressed scan report."""
 
     bindings = {
-        "dataset_manifest_sha256": _digest(
-            dataset_manifest_sha256, "dataset_manifest_sha256"
-        ),
+        "dataset_manifest_sha256": _digest(dataset_manifest_sha256, "dataset_manifest_sha256"),
         "tokenizer_manifest_sha256": _digest(
             tokenizer_manifest_sha256, "tokenizer_manifest_sha256"
         ),
-        "prompt_manifest_sha256": _digest(
-            prompt_manifest_sha256, "prompt_manifest_sha256"
-        ),
-        "prompt_payload_sha256": _digest(
-            prompt_payload_sha256, "prompt_payload_sha256"
-        ),
+        "prompt_manifest_sha256": _digest(prompt_manifest_sha256, "prompt_manifest_sha256"),
+        "prompt_payload_sha256": _digest(prompt_payload_sha256, "prompt_payload_sha256"),
         "scanner_source_commit": _commit(scanner_source_commit, "scanner_source_commit"),
         "scanner_algorithm_version": scanner_algorithm_version,
     }
@@ -172,12 +164,8 @@ def build_scan_report(
     rejected_documents = sum(shard.rejected_documents for shard in shards)
     duplicates_suppressed = sum(shard.duplicates_suppressed for shard in shards)
     unique_documents_scanned = sum(shard.unique_documents_scanned for shard in shards)
-    normalized_utf8_bytes_scanned = sum(
-        shard.normalized_utf8_bytes_scanned for shard in shards
-    )
-    normalized_codepoints_scanned = sum(
-        shard.normalized_codepoints_scanned for shard in shards
-    )
+    normalized_utf8_bytes_scanned = sum(shard.normalized_utf8_bytes_scanned for shard in shards)
+    normalized_codepoints_scanned = sum(shard.normalized_codepoints_scanned for shard in shards)
 
     ordered_hits = sort_hit_records(hits)
     per_tier_match_counts: dict[str, int] = {check: 0 for check in _CHECKS}
