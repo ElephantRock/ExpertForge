@@ -131,7 +131,9 @@ def _validate_dataset_provenance(manifest: Mapping[str, Any]) -> None:
         content_hash.get("scope") == "canonical_json_of_ordered_files_array",
         "dataset content hash scope changed",
     )
-    inventory_digest = hashlib.sha256(_canonical_bytes(list(_files(manifest, "dataset")))).hexdigest()
+    inventory_digest = hashlib.sha256(
+        _canonical_bytes(list(_files(manifest, "dataset")))
+    ).hexdigest()
     _require(
         content_hash.get("digest") == inventory_digest,
         "dataset provenance content hash mismatch",
@@ -170,17 +172,26 @@ def validate_source_manifests(
         dataset_manifest.get("normalization") == dataset.get("normalization"),
         "dataset normalization mismatch",
     )
-    _require(dataset_manifest.get("split_contract") == dataset.get("split"), "dataset split contract mismatch")
+    _require(
+        dataset_manifest.get("split_contract") == dataset.get("split"),
+        "dataset split contract mismatch",
+    )
     _require(
         dataset_manifest.get("ordering")
-        == {"source_files": "path_lexicographic", "rows_within_file": "physical_row_index_ascending"}
+        == {
+            "source_files": "path_lexicographic",
+            "rows_within_file": "physical_row_index_ascending",
+        }
         and dataset.get("source_order")
         == ["file_path_lexicographic", "physical_row_index_ascending"],
         "dataset ordering mismatch",
     )
     _require(
         dataset_manifest.get("deduplication")
-        == {"duplicate_key": dataset.get("duplicate_key"), "keep_rule": dataset.get("duplicate_keep_rule")},
+        == {
+            "duplicate_key": dataset.get("duplicate_key"),
+            "keep_rule": dataset.get("duplicate_keep_rule"),
+        },
         "dataset deduplication mismatch",
     )
     _validate_dataset_provenance(dataset_manifest)
