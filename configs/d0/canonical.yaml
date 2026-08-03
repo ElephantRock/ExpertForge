@@ -46,7 +46,7 @@ d0:
     dataset_revision: 84e8104e779e409e2267ac60609138e3dda2cbd2
     dataset_configuration: sample-10BT
     dataset_manifest_path: data/manifests/d0-fineweb-edu-sample-10bt-source-v1.json
-    dataset_manifest_sha256: d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df
+    dataset_manifest_sha256: 85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7
     tokenizer_repository: EleutherAI/gpt-neox-20b
     tokenizer_revision: 364ae95407723fadd1d47b023c1efb92a4d891c3
     tokenizer_manifest_path: tokenizers/manifests/d0-gpt-neox-v1.json
@@ -111,10 +111,14 @@ d0:
     rmsnorm_weight: 1.0
     all_biases_absent: true
   schedule:
+    semantic_update_indexing: optimizer_update_index_u_is_one_based_for_applied_updates; u_in_1_through_optimizer_updates
+    learning_rate_at_update_zero: 0.0
     peak_learning_rate: 0.0004
     warmup_updates: 1600
+    warmup_formula: lr(u)=peak_learning_rate*u/warmup_updates for 1<=u<=warmup_updates
     final_learning_rate: 4.0e-05
     decay: cosine
+    cosine_formula: lr(u)=final_learning_rate+0.5*(peak_learning_rate-final_learning_rate)*(1+cos(pi*(u-warmup_updates)/(optimizer_updates-warmup_updates))) for warmup_updates<u<=optimizer_updates
     training_target_tokens: 2097152000
     optimizer_updates: 32000
     validation_interval_updates: 2000
@@ -137,6 +141,18 @@ d0:
   seeds:
     master_seed: 2026080200
     substream_derivation: sha256_domain_separation
+    data_order_seed:
+      derivation_schema: expertforge.seed-derivation
+      derivation_version: 1
+      root_seed_field: seeds.master_seed
+      context:
+        component: data.order
+        worker: 0
+        rank: 0
+        device: 0
+        stream: 0
+      projection: seed_u64_first_8_sha256_bytes_big_endian_unsigned
+      data_seed_u64: 4657843784274978659
     canonical_generation_seeds:
     - 17
     - 29
