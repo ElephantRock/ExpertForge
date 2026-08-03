@@ -1,4 +1,4 @@
-"""Validate the synchronized D0.0 project-state index."""
+"""Validate the post-ratification D0 project-state index."""
 
 from __future__ import annotations
 
@@ -7,19 +7,21 @@ import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
-from scripts.validate_d0_config_binding import FINGERPRINT_PATHS, ROOT
+from scripts.validate_d0_config_binding import ROOT
 from scripts.validate_d0_final_review_report import MANIFEST_PATH as FINAL_REVIEW_MANIFEST_PATH
-from scripts.validate_d0_generation_prompts import PROMPT_MANIFEST_PATH, load_prompt_manifest
+from scripts.validate_d0_ratification_record import (
+    RATIFICATION_PATH,
+    validate_ratification_record,
+)
 from scripts.validate_d0_source_manifests import (
     CONTRACT_PATH,
     ContractValidationError,
     load_json_object,
 )
 
-MANIFEST_PATH = ROOT / "experiments/d0/project-state-v1.json"
+MANIFEST_PATH = ROOT / "experiments/d0/project-state-v2.json"
 PROJECT_STATE_PATH = ROOT / "PROJECT_STATE.md"
 _REQUIRED_HEADINGS = (
     "# PROJECT_STATE.md",
@@ -48,22 +50,8 @@ def _require(condition: bool, message: str) -> None:
         raise ContractValidationError(message)
 
 
-def _require_mapping(value: object, field: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ContractValidationError(f"{field} must be an object")
-    return value
-
-
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str], field: str) -> None:
     _require(set(value) == expected, f"{field} keys changed")
-
-
-def _fingerprint_digest(path: Path) -> str:
-    record = load_json_object(path)
-    digest = record.get("digest_str")
-    if not isinstance(digest, str):
-        raise ContractValidationError(f"{path.name}: fingerprint digest missing")
-    return digest
 
 
 def validate_project_state(
@@ -71,15 +59,25 @@ def validate_project_state(
     project_state_bytes: bytes,
     contract: Mapping[str, Any],
     final_review_manifest: Mapping[str, Any],
+    ratification_record: Mapping[str, Any],
 ) -> dict[str, object]:
-    """Validate project-state identity, frozen evidence, and authorization boundary."""
+    """Validate current project-state identity and authorization boundaries."""
 
+    ratification_report = validate_ratification_record(
+        ratification_record,
+        contract,
+        final_review_manifest,
+    )
     expected_keys = {
         "schema_version",
         "status",
         "issue",
+        "ratified_issue",
         "parent_issue",
         "pull_request",
+        "merge_commit",
+        "ratification_record_path",
+        "ratification_record_sha256",
         "project_state_path",
         "project_state_sha256",
         "current_milestone",
@@ -88,6 +86,7 @@ def validate_project_state(
         "material_execution_authorized",
         "d0_1_authorized",
         "d0_2_authorized",
+        "d0_3_authorized",
         "qualification_attempt_authorized",
         "canonical_attempt_authorized",
         "actual_corpus_scan_completed",
@@ -101,16 +100,23 @@ def validate_project_state(
     }
     _require_exact_keys(manifest, expected_keys, "project-state manifest")
     _require(
-        manifest["schema_version"] == "expertforge-d0-project-state/1",
+        manifest["schema_version"] == "expertforge-d0-project-state/2",
         "project-state schema changed",
     )
+    _require(manifest["status"] == "synchronized_ratified", "project-state status changed")
+    _require(manifest["issue"] == 44, "state-transition issue changed")
+    _require(manifest["ratified_issue"] == 42, "ratified issue changed")
+    _require(manifest["parent_issue"] == 41, "parent issue changed")
+    _require(manifest["pull_request"] == 43, "accepted pull request changed")
+    _require(manifest["merge_commit"] == ratification_record["merge_commit"], "merge commit drift")
     _require(
-        manifest["status"] == "synchronized_ratification_ready",
-        "project-state status changed",
+        manifest["ratification_record_path"] == "experiments/d0/ratification-v1.json",
+        "ratification record path changed",
     )
-    _require(manifest["issue"] == 42, "project-state issue changed")
-    _require(manifest["parent_issue"] == 41, "project-state parent issue changed")
-    _require(manifest["pull_request"] == 43, "project-state pull request changed")
+    _require(
+        manifest["ratification_record_sha256"] == ratification_report["record_sha256"],
+        "ratification record identity drift",
+    )
     _require(manifest["project_state_path"] == "PROJECT_STATE.md", "project-state path changed")
     project_state_sha256 = hashlib.sha256(project_state_bytes).hexdigest()
     _require(
@@ -121,82 +127,47 @@ def validate_project_state(
         manifest["current_milestone"] == "D0_controlled_dense_baseline",
         "current milestone changed",
     )
-    _require(
-        manifest["d0_0_state"] == "ratification_ready_pending_acceptance_merge_and_issue_closure",
-        "D0.0 project state changed",
-    )
-    _require(manifest["remaining_ratification_blockers"] == [], "project-state blocker drift")
+    _require(manifest["d0_0_state"] == "ratified", "D0.0 state changed")
+    _require(manifest["remaining_ratification_blockers"] == [], "ratification blockers remain")
+    _require(manifest["d0_1_authorized"] is True, "D0.1 must be authorized")
+    _require(manifest["d0_2_authorized"] is True, "D0.2 must be authorized")
     for field in (
         "material_execution_authorized",
-        "d0_1_authorized",
-        "d0_2_authorized",
+        "d0_3_authorized",
         "qualification_attempt_authorized",
         "canonical_attempt_authorized",
         "actual_corpus_scan_completed",
     ):
         _require(manifest[field] is False, f"{field} must remain false")
 
-    _require(contract["status"] == "proposed_not_ratified", "contract status changed prematurely")
-    _require(contract["ratification_blockers"] == [], "contract blocker state is not terminal")
-    dataset = _require_mapping(contract["dataset"], "dataset")
-    tokenizer = _require_mapping(contract["tokenizer"], "tokenizer")
-    prompts = _require_mapping(contract["generation_prompt_contract"], "generation_prompt_contract")
-    _require(
-        manifest["dataset_manifest_sha256"] == dataset["source_manifest_sha256"],
-        "project-state dataset identity drift",
-    )
-    _require(
-        manifest["tokenizer_manifest_sha256"] == tokenizer["source_manifest_sha256"],
-        "project-state tokenizer identity drift",
-    )
-    _require(
-        manifest["qualification_specification_fingerprint"]
-        == _fingerprint_digest(FINGERPRINT_PATHS["qualification"]),
-        "project-state qualification fingerprint drift",
-    )
-    _require(
-        manifest["canonical_specification_fingerprint"]
-        == _fingerprint_digest(FINGERPRINT_PATHS["canonical"]),
-        "project-state canonical fingerprint drift",
-    )
-    prompt_manifest, prompt_raw = load_prompt_manifest(PROMPT_MANIFEST_PATH)
-    _require(
-        manifest["generation_prompt_manifest_sha256"]
-        == hashlib.sha256(prompt_raw).hexdigest()
-        == prompts["manifest_sha256"],
-        "project-state prompt manifest identity drift",
-    )
-    _require(
-        manifest["generation_prompt_payload_sha256"]
-        == prompt_manifest["prompt_payload_sha256"]
-        == prompts["prompt_payload_sha256"],
-        "project-state prompt payload identity drift",
-    )
-    _require(
-        manifest["final_review_report_sha256"] == final_review_manifest["report_sha256"],
-        "project-state final review identity drift",
-    )
+    for field in (
+        "dataset_manifest_sha256",
+        "tokenizer_manifest_sha256",
+        "qualification_specification_fingerprint",
+        "canonical_specification_fingerprint",
+        "generation_prompt_manifest_sha256",
+        "generation_prompt_payload_sha256",
+        "final_review_report_sha256",
+    ):
+        _require(manifest[field] == ratification_record[field], f"project-state {field} drift")
 
     project_state = project_state_bytes.decode("utf-8")
     positions = [project_state.find(heading) for heading in _REQUIRED_HEADINGS]
     _require(all(position >= 0 for position in positions), "project-state required heading missing")
     _require(positions == sorted(positions), "project-state heading order changed")
+    lowered = project_state.casefold()
     for claim in _FORBIDDEN_CLAIMS:
-        _require(
-            claim not in project_state.casefold(),
-            f"PROJECT_STATE.md contains forbidden claim: {claim}",
-        )
+        _require(claim not in lowered, f"PROJECT_STATE.md contains forbidden claim: {claim}")
     required_phrases: Sequence[str] = (
-        "ratification-ready; not yet ratified",
-        "zero preparation blockers",
-        "Issue #42 remains open",
-        "D0.1 and D0.2 may proceed in parallel only after Issue #42 closes",
+        "D0.0 is ratified",
+        "D0.1 and D0.2 implementation work is authorized",
         "The corpus-wide contamination scan has not run",
         "No production dense model has been instantiated",
         "No material D0 execution is authorized",
+        "D0.3 remains blocked",
+        "D0.5 remains the first material engineering-training authorization",
         "uv run --locked python -m scripts.validate_d0_ratification",
     )
-    lowered = project_state.casefold()
     for phrase in required_phrases:
         _require(phrase.casefold() in lowered, f"project-state required claim missing: {phrase}")
 
@@ -209,8 +180,9 @@ def validate_project_state(
         "required_heading_count": len(_REQUIRED_HEADINGS),
         "remaining_ratification_blockers": [],
         "remaining_ratification_blocker_count": 0,
-        "d0_1_authorized": False,
-        "d0_2_authorized": False,
+        "d0_1_authorized": True,
+        "d0_2_authorized": True,
+        "d0_3_authorized": False,
         "material_execution_authorized": False,
     }
 
@@ -221,11 +193,12 @@ def validate_all() -> dict[str, object]:
         PROJECT_STATE_PATH.read_bytes(),
         load_json_object(ROOT / CONTRACT_PATH),
         load_json_object(FINAL_REVIEW_MANIFEST_PATH),
+        load_json_object(RATIFICATION_PATH),
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(description="Validate the synchronized D0.0 project state")
+    return argparse.ArgumentParser(description="Validate the ratified D0 project state")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -236,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         ContractValidationError,
         KeyError,
         OSError,
+        TypeError,
         UnicodeDecodeError,
         ValueError,
         json.JSONDecodeError,

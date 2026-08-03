@@ -1,4 +1,4 @@
-"""Run every D0.0 ratification validator as one fail-closed command."""
+"""Run every permanent D0.0 validator as one fail-closed command."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from scripts.validate_d0_generation_prompts import (
 )
 from scripts.validate_d0_parameter_inventory import validate_all as validate_parameter_inventory
 from scripts.validate_d0_project_state import validate_all as validate_project_state
+from scripts.validate_d0_ratification_record import validate_all as validate_ratification_record
 from scripts.validate_d0_source_manifests import (
     CONTRACT_PATH,
     DATASET_MANIFEST_PATH,
@@ -32,7 +33,7 @@ from scripts.validate_d0_source_manifests import (
     validate_source_manifests,
 )
 
-_SCHEMA_VERSION = "expertforge-d0-ratification-validation/1"
+_SCHEMA_VERSION = "expertforge-d0-ratification-validation/2"
 _EXPECTED_VALIDATOR_ORDER = (
     "baseline_contract",
     "source_manifests",
@@ -41,6 +42,7 @@ _EXPECTED_VALIDATOR_ORDER = (
     "parameter_inventory",
     "generation_prompts_and_contamination",
     "final_review_report",
+    "ratification_record",
     "project_state",
 )
 _EXPECTED_REMAINING_BLOCKERS: tuple[str, ...] = ()
@@ -110,7 +112,11 @@ def _validate_final_review() -> ValidationReport:
     return validate_final_review_report()
 
 
-def _validate_synchronized_project_state() -> ValidationReport:
+def _validate_ratification() -> ValidationReport:
+    return validate_ratification_record()
+
+
+def _validate_current_project_state() -> ValidationReport:
     return validate_project_state()
 
 
@@ -125,7 +131,8 @@ VALIDATION_STEPS: tuple[ValidationStep, ...] = (
         _validate_generation_prompt_contract,
     ),
     ValidationStep("final_review_report", _validate_final_review),
-    ValidationStep("project_state", _validate_synchronized_project_state),
+    ValidationStep("ratification_record", _validate_ratification),
+    ValidationStep("project_state", _validate_current_project_state),
 )
 
 
@@ -159,7 +166,7 @@ def _validate_remaining_blockers(contract: Mapping[str, Any]) -> tuple[str, ...]
 def validate_all(
     steps: Sequence[ValidationStep] = VALIDATION_STEPS,
 ) -> dict[str, object]:
-    """Execute the complete D0.0 validation bundle and return a stable report."""
+    """Execute the complete permanent D0.0 validation bundle."""
 
     _validate_step_registry(steps)
     contract = load_json_object(_contract_path())
@@ -173,12 +180,8 @@ def validate_all(
             isinstance(report, Mapping),
             f"D0 ratification validator {step.name!r} returned a non-mapping report",
         )
-        canonical_report = _canonical_bytes(report)
-        report_sha256 = hashlib.sha256(canonical_report).hexdigest()
-        validator_reports[step.name] = {
-            "status": "passed",
-            "report_sha256": report_sha256,
-        }
+        report_sha256 = hashlib.sha256(_canonical_bytes(report)).hexdigest()
+        validator_reports[step.name] = {"status": "passed", "report_sha256": report_sha256}
         aggregate_payload.append({"name": step.name, "report_sha256": report_sha256})
 
     aggregate_sha256 = hashlib.sha256(_canonical_bytes(aggregate_payload)).hexdigest()
@@ -193,14 +196,15 @@ def validate_all(
         "remaining_ratification_blocker_count": len(blockers),
         "actual_corpus_scan_completed": False,
         "actual_corpus_scan_stage": "D0.1_preflight_before_packing_or_training",
-        "d0_1_authorized": False,
-        "d0_2_authorized": False,
+        "d0_1_authorized": True,
+        "d0_2_authorized": True,
+        "d0_3_authorized": False,
         "material_execution_authorized": False,
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(description="Validate the complete D0.0 ratification bundle")
+    return argparse.ArgumentParser(description="Validate the permanent D0.0 evidence bundle")
 
 
 def main(argv: list[str] | None = None) -> int:

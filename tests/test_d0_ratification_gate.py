@@ -25,6 +25,7 @@ EXPECTED_ORDER = (
     "parameter_inventory",
     "generation_prompts_and_contamination",
     "final_review_report",
+    "ratification_record",
     "project_state",
 )
 
@@ -46,14 +47,15 @@ def test_committed_ratification_bundle_validates() -> None:
     report = validate_all()
 
     assert report["status"] == "valid_d0_ratification_bundle"
-    assert report["validator_count"] == 8
+    assert report["validator_count"] == 9
     assert report["validator_order"] == list(EXPECTED_ORDER)
     assert report["remaining_ratification_blockers"] == []
     assert report["remaining_ratification_blocker_count"] == 0
     assert report["actual_corpus_scan_completed"] is False
     assert report["actual_corpus_scan_stage"] == "D0.1_preflight_before_packing_or_training"
-    assert report["d0_1_authorized"] is False
-    assert report["d0_2_authorized"] is False
+    assert report["d0_1_authorized"] is True
+    assert report["d0_2_authorized"] is True
+    assert report["d0_3_authorized"] is False
     assert report["material_execution_authorized"] is False
 
 
