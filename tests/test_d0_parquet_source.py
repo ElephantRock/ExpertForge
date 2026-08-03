@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -68,16 +69,14 @@ def test_parquet_traversal_requires_explicit_optional_extra(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import expertforge.d0.parquet_source as source_module
-
-    real_import = source_module.importlib.import_module
+    real_import = importlib.import_module
 
     def missing_import(name: str) -> Any:
         if name == "pyarrow.parquet":
             raise ModuleNotFoundError(name)
         return real_import(name)
 
-    monkeypatch.setattr(source_module.importlib, "import_module", missing_import)
+    monkeypatch.setattr(importlib, "import_module", missing_import)
     with pytest.raises(MissingOptionalDependencyError, match="d0-data"):
         tuple(
             iter_parquet_documents(
