@@ -54,6 +54,7 @@ class ShardScanStats:
     normalized_utf8_bytes_scanned: int
     normalized_codepoints_scanned: int
     complete: bool
+    rejected_documents_by_reason: tuple[tuple[str, int], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         """Return the machine-record representation after invariant checks."""
@@ -85,10 +86,31 @@ class ShardScanStats:
             raise ScanReportError(
                 f"{self.path}: row count is smaller than accepted plus rejected documents"
             )
+
+        rejection_reasons: dict[str, int] = {}
+        previous_reason: str | None = None
+        for reason, count in self.rejected_documents_by_reason:
+            if not reason:
+                raise ScanReportError(f"{self.path}: rejection reason must not be blank")
+            _non_negative(count, f"{self.path}.rejected_documents_by_reason.{reason}")
+            if count == 0:
+                raise ScanReportError(f"{self.path}: rejection reason counts must be positive")
+            if previous_reason is not None and reason <= previous_reason:
+                raise ScanReportError(
+                    f"{self.path}: rejection reasons must be unique and sorted"
+                )
+            rejection_reasons[reason] = count
+            previous_reason = reason
+        if sum(rejection_reasons.values()) != self.rejected_documents:
+            raise ScanReportError(
+                f"{self.path}: rejection reason counts do not equal rejected_documents"
+            )
+
         return {
             "path": self.path,
             "sha256": self.sha256,
             **counts,
+            "rejected_documents_by_reason": rejection_reasons,
             "complete": self.complete,
         }
 
@@ -166,6 +188,12 @@ def build_scan_report(
     unique_documents_scanned = sum(shard.unique_documents_scanned for shard in shards)
     normalized_utf8_bytes_scanned = sum(shard.normalized_utf8_bytes_scanned for shard in shards)
     normalized_codepoints_scanned = sum(shard.normalized_codepoints_scanned for shard in shards)
+    rejected_documents_by_reason: dict[str, int] = {}
+    for shard in shards:
+        for reason, count in shard.rejected_documents_by_reason:
+            rejected_documents_by_reason[reason] = (
+                rejected_documents_by_reason.get(reason, 0) + count
+            )
 
     ordered_hits = sort_hit_records(hits)
     per_tier_match_counts: dict[str, int] = {check: 0 for check in _CHECKS}
@@ -219,6 +247,7 @@ def build_scan_report(
             "physical_rows_visited": physical_rows_visited,
             "accepted_normalized_documents": accepted_documents,
             "rejected_documents": rejected_documents,
+            "rejected_documents_by_reason": dict(sorted(rejected_documents_by_reason.items())),
             "duplicates_suppressed": duplicates_suppressed,
             "unique_documents_scanned": unique_documents_scanned,
             "normalized_utf8_bytes_scanned": normalized_utf8_bytes_scanned,
