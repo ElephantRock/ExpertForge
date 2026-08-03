@@ -6,8 +6,16 @@
     "digest": "1996ccd76638ae032bb5f81fb33f6a7972acd55c9dd0c4862b3729fc84155cce"
   },
   "immutable_inputs": [
-    {"name": "dataset.manifest", "algorithm": "sha256", "digest": "85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7"},
-    {"name": "tokenizer.manifest", "algorithm": "sha256", "digest": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"}
+    {
+      "name": "dataset.manifest",
+      "algorithm": "sha256",
+      "digest": "85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7"
+    },
+    {
+      "name": "tokenizer.manifest",
+      "algorithm": "sha256",
+      "digest": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
+    }
   ],
   "digest_str": "spec-v1-sha256-2faaa0f0beed2d1c674c7d29eb969944f9e208825a527e9f7a0024ba538815ea"
 }
