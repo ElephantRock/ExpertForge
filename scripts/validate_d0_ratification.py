@@ -22,6 +22,7 @@ from scripts.validate_d0_generation_prompts import (
     validate_generation_prompts,
 )
 from scripts.validate_d0_parameter_inventory import validate_all as validate_parameter_inventory
+from scripts.validate_d0_project_state import validate_all as validate_project_state
 from scripts.validate_d0_source_manifests import (
     CONTRACT_PATH,
     DATASET_MANIFEST_PATH,
@@ -40,8 +41,9 @@ _EXPECTED_VALIDATOR_ORDER = (
     "parameter_inventory",
     "generation_prompts_and_contamination",
     "final_review_report",
+    "project_state",
 )
-_EXPECTED_REMAINING_BLOCKERS = ("PROJECT_STATE_synchronization",)
+_EXPECTED_REMAINING_BLOCKERS: tuple[str, ...] = ()
 
 ValidationReport = Mapping[str, Any]
 Validator = Callable[[], ValidationReport]
@@ -108,6 +110,10 @@ def _validate_final_review() -> ValidationReport:
     return validate_final_review_report()
 
 
+def _validate_synchronized_project_state() -> ValidationReport:
+    return validate_project_state()
+
+
 VALIDATION_STEPS: tuple[ValidationStep, ...] = (
     ValidationStep("baseline_contract", _validate_baseline_contract),
     ValidationStep("source_manifests", _validate_source_manifests),
@@ -119,6 +125,7 @@ VALIDATION_STEPS: tuple[ValidationStep, ...] = (
         _validate_generation_prompt_contract,
     ),
     ValidationStep("final_review_report", _validate_final_review),
+    ValidationStep("project_state", _validate_synchronized_project_state),
 )
 
 
@@ -186,6 +193,8 @@ def validate_all(
         "remaining_ratification_blocker_count": len(blockers),
         "actual_corpus_scan_completed": False,
         "actual_corpus_scan_stage": "D0.1_preflight_before_packing_or_training",
+        "d0_1_authorized": False,
+        "d0_2_authorized": False,
         "material_execution_authorized": False,
     }
 
