@@ -5,7 +5,7 @@
   "parent_issue": 41,
   "pull_request": 43,
   "project_state_path": "PROJECT_STATE.md",
-  "project_state_sha256": "6df545403d763304fc084d02be2f8a8effb5672c1983233c92216f8545a25f83",
+  "project_state_sha256": "667ddf0ca75d2bcda9a25774e245a5940fbea65888d168cf39e5fd2d23db16f8",
   "current_milestone": "D0_controlled_dense_baseline",
   "d0_0_state": "ratification_ready_pending_acceptance_merge_and_issue_closure",
   "remaining_ratification_blockers": [],
@@ -15,11 +15,11 @@
   "qualification_attempt_authorized": false,
   "canonical_attempt_authorized": false,
   "actual_corpus_scan_completed": false,
-  "dataset_manifest_sha256": "d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df",
+  "dataset_manifest_sha256": "85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7",
   "tokenizer_manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c",
-  "qualification_specification_fingerprint": "spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe",
-  "canonical_specification_fingerprint": "spec-v1-sha256-2167b1f07873c3aed6112c38c7de5cdcece6ac3b94d91acde2d605ec2decfb0b",
-  "generation_prompt_manifest_sha256": "851934e4a49210b515967fad51308038dac1e7bc449774ca603f6bd9f47ccf3e",
+  "qualification_specification_fingerprint": "spec-v1-sha256-02093a3c05c8b5079e2c4fbb8bafaada6365c0776a3a94ca3a8143873167f6d3",
+  "canonical_specification_fingerprint": "spec-v1-sha256-2faaa0f0beed2d1c674c7d29eb969944f9e208825a527e9f7a0024ba538815ea",
+  "generation_prompt_manifest_sha256": "c748706d9706e42bc0147d62c80f8f486ebb6aaa72fb53140b491ce7706e18c1",
   "generation_prompt_payload_sha256": "c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51",
-  "final_review_report_sha256": "c41573a01f7f0568221b7e12edf87a50dd2ab54f39e9d53de37af68a088060b9"
+  "final_review_report_sha256": "a2559202fe8f76572c4f5a719285e840fdd95f23345c6da8f73f4ad9942504e1"
 }
