@@ -1,0 +1,44 @@
+{
+  "schema_version": "expertforge-d0-project-state/3-proposal",
+  "status": "ratified_with_pending_primitive_semantics_amendment",
+  "issue": 48,
+  "parent_issue": 41,
+  "ratified_issue": 42,
+  "pull_request": 50,
+  "base_main_commit": "ca2601735cda2737567ace5b08e9dda7c6e119e6",
+  "supersedes_path": "experiments/d0/project-state-v2.json",
+  "primitive_semantics_amendment_path": "experiments/d0/primitive-semantics-amendment-v1.proposed.json",
+  "primitive_semantics_amendment_sha256": "5bc196942697833c4dfe9f227b16e2b69c6cafd07b05396a70650ecb34cebab0",
+  "formal_experiment_definition_path": "experiments/d0/formal-experiment-definition-v2.json",
+  "profiles": {
+    "qualification": {
+      "config_path": "configs/d0/qualification-primitive-v2.yaml",
+      "canonical_config_sha256": "c1f0a4893a56bad1019352c6d534c556d1db0c63e4d7c43c4676c322cc244ea1",
+      "fingerprint_path": "experiments/d0/qualification-fingerprint-v2.json",
+      "specification_fingerprint": "spec-v1-sha256-8f1390a73ddad0f22d2354a2b45a42c5563c448b08ee317dd80e7d0ac83dfe91"
+    },
+    "canonical": {
+      "config_path": "configs/d0/canonical-primitive-v2.yaml",
+      "canonical_config_sha256": "49def2ad8500bde97c9aac792bf498f03aed062cc2a4120d1877491822544506",
+      "fingerprint_path": "experiments/d0/canonical-fingerprint-v2.json",
+      "specification_fingerprint": "spec-v1-sha256-edd02b2b7b130caaeb05b653729f9952a53f64f149204a602a3f657a4f05edfb"
+    }
+  },
+  "historical_records_mutated": false,
+  "prior_d0_model_attempts_invalidated": false,
+  "reason_no_attempt_invalidated": "no_D0_model_attempt_exists",
+  "d0_0_state": "ratified_with_pending_primitive_semantics_amendment",
+  "d0_1_authorized": true,
+  "d0_2_implementation_authorized": true,
+  "d0_2_acceptance_authorized": false,
+  "d0_3_authorized": false,
+  "material_execution_authorized": false,
+  "qualification_attempt_authorized": false,
+  "canonical_attempt_authorized": false,
+  "remaining_amendment_blockers": [
+    "amendment_review_not_yet_accepted",
+    "exact_head_ci_not_yet_accepted"
+  ],
+  "digest_policy": "sha256(canonical_json_without_project_state_sha256)",
+  "project_state_sha256": "4f745fca068196dc55c025115db62ea03a23ca15b1e134106ac57294c2ea3c2c"
+}
