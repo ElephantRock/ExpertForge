@@ -1,0 +1,201 @@
+# Exact D0 configuration. Every execution-semantic field is explicit.
+format_version: 1
+run:
+  name: d0-canonical-v1
+  description: D0 canonical dense-baseline contract configuration.
+data:
+  dataset_id: HuggingFaceFW/fineweb-edu@84e8104e779e409e2267ac60609138e3dda2cbd2:sample-10BT
+  split: train
+  seq_len: 1024
+tokenizer:
+  tokenizer_id: EleutherAI/gpt-neox-20b@364ae95407723fadd1d47b023c1efb92a4d891c3
+  vocab_size: 50257
+model:
+  dim: 576
+  n_layers: 12
+  n_heads: 9
+  ffn_dim: 1536
+training:
+  seed: 2026080200
+  determinism_mode: reproducible
+  unsupported_determinism: error
+  tokens: 2097152000
+  batch_size: 64
+  seq_len: 1024
+  lr: 0.0004
+evaluation:
+  eval_interval_tokens: 131072000
+  loss_improvement_threshold: 1.0
+checkpointing:
+  interval_tokens: 131072000
+logging:
+  log_interval_steps: 10
+  level: INFO
+  console_enabled: true
+  fsync_interval_records: 100
+artifacts:
+  dir: runs/d0/canonical
+hardware:
+  device: cuda
+  dtype: bf16
+d0:
+  profile: canonical
+  sources:
+    contract_path: experiments/d0/baseline-contract-v1.proposed.json
+    dataset_repository: HuggingFaceFW/fineweb-edu
+    dataset_revision: 84e8104e779e409e2267ac60609138e3dda2cbd2
+    dataset_configuration: sample-10BT
+    dataset_manifest_path: data/manifests/d0-fineweb-edu-sample-10bt-source-v1.json
+    dataset_manifest_sha256: 85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7
+    tokenizer_repository: EleutherAI/gpt-neox-20b
+    tokenizer_revision: 364ae95407723fadd1d47b023c1efb92a4d891c3
+    tokenizer_manifest_path: tokenizers/manifests/d0-gpt-neox-v1.json
+    tokenizer_manifest_sha256: eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c
+  architecture:
+    family: decoder_only_transformer
+    attention: exact_causal_multi_head_self_attention
+    normalization: pre_norm_rmsnorm
+    position_encoding: rope
+    feed_forward: swiglu
+    objective: next_token_prediction
+    embedding_output_tied: true
+    biases: false
+    dropout: 0.0
+    rmsnorm_epsilon: 1.0e-05
+    rope_base: 10000
+    rope_dimension_coverage: full_head_dimension
+    rope_scaling: none
+  sequence:
+    model_context_tokens: 1024
+    packed_source_window_tokens: 1025
+    input_tokens_per_sequence: 1024
+    target_tokens_per_sequence: 1024
+    cursor_advance_tokens_per_sequence: 1024
+    input_lookback_overlap_tokens: 1
+    cross_document_attention: true
+    padding_used: false
+    all_target_positions_in_loss: true
+    processed_token_definition: non_padding_target_tokens_participating_in_training_loss
+  model:
+    model_id: d0-canonical-76m-v1
+    head_dimension: 64
+    trainable_parameters: 76738176
+    non_trainable_parameters: 0
+    parameter_formula: V*d + L*(4*d^2 + 3*d*f + 2*d) + d
+    swiglu_rounding_rule: ceil_to_multiple((8/3)*model_width,256)
+    rope_trainable_parameters: 0
+    separate_output_head_parameters: 0
+  batch:
+    devices: 1
+    microbatch_sequences_per_device: 4
+    gradient_accumulation_steps: 16
+    global_sequences_per_update: 64
+    target_tokens_per_update: 65536
+  optimizer:
+    name: AdamW
+    beta1: 0.9
+    beta2: 0.95
+    epsilon: 1.0e-08
+    weight_decay: 0.1
+    weight_decay_includes:
+    - attention_matrix_weights
+    - swiglu_matrix_weights
+    weight_decay_excludes:
+    - token_embedding_weight
+    - rmsnorm_weights
+    gradient_clip_global_l2_norm: 1.0
+    loss_reduction: mean_over_all_target_tokens_in_optimizer_update
+  initialization:
+    embedding_qkv_swiglu_gate_up_std: 0.02
+    attention_output_and_swiglu_down_std: 0.02/sqrt(2*layers)
+    rmsnorm_weight: 1.0
+    all_biases_absent: true
+  schedule:
+    semantic_update_indexing: optimizer_update_index_u_is_one_based_for_applied_updates; u_in_1_through_optimizer_updates
+    learning_rate_at_update_zero: 0.0
+    peak_learning_rate: 0.0004
+    warmup_updates: 1600
+    warmup_formula: lr(u)=peak_learning_rate*u/warmup_updates for 1<=u<=warmup_updates
+    final_learning_rate: 4.0e-05
+    decay: cosine
+    cosine_formula: lr(u)=final_learning_rate+0.5*(peak_learning_rate-final_learning_rate)*(1+cos(pi*(u-warmup_updates)/(optimizer_updates-warmup_updates))) for warmup_updates<u<=optimizer_updates
+    training_target_tokens: 2097152000
+    optimizer_updates: 32000
+    validation_interval_updates: 2000
+    checkpoint_interval_updates: 2000
+    generation_interval_updates: 2000
+    profiling_interval_updates: 2000
+  precision:
+    primary_accelerator: single_CUDA_accelerator_with_native_BF16
+    minimum_device_memory_bytes: 25769803776
+    minimum_host_memory_bytes: 68719476736
+    minimum_free_local_storage_bytes: 1099511627776
+    parameter_and_compute_dtype: bfloat16
+    gradient_accumulation_dtype: float32
+    loss_reduction_dtype: float32
+    optimizer_state_dtype: float32
+    master_parameter_dtype: float32
+    canonical_fallback: none_fail_closed
+    qualification_fallback: float32_as_distinct_non_equivalent_attempt
+    fp16_authorized: false
+  seeds:
+    master_seed: 2026080200
+    substream_derivation: sha256_domain_separation
+    data_order_seed:
+      derivation_schema: expertforge.seed-derivation
+      derivation_version: 1
+      root_seed_field: seeds.master_seed
+      context:
+        component: data.order
+        worker: 0
+        rank: 0
+        device: 0
+        stream: 0
+      projection: seed_u64_first_8_sha256_bytes_big_endian_unsigned
+      data_seed_u64: 4657843784274978659
+    canonical_generation_seeds:
+    - 17
+    - 29
+    - 43
+    qualification_requires_uninterrupted_and_interrupted_resumed_match: true
+    canonical_requires_genuine_interruption_into_distinct_attempt: true
+    training_seed_variance_claimed: false
+  evaluation:
+    validation_target_tokens_per_boundary: 8388608
+    validation_loss_units: natural_log_nats
+    perplexity: exp(validation_loss)
+    generation_prompt_count: 8
+    generation_max_new_tokens: 128
+    generation_temperature: 0.8
+    generation_top_p: 0.95
+    generation_top_k: null
+    generation_repetition_penalty: 1.0
+    generation_stop_token_id: 0
+    throughput_measurement_updates: 100
+    throughput_warmup_updates: 5
+    inference_batch_size: 1
+    inference_input_tokens: 512
+    inference_generated_tokens: 128
+    inference_warmup_runs: 1
+    inference_measured_runs: 10
+  thresholds:
+    minimum_final_validation_loss_improvement_nats: 1.0
+    maximum_final_loss_above_best_prior_nats: 0.05
+    maximum_consecutive_regressing_validation_boundaries: 2
+    regression_boundary_delta_nats: 0.1
+    minimum_final_to_initial_throughput_ratio: 0.8
+    maximum_skipped_updates: 0
+    maximum_peak_device_memory_fraction: 0.95
+    requires_exact_checkpoint_round_trip: null
+    requires_locked_environment_resume_equality: null
+    maximum_checkpoint_write_seconds: 300
+    maximum_checkpoint_read_seconds: 300
+    maximum_peak_host_memory_fraction: 0.9
+    minimum_loss_improvement_at_quarter_budget_nats: 0.1
+    maximum_rejected_recovery_attempts_before_kill: 1
+    kill_on_any_non_finite_value: true
+    kill_on_any_skipped_optimizer_update: true
+    kill_on_any_checkpoint_or_resume_state_mismatch: true
+    maximum_out_of_memory_failures_after_remediation: 1
+    maximum_failed_recovery_attempts: 2
+    minimum_loss_improvement_at_half_budget_nats: 0.1

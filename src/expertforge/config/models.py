@@ -1,31 +1,24 @@
 """Frozen Pydantic configuration models (Issue #5 decision §2).
 
-All models use::
-
-    ConfigDict(frozen=True, extra="forbid", validate_default=True)
-
-with strict/constrained scalars and explicit cross-field validators. These are
-the canonical typed configuration sections. YAML is the authoring format only;
-these models are the validated in-memory representation.
+The optional D0 section is an additive format-version-1 extension. Legacy
+configuration files do not acquire behavioral fingerprint changes: canonical
+serialization omits the section when it is absent.
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from expertforge.config.d0_models import D0Config
 
 __all__ = [
     "CONFIG_FORMAT_VERSION",
     "ArtifactConfig",
     "CheckpointConfig",
     "ConfigRoot",
+    "D0Config",
     "DataConfig",
     "EvaluationConfig",
     "HardwareConfig",
@@ -36,17 +29,11 @@ __all__ = [
     "TrainingConfig",
 ]
 
-
-# The configuration format version. Bumped when the on-disk schema changes in a
-# way that invalidates existing source files. Issue #5 decision §1/§2 require a
-# format/version field and compatibility policy.
 CONFIG_FORMAT_VERSION: int = 1
 
 
 class _Section(BaseModel):
-    """Base for every configuration section: frozen, forbid extras, validate
-    defaults, and reject non-finite floats so NaN/Infinity can never reach the
-    configuration (Issue #5 review item 6)."""
+    """Frozen, strict configuration section with unknown fields forbidden."""
 
     model_config = ConfigDict(
         frozen=True,
@@ -56,46 +43,30 @@ class _Section(BaseModel):
     )
 
 
-# --- project / run ---------------------------------------------------------
-
-
 class RunConfig(_Section):
     """Identity and lifecycle of a single run."""
 
     name: str = Field(..., min_length=1, description="Stable run identifier.")
-    # Optional human description; no machine semantics.
     description: str = Field(default="", description="Free-form run description.")
 
 
-# --- data ------------------------------------------------------------------
-
-
 class DataConfig(_Section):
-    """Versioned dataset identity. The dataset itself is out of scope for #5;
-    these fields establish the immutable-identity contract early."""
+    """Versioned dataset identity."""
 
     dataset_id: str = Field(default="fixture-tiny", description="Immutable dataset identifier.")
     split: str = Field(default="train", description="Which split to consume.")
     seq_len: int = Field(default=128, gt=0, description="Packed sequence length in tokens.")
 
 
-# --- tokenizer -------------------------------------------------------------
-
-
 class TokenizerConfig(_Section):
-    """Tokenizer identity. The tokenizer is a versioned model component
-    (doctrine/data-and-training.md §2)."""
+    """Tokenizer identity."""
 
     tokenizer_id: str = Field(default="fixture-byte", description="Immutable tokenizer identifier.")
     vocab_size: int = Field(default=256, gt=0, description="Vocabulary size.")
 
 
-# --- model -----------------------------------------------------------------
-
-
 class ModelConfig(_Section):
-    """Decoder-only dense model dimensions (D0 policy,
-    doctrine/model-lineage.md §1). dim must be divisible by n_heads."""
+    """Decoder-only dense model dimensions."""
 
     dim: int = Field(..., gt=0, description="Model hidden dimension.")
     n_layers: int = Field(..., gt=0, description="Number of transformer blocks.")
@@ -111,123 +82,55 @@ class ModelConfig(_Section):
         return self
 
 
-# --- training --------------------------------------------------------------
-
-
 class TrainingConfig(_Section):
-    """Training-loop parameters and the root reproducibility policy.
-
-    ``seed`` is the one declared root seed. Runtime subsystems derive separate,
-    domain-separated streams from it; callers must not reuse it directly for
-    every component (Issue #8).
-    """
+    """Training-loop parameters and root reproducibility policy."""
 
     seed: int = Field(..., description="Root RNG seed for deterministic derived streams.")
-    determinism_mode: Literal["reproducible", "performance"] = Field(
-        default="reproducible",
-        description="Reproducible enforcement or explicitly non-deterministic performance mode.",
-    )
-    unsupported_determinism: Literal["error", "warn"] = Field(
-        default="error",
-        description="Fail or return typed warnings when deterministic enforcement is unavailable.",
-    )
+    determinism_mode: Literal["reproducible", "performance"] = Field(default="reproducible")
+    unsupported_determinism: Literal["error", "warn"] = Field(default="error")
     tokens: int = Field(..., gt=0, description="Training-token budget for this run.")
     batch_size: int = Field(..., gt=0, description="Effective batch size in sequences.")
-    seq_len: int | None = Field(default=None, gt=0, description="Override for data.seq_len if set.")
-    lr: float = Field(..., gt=0.0, allow_inf_nan=False, description="Peak learning rate (finite).")
-
-
-# --- evaluation ------------------------------------------------------------
+    seq_len: int | None = Field(default=None, gt=0)
+    lr: float = Field(..., gt=0.0, allow_inf_nan=False)
 
 
 class EvaluationConfig(_Section):
-    """Evaluation cadence. Concrete metrics arrive with later issues.
+    """Evaluation cadence and optional smoke-gate threshold."""
 
-    ``loss_improvement_threshold`` is an optional, predeclared finite
-    loss-improvement criterion used by the Milestone 0 smoke gate (Issue #14
-    amendment J): a run is accepted only when its final fixed-validation loss
-    improves over the initial value by at least this threshold. It is optional
-    here so existing configurations remain valid; the dedicated smoke-gate
-    configuration sets it explicitly and the smoke orchestrator rejects a
-    missing value. A non-smoke run leaves it unset. Any threshold change after
-    observing gate evidence requires an explicit design amendment and fresh
-    evidence.
-    """
-
-    eval_interval_tokens: int = Field(
-        default=1024, gt=0, description="Evaluate every N processed tokens."
-    )
+    eval_interval_tokens: int = Field(default=1024, gt=0)
     loss_improvement_threshold: float | None = Field(
         default=None,
         gt=0.0,
         allow_inf_nan=False,
-        description=(
-            "Predeclared finite validation-loss improvement required for smoke-gate "
-            "acceptance (Issue #14 amendment J). Optional; the dedicated gate config sets it."
-        ),
     )
-
-
-# --- checkpointing ---------------------------------------------------------
 
 
 class CheckpointConfig(_Section):
-    """Checkpoint cadence. interval_tokens must not exceed the token budget."""
+    """Checkpoint cadence."""
 
-    interval_tokens: int = Field(
-        default=512, gt=0, description="Write a checkpoint every N processed tokens."
-    )
-
-
-# --- logging ---------------------------------------------------------------
+    interval_tokens: int = Field(default=512, gt=0)
 
 
 class LoggingConfig(_Section):
-    """Structured logging cadence.
+    """Structured logging controls."""
 
-    ``console_enabled`` and ``fsync_interval_records`` are additive Issue #9
-    fields; the configuration format version is unchanged (Issue #5 §1/§2).
-    Existing ``level`` controls event filtering; metrics are never discarded
-    solely because of log severity. ``log_interval_steps`` remains the caller's
-    cadence policy.
-    """
-
-    log_interval_steps: int = Field(
-        default=10, gt=0, description="Emit a log line every N optimizer steps."
-    )
+    log_interval_steps: int = Field(default=10, gt=0)
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="INFO")
-    # Issue #9 (design comment 5136093570 §9): additive telemetry-writer controls.
-    console_enabled: bool = Field(
-        default=True, description="Render telemetry records to the console."
-    )
-    fsync_interval_records: int = Field(
-        default=100,
-        ge=1,
-        description="fsync the telemetry stream every N written records.",
-    )
-
-
-# --- artifacts -------------------------------------------------------------
+    console_enabled: bool = Field(default=True)
+    fsync_interval_records: int = Field(default=100, ge=1)
 
 
 class ArtifactConfig(_Section):
-    """Where run artifacts are written. Real artifacts live outside the repo
-    (doctrine/collaboration.md §14); this only records the location policy."""
+    """Run-artifact location policy."""
 
-    dir: str = Field(default="runs", description="Run output directory (gitignored).")
-
-
-# --- hardware / runtime ----------------------------------------------------
+    dir: str = Field(default="runs")
 
 
 class HardwareConfig(_Section):
-    """Hardware/runtime target. No GPU requirement in Milestone 0 (#4 non-goal)."""
+    """Hardware/runtime target."""
 
     device: Literal["auto", "cpu", "cuda"] = Field(default="auto")
     dtype: Literal["bf16", "fp16", "fp32"] = Field(default="fp32")
-
-
-# --- root ------------------------------------------------------------------
 
 
 class ConfigRoot(_Section):
@@ -248,16 +151,17 @@ class ConfigRoot(_Section):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     hardware: HardwareConfig = Field(default_factory=HardwareConfig)
+    d0: D0Config | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("format_version")
     @classmethod
-    def _check_format_version(cls, v: int) -> int:
-        if v != CONFIG_FORMAT_VERSION:
+    def _check_format_version(cls, value: int) -> int:
+        if value != CONFIG_FORMAT_VERSION:
             raise ValueError(
-                f"Unsupported configuration format_version {v}; this version of "
+                f"Unsupported configuration format_version {value}; this version of "
                 f"ExpertForge understands format_version={CONFIG_FORMAT_VERSION}."
             )
-        return v
+        return value
 
     @model_validator(mode="after")
     def _checkpoint_interval_within_budget(self) -> ConfigRoot:

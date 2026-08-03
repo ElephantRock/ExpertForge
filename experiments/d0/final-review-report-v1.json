@@ -1,0 +1,23 @@
+{
+  "schema_version": "expertforge-d0-final-review-report/1",
+  "status": "prospective_contract_review_complete",
+  "issue": 42,
+  "parent_issue": 41,
+  "pull_request": 43,
+  "report_path": "reports/d0-baseline-contract-final-review.md",
+  "report_sha256": "a2559202fe8f76572c4f5a719285e840fdd95f23345c6da8f73f4ad9942504e1",
+  "review_disposition": "accept_for_PROJECT_STATE_synchronization",
+  "remaining_ratification_blockers": [
+    "PROJECT_STATE_synchronization"
+  ],
+  "material_execution_authorized": false,
+  "actual_corpus_scan_completed": false,
+  "qualification_attempt_exists": false,
+  "canonical_attempt_exists": false,
+  "dataset_manifest_sha256": "85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7",
+  "tokenizer_manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c",
+  "qualification_specification_fingerprint": "spec-v1-sha256-02093a3c05c8b5079e2c4fbb8bafaada6365c0776a3a94ca3a8143873167f6d3",
+  "canonical_specification_fingerprint": "spec-v1-sha256-2faaa0f0beed2d1c674c7d29eb969944f9e208825a527e9f7a0024ba538815ea",
+  "generation_prompt_manifest_sha256": "c748706d9706e42bc0147d62c80f8f486ebb6aaa72fb53140b491ce7706e18c1",
+  "generation_prompt_payload_sha256": "c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51"
+}

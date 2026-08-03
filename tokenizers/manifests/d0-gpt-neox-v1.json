@@ -1,0 +1,63 @@
+{
+  "schema_version": "expertforge-tokenizer-source-manifest/1",
+  "manifest_id": "d0-gpt-neox-v1",
+  "digest_policy": "sha256(canonical_json_without_manifest_sha256)",
+  "upstream": {
+    "repository": "EleutherAI/gpt-neox-20b",
+    "revision": "364ae95407723fadd1d47b023c1efb92a4d891c3",
+    "license": "Apache-2.0"
+  },
+  "tokenizer": {
+    "family": "byte_level_bpe",
+    "vocabulary_size": 50257,
+    "normalizer": "none",
+    "pre_tokenizer": {
+      "type": "ByteLevel",
+      "add_prefix_space": false
+    },
+    "special_tokens": [
+      {
+        "token": "<|endoftext|>",
+        "token_id": 0,
+        "roles": [
+          "bos",
+          "document_boundary",
+          "eos",
+          "unk"
+        ]
+      }
+    ],
+    "padding_token": null,
+    "training_document_boundary_token_id": 0
+  },
+  "files": [
+    {
+      "path": "merges.txt",
+      "sha256": "0a1f07b1d32153dcdf48f57189b0c217a69b11e11a3bee8a053861987e1640e4",
+      "size_bytes": 456583
+    },
+    {
+      "path": "special_tokens_map.json",
+      "sha256": "c0b3c279b6ecdb71996a86ffb4d4ab94dfdb5df95f00bac9515688faef2ff5dd",
+      "size_bytes": 90
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "c24618a1b3e6a38167beff1c72cffd126c3a66254347304b50547d12c5f25624",
+      "size_bytes": 2113710
+    },
+    {
+      "path": "tokenizer_config.json",
+      "sha256": "6c50f7b37042a059c71a347be27bc53cc4fcb0f6c8166b00712f3937c91e6bc7",
+      "size_bytes": 156
+    },
+    {
+      "path": "vocab.json",
+      "sha256": "4529c7dbac8210536fdda3b82c499bd4fba0a1bf529dd571fef92448ff3f440c",
+      "size_bytes": 1077392
+    }
+  ],
+  "file_count": 5,
+  "total_size_bytes": 3647931,
+  "manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
+}

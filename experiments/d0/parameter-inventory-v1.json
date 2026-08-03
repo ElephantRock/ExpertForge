@@ -1,0 +1,295 @@
+{
+  "schema_version": "expertforge-d0-parameter-inventory/1",
+  "status": "proposed_not_ratified",
+  "issue": 42,
+  "parent_issue": 41,
+  "contract_path": "experiments/d0/baseline-contract-v1.proposed.json",
+  "counting_semantics": {
+    "counted_quantity": "trainable_parameter_elements",
+    "tensor_instance_definition": "distinct_parameter_tensors_after_layer_multiplicity_expansion",
+    "shape_rule": "product_of_resolved_positive_integer_dimensions",
+    "multiplicity_rule": "positive_integer_or_profile_dimension_symbol",
+    "aliases_counted_once": true,
+    "buffers_are_parameters": false
+  },
+  "parameter_terms": [
+    {
+      "name": "token_embedding.weight",
+      "role": "shared_token_embedding_and_output_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "V",
+        "d"
+      ],
+      "multiplicity": 1
+    },
+    {
+      "name": "blocks.attention_norm.weight",
+      "role": "pre_attention_rmsnorm_scale",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.attention.q_proj.weight",
+      "role": "query_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d",
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.attention.k_proj.weight",
+      "role": "key_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d",
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.attention.v_proj.weight",
+      "role": "value_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d",
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.attention.out_proj.weight",
+      "role": "attention_output_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d",
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.ffn_norm.weight",
+      "role": "pre_feed_forward_rmsnorm_scale",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.ffn.gate_proj.weight",
+      "role": "swiglu_gate_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "f",
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.ffn.up_proj.weight",
+      "role": "swiglu_up_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "f",
+        "d"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "blocks.ffn.down_proj.weight",
+      "role": "swiglu_down_projection",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d",
+        "f"
+      ],
+      "multiplicity": "L"
+    },
+    {
+      "name": "final_norm.weight",
+      "role": "final_rmsnorm_scale",
+      "parameter_kind": "weight",
+      "trainable": true,
+      "shape": [
+        "d"
+      ],
+      "multiplicity": 1
+    }
+  ],
+  "aliases": [
+    {
+      "name": "output_head.weight",
+      "alias_of": "token_embedding.weight",
+      "storage": "shared",
+      "additional_parameter_elements": 0
+    }
+  ],
+  "zero_parameter_components": [
+    {
+      "name": "attention_projection_biases",
+      "expected_parameter_elements": 0,
+      "reason": "all attention projections are bias-free"
+    },
+    {
+      "name": "feed_forward_projection_biases",
+      "expected_parameter_elements": 0,
+      "reason": "all SwiGLU projections are bias-free"
+    },
+    {
+      "name": "normalization_biases",
+      "expected_parameter_elements": 0,
+      "reason": "RMSNorm has one scale vector and no bias"
+    },
+    {
+      "name": "rope_trainable_parameters",
+      "expected_parameter_elements": 0,
+      "reason": "RoPE frequencies are derived and not trainable parameters"
+    },
+    {
+      "name": "dropout_trainable_parameters",
+      "expected_parameter_elements": 0,
+      "reason": "dropout is disabled and has no parameters"
+    },
+    {
+      "name": "separate_output_head_parameters",
+      "expected_parameter_elements": 0,
+      "reason": "the output projection shares token_embedding.weight"
+    }
+  ],
+  "profiles": {
+    "qualification": {
+      "model_id": "d0-qualification-19m-v1",
+      "dimensions": {
+        "V": 50257,
+        "L": 8,
+        "d": 256,
+        "f": 768
+      },
+      "expected_trainable_parameters": 19685888,
+      "expected_term_elements": [
+        {
+          "name": "token_embedding.weight",
+          "parameter_elements": 12865792
+        },
+        {
+          "name": "blocks.attention_norm.weight",
+          "parameter_elements": 2048
+        },
+        {
+          "name": "blocks.attention.q_proj.weight",
+          "parameter_elements": 524288
+        },
+        {
+          "name": "blocks.attention.k_proj.weight",
+          "parameter_elements": 524288
+        },
+        {
+          "name": "blocks.attention.v_proj.weight",
+          "parameter_elements": 524288
+        },
+        {
+          "name": "blocks.attention.out_proj.weight",
+          "parameter_elements": 524288
+        },
+        {
+          "name": "blocks.ffn_norm.weight",
+          "parameter_elements": 2048
+        },
+        {
+          "name": "blocks.ffn.gate_proj.weight",
+          "parameter_elements": 1572864
+        },
+        {
+          "name": "blocks.ffn.up_proj.weight",
+          "parameter_elements": 1572864
+        },
+        {
+          "name": "blocks.ffn.down_proj.weight",
+          "parameter_elements": 1572864
+        },
+        {
+          "name": "final_norm.weight",
+          "parameter_elements": 256
+        }
+      ],
+      "expected_parameter_tensor_instances": 74,
+      "expected_parameter_families": 11,
+      "expected_non_trainable_parameters": 0
+    },
+    "canonical": {
+      "model_id": "d0-canonical-76m-v1",
+      "dimensions": {
+        "V": 50257,
+        "L": 12,
+        "d": 576,
+        "f": 1536
+      },
+      "expected_trainable_parameters": 76738176,
+      "expected_term_elements": [
+        {
+          "name": "token_embedding.weight",
+          "parameter_elements": 28948032
+        },
+        {
+          "name": "blocks.attention_norm.weight",
+          "parameter_elements": 6912
+        },
+        {
+          "name": "blocks.attention.q_proj.weight",
+          "parameter_elements": 3981312
+        },
+        {
+          "name": "blocks.attention.k_proj.weight",
+          "parameter_elements": 3981312
+        },
+        {
+          "name": "blocks.attention.v_proj.weight",
+          "parameter_elements": 3981312
+        },
+        {
+          "name": "blocks.attention.out_proj.weight",
+          "parameter_elements": 3981312
+        },
+        {
+          "name": "blocks.ffn_norm.weight",
+          "parameter_elements": 6912
+        },
+        {
+          "name": "blocks.ffn.gate_proj.weight",
+          "parameter_elements": 10616832
+        },
+        {
+          "name": "blocks.ffn.up_proj.weight",
+          "parameter_elements": 10616832
+        },
+        {
+          "name": "blocks.ffn.down_proj.weight",
+          "parameter_elements": 10616832
+        },
+        {
+          "name": "final_norm.weight",
+          "parameter_elements": 576
+        }
+      ],
+      "expected_parameter_tensor_instances": 110,
+      "expected_parameter_families": 11,
+      "expected_non_trainable_parameters": 0
+    }
+  }
+}

@@ -1,114 +1,177 @@
 # PROJECT_STATE.md
 
 **Index of current project state.** This file is an index, not a substitute for
-detailed issue and pull-request records. When this file conflicts with the
-underlying issues/PRs or with `main`, those prevail.
+detailed issue, pull-request, decision, report, manifest, or accepted-run
+records. When it conflicts with those records or with `main`, those prevail.
 
-Last updated: Milestone 0 implementation complete; #14 (final gate) delivered with #13 closing through the same PR. All 11 child issues close on merge; acceptance report at reports/milestone-0-smoke-gate.md.
+Last updated: D0.0 acceptance-review corrections are complete on PR #43. The
+prospective contract is ratification-ready with zero preparation blockers;
+Issue #42 remains open. No D0.1/D0.2 implementation or material execution is
+authorized until explicit acceptance, merge, and issue closure.
 
 ## Current milestone
 
-- **Milestone 0 — Experimental substrate.** Status: **implementation complete**
-  (closes on merge of the #13/#14 PR). The end-to-end smoke & recovery gate
-  (#14) proves the substrate composes with exact computational-state
-  reproducibility across an interrupt/resume boundary; see
-  [reports/milestone-0-smoke-gate.md](reports/milestone-0-smoke-gate.md).
-- No large training run begins before Milestone 0 is complete.
-- Milestone 0 is complete when the repository provides: validated configuration
-  loading; run identity generation; source provenance capture; deterministic seed
-  management; logging and metric collection; artifact management; checkpoint
-  serialization and restoration; experiment-manifest generation; hardware /
-  environment capture; automated tests; a minimal training smoke test
-  (umbrella #3; charter; AGENTS; founding spec §20). All delivered.
+- **D0 — Controlled dense baseline program (#41).** Status: **D0.0
+  ratification-ready; not yet ratified**.
+- Milestone 0 is complete and supplies the configuration, identity, provenance,
+  seed/RNG, telemetry, artifact, checkpoint, manifest, CI, smoke, and recovery
+  substrate used by D0.
+- D0.0 freezes a prospective scientific and execution contract. It does not
+  establish a model result or authorize a qualification or canonical run.
 
-## Milestone 0 issue hierarchy
+## D0 work-package state
 
-Umbrella: **#3 — Milestone 0: Build the experimental substrate.** Dependency
-order (see #3 for the full graph):
+| Work package | State | Authorization boundary |
+|---|---|---|
+| D0.0 baseline contract (#42) | Corrected and ratification-ready on PR #43 | Await acceptance, merge, and closure |
+| D0.1 immutable data pipeline | Blocked | Authorized only after #42 closes |
+| D0.2 dense model implementation | Blocked | Authorized only after #42 closes |
+| D0.3 production training path | Blocked | Requires accepted D0.1 and D0.2 |
+| D0.4 evaluation and profiling | Blocked | Requires model/training integration |
+| D0.5 qualification run | Blocked | First material training authorization |
+| D0.6 canonical run | Blocked | Requires accepted D0.5 |
+| D0.7 baseline freeze | Blocked | Requires accepted canonical evidence |
 
-- **Foundation** — #4 scaffold · #5 configuration · #6 run identity
-- **Reproducibility & observability** — #7 provenance/environment · #8 seed/RNG ·
-  #9 logging/metrics
-- **Persistence & evidence** — #10 artifacts · #11 checkpoints · #12 manifests
-- **Verification & integration** — #13 test/CI harness · #14 smoke-and-recovery gate
+D0.1 and D0.2 may proceed in parallel only after Issue #42 closes. No corpus
+processing, contamination scan, model implementation, training, generation, or
+experiment attempt is represented as complete by D0.0.
 
-#13 integrates tests throughout Milestone 0; #14 is strictly last. #13 and #14
-close together through the #14 PR (one PR closes two child issues); attribution
-for #13's remaining responsibility (the permanent #14 smoke integration) is
-posted on umbrella #3.
+## Frozen D0.0 prospective contract
 
-**Progress:** **11 of 11 child issues delivered** (#4–#14); all close on merge of
-the #13/#14 PR. The permanent CI runs the quality/fast, CPU integration, and
-locked smoke tiers, including the one-command gate.
+### Model and token accounting
 
-## Active baseline
+| Profile | Layers | Width | Heads | SwiGLU width | Parameters | Target tokens | Updates |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Qualification | 8 | 256 | 4 | 768 | 19,685,888 | 262,144,000 | 4,000 |
+| Canonical | 12 | 576 | 9 | 1,536 | 76,738,176 | 2,097,152,000 | 32,000 |
 
-- No model baseline exists yet. The first model milestone is **D0 (minimal dense
-  baseline)**; its entry criteria require Milestone 0 to be complete first
-  ([doctrine/model-lineage.md](doctrine/model-lineage.md) §2). With Milestone 0
-  implementation complete and #13/#14 closing through their PR, D0 planning is
-  next. The D0 component choices are recorded in
-  [doctrine/decisions/0002-initial-d0-architecture.md](doctrine/decisions/0002-initial-d0-architecture.md).
+Both profiles use tied embeddings, exact causal MHA, pre-norm RMSNorm,
+full-head RoPE, SwiGLU, no biases, no dropout, and 1,024-token context.
+Each optimizer update contains 64 sequences and 65,536 target tokens.
 
-## Active issues
+### Corrected execution semantics
 
-- **#14 — M0.11 end-to-end training smoke and recovery gate — delivered.** The
-  U0/R0/R1 topology runs the full substrate with exact U0@N vs R1@N
-  computational-state reproducibility. Closes with #13 through the #14 PR.
-  Acceptance report: [reports/milestone-0-smoke-gate.md](reports/milestone-0-smoke-gate.md).
-- **#13 — M0.10 test/CI harness — delivered; closing with #14.** Phase A merged
-  via PR #21, squash commit `aaa31187d5d6b63671ee96df14a85a75b125f068`: permanent
-  read-only CI, strict fast/integration/smoke/accelerator tiers, pinned
-  toolchain, repository-native policy checks. The #14 PR adds the permanent
-  smoke CI job (locked smoke tier + one-command gate), completing #13's
-  remaining responsibility.
-- #3 umbrella remains open until all 11 children close, then closes separately.
-- **#4–#12 — completed.** All nine implementation and infrastructure issues from
-  scaffold through experiment manifests are closed:
-  - #4 scaffold · #5 configuration · #6 run identity
-  - #7 provenance · #8 seed/RNG · #9 logging/metrics
-  - #10 artifacts · #11 checkpoints (PR #35, `6801184`) · #12 manifests (PR #38, `f92f66c`)
+Applied optimizer updates use one-based index `u`; update zero is the untrained
+control with learning rate `0.0`. Warmup reaches peak LR exactly at the declared
+warmup update, and cosine decay reaches final LR exactly at the last update.
 
-## Open pull requests
+Data order uses `expertforge.seed-derivation` version 1 from root seed
+`2026080200`, context `component=data.order` with worker/rank/device/stream zero,
+and derived value:
 
-- The #14 smoke-gate PR (`Closes #13, Closes #14`).
+```text
+data_seed_u64 = 4657843784274978659
+```
+
+The dataset manifest validates artifact provenance, lexicographic source-file
+order, physical row order, and first-in-source-order duplicate retention.
+Nested configuration overrides can traverse the optional D0 section while
+section-level and unknown-path overrides remain rejected.
+
+### Immutable identities
+
+| Artifact | Identity |
+|---|---|
+| Tokenizer source manifest | `eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c` |
+| Dataset source manifest | `85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7` |
+| Qualification configuration | `c02acbf24ce620d2281030bff7cf5719caa56b07b1d3632d11d0c4559ea6f76d` |
+| Qualification specification | `spec-v1-sha256-02093a3c05c8b5079e2c4fbb8bafaada6365c0776a3a94ca3a8143873167f6d3` |
+| Canonical configuration | `1996ccd76638ae032bb5f81fb33f6a7972acd55c9dd0c4862b3729fc84155cce` |
+| Canonical specification | `spec-v1-sha256-2faaa0f0beed2d1c674c7d29eb969944f9e208825a527e9f7a0024ba538815ea` |
+| Raw generation-prompt manifest | `c748706d9706e42bc0147d62c80f8f486ebb6aaa72fb53140b491ce7706e18c1` |
+| Canonical generation-prompt payload | `c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51` |
+| Corrected final review report | `a2559202fe8f76572c4f5a719285e840fdd95f23345c6da8f73f4ad9942504e1` |
+
+Normative and review artifacts include the machine contract, resolved profile
+configurations, formal experiment definition, parameter inventory, prompt set,
+final review manifest, and corrected rendered review.
+
+## Permanent conformance gate
+
+The authoritative offline, non-mutating command is:
+
+```bash
+uv run --locked python -m scripts.validate_d0_ratification
+```
+
+It validates the contract, source manifests, configuration bindings, formal
+experiment definition, parameter inventory, generation/contamination contract,
+content-addressed final review, and synchronized project state in fixed order.
+
+The contract records zero preparation blockers. This means the repository
+evidence bundle is complete for exact-head acceptance; it does not mean Issue
+#42 is closed or the contract is ratified on `main`.
+
+## Claim and execution boundary
+
+Current truthful statements:
+
+- D0.0 preparation and acceptance-review corrections are complete.
+- Dataset and tokenizer sources are immutable and digest-bound.
+- Exact configurations, fingerprints, schedule formulas, and data-order seed exist.
+- Parameter totals are independently derivable.
+- Prompt identity and contamination mechanics are frozen.
+- The corpus-wide contamination scan has not run.
+- No production dense model has been instantiated.
+- No qualification or canonical attempt exists.
+- No material D0 execution is authorized by this branch state.
+
+After Issue #42 closes, D0.1 and D0.2 become authorized implementation work.
+D0.5 remains the first material engineering-training authorization.
+
+## Active issues and pull requests
+
+- **#41 — D0 controlled dense baseline program:** open umbrella.
+- **#42 — D0.0 dense-baseline execution contract:** open; corrected and
+  ratification-ready.
+- **PR #43 — D0.0 contract and evidence:** open, unmerged, and undergoing final
+  exact-head acceptance after review corrections.
 
 ## Known blockers
 
-- No known implementation blocker remains. Merge still requires successful
-  exact-head CI and final acceptance review.
+- No D0.0 preparation blocker remains.
+- Ratification requires clean exact-head CI, resolution of all blocking review
+  threads, explicit acceptance, merge of PR #43, and closure of Issue #42.
+- D0.1 and D0.2 remain authorization-blocked until that closure.
 
 ## Latest accepted experiment
 
-- **Milestone 0 smoke & recovery gate (Issue #14).** Maturity stage Milestone 0,
-  classification smoke_test. The designated clean evidence source commit E is
-  `42c7de1`; CI run `30753390845` passed the quality/fast tier (1248 tests), CPU
-  integration tier (114 tests), locked smoke tier (39 tests), and one-command
-  gate. U0@N and R1@N have identical computational digests (`925fbd96…`) and
-  loss improvement 0.438 ≥ threshold 0.1.
-- Earlier evidence source commits `58acd64`/`b2abe623…`, `f0730e1`, `fc043c1`,
-  `298799a`, `537da2b`, `fd6d4d1`, `71666a2`, `27b8a00`, `2890d69`, `dfdad78`,
-  `2aa359f`, and `991b50a` were invalidated by blocking reviews `4835261100`,
-  `4835379984`, `4835574284`, `4835657284`, `4835782418`, `4835844853`,
-  `4835902575`, `4837672450`, `4837842027`, `4838345569`, `4838509896`, and
-  `4838854599`, respectively, and are superseded.
-- Full evidence: [reports/milestone-0-smoke-gate.md](reports/milestone-0-smoke-gate.md).
+- **Milestone 0 smoke and recovery gate** remains the latest accepted executed
+  experiment and demonstrates exact computational-state recovery for the
+  experimental substrate.
+- D0.0 is a prospective contract, not an executed experiment or model result.
+- Evidence: [Milestone 0 smoke-gate report](reports/milestone-0-smoke-gate.md).
 
 ## Next recommended action
 
-1. Complete exact-head review and merge the **#14 smoke-gate PR** (closes #13 and #14).
-2. Verify all 11 children of **#3** are closed, then close **#3** separately.
-3. Begin **D0** (minimal dense baseline, F0 exact-attention control).
+1. Complete exact-head CI for the acceptance-review corrections.
+2. Resolve the five blocking review threads with evidence.
+3. Accept and merge PR #43.
+4. Close Issue #42 and update umbrella #41.
+5. Activate separate D0.1 and D0.2 implementation work.
+6. Execute the source-bound contamination scan before packing or training.
 
 ## Critical path
 
 ```text
-exact-head acceptance → merge #14 (closes #13, #14) → close #3 → D0
+corrected exact-head CI → resolve reviews → merge PR #43 → close #42
+    ├─→ D0.1 immutable data pipeline
+    └─→ D0.2 dense model implementation
+             ↓
+       D0.3 production training path
+             ↓
+       D0.4 evaluation/profiling
+             ↓
+       D0.5 qualification
+             ↓
+       D0.6 canonical run
+             ↓
+       D0.7 baseline freeze
 ```
 
 ## Relationship to ExpertOS
 
 ExpertOS is the external runtime/control-plane counterpart. ExpertForge builds
 its own models and does not copy ExpertOS internals; shared interfaces are
-governed by versioned schemas and the ExpertOS resource contract defined here
-([doctrine/deployment-and-runtime-codesign.md](doctrine/deployment-and-runtime-codesign.md)).
+governed by versioned schemas and the ExpertOS resource contract in
+[deployment and runtime co-design](doctrine/deployment-and-runtime-codesign.md).
