@@ -20,9 +20,7 @@ _FULL_CHECK: CheckName = "exact_normalized_prompt_substring"
 _PROBE_CHECK: CheckName = "exact_normalized_probe_substring"
 _WINDOW_CHECK: CheckName = "any_exact_contiguous_64_codepoint_prompt_window"
 _CHECKS: tuple[CheckName, ...] = (_FULL_CHECK, _PROBE_CHECK, _WINDOW_CHECK)
-_CHECK_PRECEDENCE: dict[CheckName, int] = {
-    check: index for index, check in enumerate(_CHECKS)
-}
+_CHECK_PRECEDENCE: dict[CheckName, int] = {check: index for index, check in enumerate(_CHECKS)}
 
 
 def _mapping(value: object, field_name: str) -> Mapping[str, Any]:
@@ -141,9 +139,7 @@ class ContaminationMatcher:
             if probe not in text:
                 raise ContaminationError(f"{prompt_id} probe is not an exact prompt substring")
             if len(text) < window_codepoints:
-                raise ContaminationError(
-                    f"{prompt_id} is shorter than the contamination window"
-                )
+                raise ContaminationError(f"{prompt_id} is shorter than the contamination window")
             prompts.append(PromptDefinition(prompt_id=prompt_id, text=text, probe=probe))
         return cls(prompts, window_codepoints=window_codepoints)
 
@@ -172,9 +168,7 @@ class ContaminationMatcher:
             )
             last_start = len(prompt.text) - self._window_codepoints
             for prompt_start in range(last_start + 1):
-                window = prompt.text[
-                    prompt_start : prompt_start + self._window_codepoints
-                ]
+                window = prompt.text[prompt_start : prompt_start + self._window_codepoints]
                 self._add_pattern(
                     patterns,
                     window,
