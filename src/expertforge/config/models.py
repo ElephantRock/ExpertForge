@@ -1,8 +1,8 @@
 """Frozen Pydantic configuration models (Issue #5 decision §2).
 
-The optional D0 section is an additive format-version-1 extension. Legacy
+The optional D0 sections are additive format-version-1 extensions. Legacy
 configuration files do not acquire behavioral fingerprint changes: canonical
-serialization omits the section when it is absent.
+serialization omits each section when it is absent.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from expertforge.config.d0_models import D0Config
+from expertforge.config.d0_primitive_semantics import D0PrimitiveSemanticsConfig
 
 __all__ = [
     "CONFIG_FORMAT_VERSION",
@@ -19,6 +20,7 @@ __all__ = [
     "CheckpointConfig",
     "ConfigRoot",
     "D0Config",
+    "D0PrimitiveSemanticsConfig",
     "DataConfig",
     "EvaluationConfig",
     "HardwareConfig",
@@ -152,6 +154,10 @@ class ConfigRoot(_Section):
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     hardware: HardwareConfig = Field(default_factory=HardwareConfig)
     d0: D0Config | None = Field(default=None, exclude_if=lambda value: value is None)
+    d0_primitive_semantics: D0PrimitiveSemanticsConfig | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @field_validator("format_version")
     @classmethod
@@ -171,4 +177,6 @@ class ConfigRoot(_Section):
                 f"({self.checkpointing.interval_tokens}) must not exceed "
                 f"training.tokens ({self.training.tokens})."
             )
+        if self.d0 is None and self.d0_primitive_semantics is not None:
+            raise ValueError("D0 primitive semantics require the D0 contract section.")
         return self
