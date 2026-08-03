@@ -35,7 +35,7 @@ def test_verify_source_file_binds_size_and_digest(tmp_path: Path) -> None:
 
 def test_verify_source_file_rejects_digest_mismatch(tmp_path: Path) -> None:
     path = tmp_path / "source.bin"
-    path.write_bytes(b"changed")
+    path.write_bytes(b"changedd")
     with pytest.raises(SourceVerificationError, match="SHA-256 mismatch"):
         verify_source_file(path, _identity("source.bin", b"expected"))
 
