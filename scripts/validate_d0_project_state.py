@@ -7,7 +7,6 @@ import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 from scripts.validate_d0_config_binding import ROOT
