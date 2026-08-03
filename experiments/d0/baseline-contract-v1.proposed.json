@@ -257,7 +257,6 @@
     }
   },
   "ratification_blockers": [
-    "rendered_review_report",
     "PROJECT_STATE_synchronization"
   ]
 }
