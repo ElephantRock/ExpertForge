@@ -142,7 +142,7 @@ def _validate_digest(amendment: Mapping[str, Any]) -> str:
     payload.pop("amendment_sha256", None)
     actual = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
     _require(declared == actual, "primitive-semantics amendment digest mismatch")
-    return declared
+    return str(declared)
 
 
 def validate_amendment(
