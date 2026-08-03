@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from pathlib import Path
 
 import pytest
 
@@ -14,13 +13,12 @@ from scripts.validate_d0_project_state import (
     validate_all,
     validate_project_state,
 )
+from scripts.validate_d0_ratification_record import RATIFICATION_PATH
 from scripts.validate_d0_source_manifests import (
     CONTRACT_PATH,
     ContractValidationError,
     load_json_object,
 )
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _manifest() -> dict[str, object]:
@@ -28,11 +26,15 @@ def _manifest() -> dict[str, object]:
 
 
 def _contract() -> dict[str, object]:
-    return dict(load_json_object(ROOT / CONTRACT_PATH))
+    return dict(load_json_object(CONTRACT_PATH))
 
 
 def _final_review_manifest() -> dict[str, object]:
     return dict(load_json_object(FINAL_REVIEW_MANIFEST_PATH))
+
+
+def _ratification_record() -> dict[str, object]:
+    return dict(load_json_object(RATIFICATION_PATH))
 
 
 def test_committed_project_state_validates() -> None:
@@ -42,8 +44,9 @@ def test_committed_project_state_validates() -> None:
     assert report["required_heading_count"] == 12
     assert report["remaining_ratification_blockers"] == []
     assert report["remaining_ratification_blocker_count"] == 0
-    assert report["d0_1_authorized"] is False
-    assert report["d0_2_authorized"] is False
+    assert report["d0_1_authorized"] is True
+    assert report["d0_2_authorized"] is True
+    assert report["d0_3_authorized"] is False
     assert report["material_execution_authorized"] is False
 
 
@@ -57,6 +60,7 @@ def test_project_state_digest_drift_is_rejected() -> None:
             PROJECT_STATE_PATH.read_bytes(),
             _contract(),
             _final_review_manifest(),
+            _ratification_record(),
         )
 
 
@@ -71,6 +75,7 @@ def test_project_state_claim_drift_is_rejected() -> None:
             state_bytes,
             _contract(),
             _final_review_manifest(),
+            _ratification_record(),
         )
 
 
@@ -78,12 +83,27 @@ def test_nonterminal_contract_blocker_state_is_rejected() -> None:
     contract = copy.deepcopy(_contract())
     contract["ratification_blockers"] = ["PROJECT_STATE_synchronization"]
 
-    with pytest.raises(ContractValidationError, match="not terminal"):
+    with pytest.raises(ContractValidationError, match="historical blocker state changed"):
         validate_project_state(
             _manifest(),
             PROJECT_STATE_PATH.read_bytes(),
             contract,
             _final_review_manifest(),
+            _ratification_record(),
+        )
+
+
+def test_ratification_record_identity_drift_is_rejected() -> None:
+    manifest = copy.deepcopy(_manifest())
+    manifest["ratification_record_sha256"] = "0" * 64
+
+    with pytest.raises(ContractValidationError, match="ratification record identity drift"):
+        validate_project_state(
+            manifest,
+            PROJECT_STATE_PATH.read_bytes(),
+            _contract(),
+            _final_review_manifest(),
+            _ratification_record(),
         )
 
 
