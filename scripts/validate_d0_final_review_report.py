@@ -63,7 +63,8 @@ def _require_exact_keys(value: Mapping[str, Any], expected: set[str], field: str
 def _fingerprint_digest(path: Path) -> str:
     record = load_json_object(path)
     digest = record.get("digest")
-    _require(isinstance(digest, str), f"{path.name}: fingerprint digest missing")
+    if not isinstance(digest, str):
+        raise ContractValidationError(f"{path.name}: fingerprint digest missing")
     return digest
 
 
