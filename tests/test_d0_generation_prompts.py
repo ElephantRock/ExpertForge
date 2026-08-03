@@ -52,7 +52,7 @@ def test_generation_prompt_contract_validates() -> None:
         "prompt_payload_sha256": (
             "c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51"
         ),
-        "manifest_sha256": ("851934e4a49210b515967fad51308038dac1e7bc449774ca603f6bd9f47ccf3e"),
+        "manifest_sha256": ("c748706d9706e42bc0147d62c80f8f486ebb6aaa72fb53140b491ce7706e18c1"),
         "contamination_checks": [
             "exact_normalized_prompt_substring",
             "exact_normalized_probe_substring",
