@@ -22,6 +22,12 @@ from scripts.validate_d0_generation_prompts import (
     validate_generation_prompts,
 )
 from scripts.validate_d0_parameter_inventory import validate_all as validate_parameter_inventory
+from scripts.validate_d0_primitive_semantics_amendment import (
+    validate_all as validate_primitive_semantics_amendment,
+)
+from scripts.validate_d0_primitive_semantics_evidence import (
+    validate_all as validate_primitive_semantics_evidence,
+)
 from scripts.validate_d0_project_state import validate_all as validate_project_state
 from scripts.validate_d0_ratification_record import validate_all as validate_ratification_record
 from scripts.validate_d0_source_manifests import (
@@ -33,7 +39,7 @@ from scripts.validate_d0_source_manifests import (
     validate_source_manifests,
 )
 
-_SCHEMA_VERSION = "expertforge-d0-ratification-validation/2"
+_SCHEMA_VERSION = "expertforge-d0-ratification-validation/3"
 _EXPECTED_VALIDATOR_ORDER = (
     "baseline_contract",
     "source_manifests",
@@ -44,8 +50,14 @@ _EXPECTED_VALIDATOR_ORDER = (
     "final_review_report",
     "ratification_record",
     "project_state",
+    "primitive_semantics_amendment",
+    "primitive_semantics_evidence",
 )
 _EXPECTED_REMAINING_BLOCKERS: tuple[str, ...] = ()
+_EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS = (
+    "amendment_review_not_yet_accepted",
+    "exact_head_ci_not_yet_accepted",
+)
 
 ValidationReport = Mapping[str, Any]
 Validator = Callable[[], ValidationReport]
@@ -120,6 +132,14 @@ def _validate_current_project_state() -> ValidationReport:
     return validate_project_state()
 
 
+def _validate_primitive_amendment() -> ValidationReport:
+    return validate_primitive_semantics_amendment()
+
+
+def _validate_primitive_evidence() -> ValidationReport:
+    return validate_primitive_semantics_evidence()
+
+
 VALIDATION_STEPS: tuple[ValidationStep, ...] = (
     ValidationStep("baseline_contract", _validate_baseline_contract),
     ValidationStep("source_manifests", _validate_source_manifests),
@@ -133,6 +153,8 @@ VALIDATION_STEPS: tuple[ValidationStep, ...] = (
     ValidationStep("final_review_report", _validate_final_review),
     ValidationStep("ratification_record", _validate_ratification),
     ValidationStep("project_state", _validate_current_project_state),
+    ValidationStep("primitive_semantics_amendment", _validate_primitive_amendment),
+    ValidationStep("primitive_semantics_evidence", _validate_primitive_evidence),
 )
 
 
@@ -194,10 +216,19 @@ def validate_all(
         "aggregate_report_sha256": aggregate_sha256,
         "remaining_ratification_blockers": list(blockers),
         "remaining_ratification_blocker_count": len(blockers),
+        "primitive_semantics_amendment_status": "preparation_complete_pending_acceptance",
+        "remaining_amendment_acceptance_blockers": list(
+            _EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS
+        ),
+        "remaining_amendment_acceptance_blocker_count": len(
+            _EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS
+        ),
         "actual_corpus_scan_completed": False,
         "actual_corpus_scan_stage": "D0.1_preflight_before_packing_or_training",
         "d0_1_authorized": True,
         "d0_2_authorized": True,
+        "d0_2_implementation_authorized": True,
+        "d0_2_acceptance_authorized": False,
         "d0_3_authorized": False,
         "material_execution_authorized": False,
     }
