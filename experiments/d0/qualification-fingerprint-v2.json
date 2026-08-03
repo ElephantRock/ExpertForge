@@ -1,0 +1,26 @@
+{
+  "schema": "expertforge.specification-fingerprint",
+  "version": 1,
+  "canonical_config": {
+    "algorithm": "sha256",
+    "digest": "c1f0a4893a56bad1019352c6d534c556d1db0c63e4d7c43c4676c322cc244ea1"
+  },
+  "immutable_inputs": [
+    {
+      "name": "dataset.manifest",
+      "algorithm": "sha256",
+      "digest": "85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7"
+    },
+    {
+      "name": "primitive.semantics.amendment",
+      "algorithm": "sha256",
+      "digest": "5bc196942697833c4dfe9f227b16e2b69c6cafd07b05396a70650ecb34cebab0"
+    },
+    {
+      "name": "tokenizer.manifest",
+      "algorithm": "sha256",
+      "digest": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
+    }
+  ],
+  "digest_str": "spec-v1-sha256-8f1390a73ddad0f22d2354a2b45a42c5563c448b08ee317dd80e7d0ac83dfe91"
+}
