@@ -26,10 +26,10 @@ from scripts.validate_d0_source_manifests import ContractValidationError, load_j
 LEGACY_SMOKE_CANONICAL_SHA256 = "f6cf719aab809aaaf0d59b79cfba15bda7138c9138089bc7bbd4495cca087217"
 EXPECTED_FINGERPRINTS = {
     "qualification": (
-        "spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe"
+        "spec-v1-sha256-02093a3c05c8b5079e2c4fbb8bafaada6365c0776a3a94ca3a8143873167f6d3"
     ),
     "canonical": (
-        "spec-v1-sha256-2167b1f07873c3aed6112c38c7de5cdcece6ac3b94d91acde2d605ec2decfb0b"
+        "spec-v1-sha256-2faaa0f0beed2d1c674c7d29eb969944f9e208825a527e9f7a0024ba538815ea"
     ),
 }
 
