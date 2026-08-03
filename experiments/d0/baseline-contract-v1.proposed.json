@@ -256,7 +256,5 @@
       "minimum_loss_improvement_at_half_budget_nats": 0.1
     }
   },
-  "ratification_blockers": [
-    "PROJECT_STATE_synchronization"
-  ]
+  "ratification_blockers": []
 }
