@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,19 @@ def _dataset_manifest() -> dict[str, object]:
 
 
 def _refresh_digest(manifest: dict[str, object]) -> None:
+    provenance = manifest.get("artifact_provenance")
+    files = manifest.get("files")
+    if isinstance(provenance, dict) and isinstance(files, list):
+        content_hash = provenance.get("content_hash")
+        if isinstance(content_hash, dict):
+            canonical_inventory = json.dumps(
+                files,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            content_hash["digest"] = hashlib.sha256(canonical_inventory).hexdigest()
     manifest["manifest_sha256"] = canonical_manifest_digest(manifest)
 
 
