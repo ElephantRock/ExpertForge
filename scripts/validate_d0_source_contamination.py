@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from expertforge.d0.contamination import ContaminationMatcher
-from expertforge.d0.errors import D0PreflightError
+from expertforge.d0.errors import D0PreflightError, ScanReportError
 from expertforge.d0.scan_report import canonical_report_bytes
 from expertforge.d0.source_manifest import SourceManifest, load_source_manifest
 from scripts.run_d0_contamination_scan import (
@@ -163,7 +163,10 @@ def validate_actual_report(path: Path) -> dict[str, object]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise D0PreflightError(f"cannot read actual scan report {path}: {exc}") from exc
     report = _mapping(value, "report")
-    canonical = canonical_report_bytes(report)
+    try:
+        canonical = canonical_report_bytes(report)
+    except ScanReportError as exc:
+        raise D0PreflightError(f"actual scan report is not canonical: {exc}") from exc
     _require(raw == canonical, "actual scan report bytes are not canonical")
 
     _require(

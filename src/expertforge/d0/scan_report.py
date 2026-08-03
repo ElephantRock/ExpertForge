@@ -101,7 +101,7 @@ class ShardScanStats:
                 )
             rejection_reasons[reason] = count
             previous_reason = reason
-        if sum(rejection_reasons.values()) != self.rejected_documents:
+        if rejection_reasons and sum(rejection_reasons.values()) != self.rejected_documents:
             raise ScanReportError(
                 f"{self.path}: rejection reason counts do not equal rejected_documents"
             )

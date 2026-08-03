@@ -69,17 +69,17 @@ def huggingface_resolve_url(manifest: SourceManifest, identity: SourceFileIdenti
 
 
 def _fsync_directory(path: Path) -> None:
+    """Best-effort directory fsync; a no-op on platforms without directory fsync."""
+
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
     try:
         descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise SourceAcquisitionError(
-            f"cannot open cache directory for fsync: {path}: {exc}"
-        ) from exc
+    except OSError:
+        return
     try:
         os.fsync(descriptor)
-    except OSError as exc:
-        raise SourceAcquisitionError(f"cannot fsync cache directory {path}: {exc}") from exc
+    except OSError:
+        pass
     finally:
         os.close(descriptor)
 

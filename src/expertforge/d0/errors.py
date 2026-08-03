@@ -37,3 +37,7 @@ class ScanReportError(D0DataError, ValueError):
 
 class MissingOptionalDependencyError(D0DataError, ImportError):
     """An explicitly requested D0 surface is missing its optional dependency."""
+
+
+class D0PreflightError(D0DataError):
+    """Raised when the D0 preflight (source verification + contamination scan) fails."""

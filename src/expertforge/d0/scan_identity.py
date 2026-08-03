@@ -28,6 +28,22 @@ def _commit(value: str) -> str:
     return value
 
 
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory fsync; a no-op on platforms without directory fsync."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 @dataclass(frozen=True, slots=True)
 class ScanIdentity:
     """Every immutable input that determines one restartable scan state."""
@@ -117,13 +133,7 @@ def bind_scan_identity(path: Path, identity: ScanIdentity) -> str:
             os.fsync(stream.fileno())
         os.replace(temporary_path, path)
         published = True
-        directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-        directory_flags |= getattr(os, "O_DIRECTORY", 0)
-        directory_descriptor = os.open(path.parent, directory_flags)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
+        _fsync_directory(path.parent)
     except OSError as exc:
         raise SourceOrderError(f"cannot publish scan identity sidecar: {exc}") from exc
     finally:
