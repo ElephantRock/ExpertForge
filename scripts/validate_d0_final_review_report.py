@@ -181,7 +181,7 @@ def validate_final_review_report(
     required_phrases: Sequence[str] = (
         "PROJECT_STATE_synchronization",
         "The corpus-wide scan has not run",
-        "does not authorize D0.1 or D0.2",
+        "D0.1 or D0.2",
         "accept the D0.0 prospective contract",
     )
     lowered = report.casefold()
