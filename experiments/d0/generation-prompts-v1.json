@@ -12,27 +12,118 @@
   "prompt_count": 8,
   "prompt_payload_sha256": "c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51",
   "prompt_set_id": "d0-generation-prompts-v1",
-  "canonicalization": {"encoding": "utf-8", "nul_policy": "reject", "newline_mapping": "CRLF_and_CR_to_LF", "other_codepoints_and_whitespace": "preserve_exactly", "terminal_newline_in_prompt_text": false},
-  "decoding": {"generation_max_new_tokens": 128, "generation_temperature": 0.8, "generation_top_p": 0.95, "generation_top_k": null, "generation_repetition_penalty": 1.0, "generation_stop_token_id": 0, "generation_seeds": [17, 29, 43]},
+  "canonicalization": {
+    "encoding": "utf-8",
+    "nul_policy": "reject",
+    "newline_mapping": "CRLF_and_CR_to_LF",
+    "other_codepoints_and_whitespace": "preserve_exactly",
+    "terminal_newline_in_prompt_text": false
+  },
+  "decoding": {
+    "generation_max_new_tokens": 128,
+    "generation_temperature": 0.8,
+    "generation_top_p": 0.95,
+    "generation_top_k": null,
+    "generation_repetition_penalty": 1.0,
+    "generation_stop_token_id": 0,
+    "generation_seeds": [
+      17,
+      29,
+      43
+    ]
+  },
   "contamination_policy": {
     "corpus_scope": "all_accepted_normalized_deduplicated_documents_before_split",
     "document_normalization": "d0_dataset_normalization_contract",
-    "checks_in_precedence_order": ["exact_normalized_prompt_substring", "exact_normalized_probe_substring", "any_exact_contiguous_64_codepoint_prompt_window"],
+    "checks_in_precedence_order": [
+      "exact_normalized_prompt_substring",
+      "exact_normalized_probe_substring",
+      "any_exact_contiguous_64_codepoint_prompt_window"
+    ],
     "partial_window_codepoints": 64,
     "maximum_allowed_hits": 0,
-    "hit_record_fields": ["prompt_id", "check", "document_id", "source_file_path", "physical_row_index", "match_start_codepoint", "match_end_codepoint"],
-    "report_order": ["prompt_id_ascending", "check_precedence", "document_id_ascending", "match_start_codepoint_ascending"],
+    "hit_record_fields": [
+      "prompt_id",
+      "check",
+      "document_id",
+      "source_file_path",
+      "physical_row_index",
+      "match_start_codepoint",
+      "match_end_codepoint"
+    ],
+    "report_order": [
+      "prompt_id_ascending",
+      "check_precedence",
+      "document_id_ascending",
+      "match_start_codepoint_ascending"
+    ],
     "on_any_hit": "fail_closed_and_require_prompt_set_amendment",
     "actual_corpus_scan_stage": "D0.1_preflight_before_packing_or_training"
   },
   "prompts": [
-    {"id": "d0-gen-01", "category": "narrative_continuation", "text": "At the edge of the glass marsh, the survey team found a brass weather vane turning beneath a windless sky. Its four arrows pointed not north, south, east, and west, but toward four dates written in pale blue enamel. The field log continued:", "contamination_probe_text": "Its four arrows pointed not north, south, east, and west, but toward four dates written in pale blue enamel.", "text_sha256": "05246375d5dc5ba16dec5f172844e63a9fa7aa5f8ea41edee2b528b7faafa968", "contamination_probe_sha256": "789ca045645a0886c4a10b6e3020c68febe7d7456ca0ef1fdc25448579f090f5"},
-    {"id": "d0-gen-02", "category": "mechanistic_explanation", "text": "A sealed workshop contains a flywheel, a spring, and a row of lamps. No external power enters the room. Explain, step by step, which observations would distinguish stored energy, energy conversion, and an impossible perpetual-motion claim.", "contamination_probe_text": "which observations would distinguish stored energy, energy conversion, and an impossible perpetual-motion claim", "text_sha256": "b12df92783655d5918a1a2adc08823de10070228e8b1f48ea3fc56ff942743ff", "contamination_probe_sha256": "2aaa46cf630c91f55b93c71b10f722528c8f9fa066ab4dfff4cad4e6f3ef3501"},
-    {"id": "d0-gen-03", "category": "risk_aware_planning", "text": "A remote observatory receives supplies only twice each year. Its water pump is reliable, its battery bank is aging, and winter clouds can hide the sun for twelve days. Write a cautious operating plan that prioritizes safety, measurement continuity, and graceful degradation.", "contamination_probe_text": "winter clouds can hide the sun for twelve days. Write a cautious operating plan that prioritizes safety", "text_sha256": "effea7e7c5fb7863f9101883ae8c1cb74a6046e8cf69dc66e272c78447aa6262", "contamination_probe_sha256": "ab7f3a956bb3d6fa2ce5732ea8f80acffcc8ca90c3b55eeae2976cd97c49d1cd"},
-    {"id": "d0-gen-04", "category": "systems_comparison", "text": "Two archive systems preserve the same scientific records. One stores many small verified copies; the other stores a few large erasure-coded bundles. Compare their failure modes, repair costs, auditability, and behavior during a long network partition.", "contamination_probe_text": "Compare their failure modes, repair costs, auditability, and behavior during a long network partition.", "text_sha256": "3bcff1faee74de2d893c45b4e8e765d6bfa85eb9d03a8787b7c684a741049bd5", "contamination_probe_sha256": "e67ab15452cd35736bae74a4c4500e6e93f0f914f706e7d9330b6f7c8ea5b6cf"},
-    {"id": "d0-gen-05", "category": "causal_hypothesis", "text": "In a coastal town, every clock loses exactly seven minutes whenever the tide reaches its highest point, yet battery tests show no loss of power. Develop three competing explanations and describe an observation that would discriminate among them.", "contamination_probe_text": "every clock loses exactly seven minutes whenever the tide reaches its highest point, yet battery tests show no loss of power", "text_sha256": "458078306eb539da4cf6f5df9f5222d7a839dd9b5a9ee5eecff305f8d9ebc97e", "contamination_probe_sha256": "1a67d33790daee8f03cf3b232f24adcc52f185c0d284bee905f7d66535efea9a"},
-    {"id": "d0-gen-06", "category": "diagnostic_dialogue", "text": "Operator: The pressure trace is smooth, but the mass balance is wrong.\nReviewer: Then the smoothness may be hiding the fault.\nOperator: What should we test first?\nReviewer:", "contamination_probe_text": "The pressure trace is smooth, but the mass balance is wrong.\nReviewer: Then the smoothness may be hiding the fault.", "text_sha256": "ea6ff01356ef4f55cba66a7c2c8d698e16e3fa7c757d65589782dd1cad5f3804", "contamination_probe_sha256": "78fa81d9b0dd227a0b4793b1cf6f172196cea8d44eca1b731a45452b886dce30"},
-    {"id": "d0-gen-07", "category": "technical_inventory", "text": "Design notes for a compact language model specify tied token embeddings, pre-normalization, causal attention, and a gated feed-forward block. Continue the notes by identifying the tensors that contribute parameters and the components that should contribute none.", "contamination_probe_text": "Continue the notes by identifying the tensors that contribute parameters and the components that should contribute none.", "text_sha256": "63b17b7a6b48b5a06f446cb8218cd5e108d8d27a503818c9549da4f03392ebcc", "contamination_probe_sha256": "f8ee296a23dfbd1dfb33c570a2e4a92582e5cca2694b0d1409ba5bf142e9203a"},
-    {"id": "d0-gen-08", "category": "constrained_prioritization", "text": "The expedition can carry only six tools across the basalt plain: a radio, a water filter, a thermal blanket, a sample drill, a repair kit, and a navigation beacon. Rank them for an unexpected overnight delay and justify the ordering under explicit assumptions.", "contamination_probe_text": "Rank them for an unexpected overnight delay and justify the ordering under explicit assumptions.", "text_sha256": "c49be76740f1d14ca474fa20a75ef8811ea6660c2c7843a273e80f10a812b97c", "contamination_probe_sha256": "eb4c1cc8b7a4d171c02840dfe2ae2f5576c2cecc17de8d46cffb59a6241e3b1f"}
+    {
+      "id": "d0-gen-01",
+      "category": "narrative_continuation",
+      "text": "At the edge of the glass marsh, the survey team found a brass weather vane turning beneath a windless sky. Its four arrows pointed not north, south, east, and west, but toward four dates written in pale blue enamel. The field log continued:",
+      "contamination_probe_text": "Its four arrows pointed not north, south, east, and west, but toward four dates written in pale blue enamel.",
+      "text_sha256": "05246375d5dc5ba16dec5f172844e63a9fa7aa5f8ea41edee2b528b7faafa968",
+      "contamination_probe_sha256": "789ca045645a0886c4a10b6e3020c68febe7d7456ca0ef1fdc25448579f090f5"
+    },
+    {
+      "id": "d0-gen-02",
+      "category": "mechanistic_explanation",
+      "text": "A sealed workshop contains a flywheel, a spring, and a row of lamps. No external power enters the room. Explain, step by step, which observations would distinguish stored energy, energy conversion, and an impossible perpetual-motion claim.",
+      "contamination_probe_text": "which observations would distinguish stored energy, energy conversion, and an impossible perpetual-motion claim",
+      "text_sha256": "b12df92783655d5918a1a2adc08823de10070228e8b1f48ea3fc56ff942743ff",
+      "contamination_probe_sha256": "2aaa46cf630c91f55b93c71b10f722528c8f9fa066ab4dfff4cad4e6f3ef3501"
+    },
+    {
+      "id": "d0-gen-03",
+      "category": "risk_aware_planning",
+      "text": "A remote observatory receives supplies only twice each year. Its water pump is reliable, its battery bank is aging, and winter clouds can hide the sun for twelve days. Write a cautious operating plan that prioritizes safety, measurement continuity, and graceful degradation.",
+      "contamination_probe_text": "winter clouds can hide the sun for twelve days. Write a cautious operating plan that prioritizes safety",
+      "text_sha256": "effea7e7c5fb7863f9101883ae8c1cb74a6046e8cf69dc66e272c78447aa6262",
+      "contamination_probe_sha256": "ab7f3a956bb3d6fa2ce5732ea8f80acffcc8ca90c3b55eeae2976cd97c49d1cd"
+    },
+    {
+      "id": "d0-gen-04",
+      "category": "systems_comparison",
+      "text": "Two archive systems preserve the same scientific records. One stores many small verified copies; the other stores a few large erasure-coded bundles. Compare their failure modes, repair costs, auditability, and behavior during a long network partition.",
+      "contamination_probe_text": "Compare their failure modes, repair costs, auditability, and behavior during a long network partition.",
+      "text_sha256": "3bcff1faee74de2d893c45b4e8e765d6bfa85eb9d03a8787b7c684a741049bd5",
+      "contamination_probe_sha256": "e67ab15452cd35736bae74a4c4500e6e93f0f914f706e7d9330b6f7c8ea5b6cf"
+    },
+    {
+      "id": "d0-gen-05",
+      "category": "causal_hypothesis",
+      "text": "In a coastal town, every clock loses exactly seven minutes whenever the tide reaches its highest point, yet battery tests show no loss of power. Develop three competing explanations and describe an observation that would discriminate among them.",
+      "contamination_probe_text": "every clock loses exactly seven minutes whenever the tide reaches its highest point, yet battery tests show no loss of power",
+      "text_sha256": "458078306eb539da4cf6f5df9f5222d7a839dd9b5a9ee5eecff305f8d9ebc97e",
+      "contamination_probe_sha256": "1a67d33790daee8f03cf3b232f24adcc52f185c0d284bee905f7d66535efea9a"
+    },
+    {
+      "id": "d0-gen-06",
+      "category": "diagnostic_dialogue",
+      "text": "Operator: The pressure trace is smooth, but the mass balance is wrong.\nReviewer: Then the smoothness may be hiding the fault.\nOperator: What should we test first?\nReviewer:",
+      "contamination_probe_text": "The pressure trace is smooth, but the mass balance is wrong.\nReviewer: Then the smoothness may be hiding the fault.",
+      "text_sha256": "ea6ff01356ef4f55cba66a7c2c8d698e16e3fa7c757d65589782dd1cad5f3804",
+      "contamination_probe_sha256": "78fa81d9b0dd227a0b4793b1cf6f172196cea8d44eca1b731a45452b886dce30"
+    },
+    {
+      "id": "d0-gen-07",
+      "category": "technical_inventory",
+      "text": "Design notes for a compact language model specify tied token embeddings, pre-normalization, causal attention, and a gated feed-forward block. Continue the notes by identifying the tensors that contribute parameters and the components that should contribute none.",
+      "contamination_probe_text": "Continue the notes by identifying the tensors that contribute parameters and the components that should contribute none.",
+      "text_sha256": "63b17b7a6b48b5a06f446cb8218cd5e108d8d27a503818c9549da4f03392ebcc",
+      "contamination_probe_sha256": "f8ee296a23dfbd1dfb33c570a2e4a92582e5cca2694b0d1409ba5bf142e9203a"
+    },
+    {
+      "id": "d0-gen-08",
+      "category": "constrained_prioritization",
+      "text": "The expedition can carry only six tools across the basalt plain: a radio, a water filter, a thermal blanket, a sample drill, a repair kit, and a navigation beacon. Rank them for an unexpected overnight delay and justify the ordering under explicit assumptions.",
+      "contamination_probe_text": "Rank them for an unexpected overnight delay and justify the ordering under explicit assumptions.",
+      "text_sha256": "c49be76740f1d14ca474fa20a75ef8811ea6660c2c7843a273e80f10a812b97c",
+      "contamination_probe_sha256": "eb4c1cc8b7a4d171c02840dfe2ae2f5576c2cecc17de8d46cffb59a6241e3b1f"
+    }
   ]
 }
