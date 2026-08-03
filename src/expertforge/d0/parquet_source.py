@@ -131,9 +131,7 @@ def iter_parquet_documents(
                     text=_required_string(row, "text", physical_row_index),
                     url=_required_string(row, "url", physical_row_index),
                     dump=_required_string(row, "dump", physical_row_index),
-                    upstream_file_path=_required_string(
-                        row, "file_path", physical_row_index
-                    ),
+                    upstream_file_path=_required_string(row, "file_path", physical_row_index),
                     source_file_path=source_file_path,
                     physical_row_index=physical_row_index,
                 )
