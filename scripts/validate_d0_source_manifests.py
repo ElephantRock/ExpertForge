@@ -67,14 +67,16 @@ def _validate_inventory(manifest: Mapping[str, Any], field: str) -> dict[str, in
         path = entry.get("path")
         digest = entry.get("sha256")
         size = entry.get("size_bytes")
-        _require(isinstance(path, str) and bool(path), f"{field}.files[{index}].path invalid")
-        _require(
+        if not isinstance(path, str) or not path:
+            raise ContractValidationError(f"{field}.files[{index}].path invalid")
+        if not (
             isinstance(digest, str)
             and len(digest) == 64
-            and set(digest) <= set("0123456789abcdef"),
-            f"{field}.files[{index}].sha256 invalid",
-        )
-        _require(type(size) is int and size >= 0, f"{field}.files[{index}].size_bytes invalid")
+            and set(digest) <= set("0123456789abcdef")
+        ):
+            raise ContractValidationError(f"{field}.files[{index}].sha256 invalid")
+        if type(size) is not int or size < 0:
+            raise ContractValidationError(f"{field}.files[{index}].size_bytes invalid")
         paths.append(path)
         total += size
     _require(len(set(paths)) == len(paths), f"{field} file paths must be unique")
