@@ -23,8 +23,19 @@ def _contract() -> dict[str, object]:
 def test_parameter_accounting_known_answers() -> None:
     assert swiglu_width(256) == 768
     assert swiglu_width(576) == 1536
-    assert parameter_count(vocabulary_size=50_257, layers=8, width=256, ffn_width=768) == 19_685_888
-    assert parameter_count(vocabulary_size=50_257, layers=12, width=576, ffn_width=1_536) == 76_738_176
+    assert (
+        parameter_count(vocabulary_size=50_257, layers=8, width=256, ffn_width=768)
+        == 19_685_888
+    )
+    assert (
+        parameter_count(
+            vocabulary_size=50_257,
+            layers=12,
+            width=576,
+            ffn_width=1_536,
+        )
+        == 76_738_176
+    )
 
 
 def test_proposed_contract_validates() -> None:
@@ -48,7 +59,10 @@ def test_parameter_drift_is_rejected() -> None:
     qualification = models["qualification"]
     assert isinstance(qualification, dict)
     qualification["trainable_parameters"] = 19_685_889
-    with pytest.raises(ContractValidationError, match="qualification parameter count mismatch"):
+    with pytest.raises(
+        ContractValidationError,
+        match="qualification parameter count mismatch",
+    ):
         validate_contract(contract)
 
 
@@ -57,7 +71,10 @@ def test_batch_drift_is_rejected() -> None:
     batch = contract["batch"]
     assert isinstance(batch, dict)
     batch["target_tokens_per_update"] = 65_535
-    with pytest.raises(ContractValidationError, match="global target-token batch mismatch"):
+    with pytest.raises(
+        ContractValidationError,
+        match="global target-token batch mismatch",
+    ):
         validate_contract(contract)
 
 
