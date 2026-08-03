@@ -1,0 +1,99 @@
+{
+  "schema_version": "expertforge-d0-primitive-semantics-amendment/1",
+  "status": "proposed_not_ratified",
+  "issue": 48,
+  "parent_issue": 41,
+  "ratified_issue": 42,
+  "base_main_commit": "ca2601735cda2737567ace5b08e9dda7c6e119e6",
+  "historical_contract_path": "experiments/d0/baseline-contract-v1.proposed.json",
+  "ratification_record_path": "experiments/d0/ratification-v1.json",
+  "ratification_record_sha256": "d3cd5c43091d1b68bfb63ec8be896cfa663f735e74f273adbfc9765e4bab8124",
+  "scope": "output_affecting_rope_attention_rmsnorm_and_swiglu_conventions_only",
+  "unchanged_contract_domains": [
+    "dataset",
+    "tokenizer",
+    "model_dimensions",
+    "parameter_counts",
+    "batch",
+    "optimizer",
+    "initialization_distributions",
+    "schedules",
+    "precision_environment",
+    "seeds",
+    "evaluation",
+    "thresholds",
+    "authorization_boundary"
+  ],
+  "primitive_semantics": {
+    "rope": {
+      "pairing": "adjacent_pairs",
+      "pair_indices": "(0,1),(2,3),...",
+      "head_dimension_requirement": "positive_even_integer",
+      "position_indexing": "zero_based",
+      "inverse_frequency_formula": "inv_freq[i]=rope_base**(-2*i/head_dimension)",
+      "inverse_frequency_index_range": "i_in_0_through_head_dimension_over_2_minus_1",
+      "angle_formula": "theta=position*inv_freq[i]",
+      "rotation_formula": [
+        "rotated_even=x_even*cos(theta)-x_odd*sin(theta)",
+        "rotated_odd=x_even*sin(theta)+x_odd*cos(theta)"
+      ],
+      "application": [
+        "query",
+        "key"
+      ],
+      "value_rotated": false,
+      "tensor_order_before_rotation": "batch_heads_sequence_head_dimension",
+      "operation_order": "project_then_reshape_heads_then_apply_rope_then_compute_attention_scores",
+      "scaling": "none",
+      "cache_trainable": false,
+      "cache_persistent": false,
+      "state_dict_keys": []
+    },
+    "attention": {
+      "score_formula": "(Q@K_transpose)/sqrt(head_dimension)",
+      "causal_permission": "key_position<=query_position",
+      "masked_probability_mass": 0.0,
+      "softmax_accumulation_dtype_under_reduced_precision": "float32",
+      "softmax_output_conversion": "convert_to_declared_compute_dtype_before_value_aggregation_when_required"
+    },
+    "rmsnorm": {
+      "formula": "x*rsqrt(mean(x^2,axis=-1,keepdims=true)+epsilon)*weight",
+      "statistics_accumulation_dtype_under_reduced_precision": "float32",
+      "centering": false,
+      "bias": false,
+      "trainable_parameters": [
+        "weight"
+      ],
+      "weight_initial_value": 1.0
+    },
+    "swiglu": {
+      "formula": "down_proj(silu(gate_proj(x))*up_proj(x))",
+      "gate_projection_bias": false,
+      "up_projection_bias": false,
+      "down_projection_bias": false
+    }
+  },
+  "identity_policy": {
+    "historical_records_mutated": false,
+    "resolved_profile_configurations_superseded": true,
+    "profile_specification_fingerprints_superseded": true,
+    "formal_experiment_definition_superseded": true,
+    "project_state_superseded": true,
+    "prior_d0_model_attempts_invalidated": false,
+    "reason_no_attempt_invalidated": "no_D0_model_attempt_exists"
+  },
+  "acceptance_requirements": {
+    "machine_validator": true,
+    "affected_fingerprints_regenerated": true,
+    "permanent_gate_extended": true,
+    "exact_review_head_ci_success": true,
+    "blocking_review_findings_resolved": true
+  },
+  "ratification_blockers": [
+    "affected_profile_fingerprints_not_yet_regenerated",
+    "amendment_review_not_yet_accepted",
+    "exact_head_ci_not_yet_accepted"
+  ],
+  "digest_policy": "sha256(canonical_json_without_amendment_sha256)",
+  "amendment_sha256": "5bc196942697833c4dfe9f227b16e2b69c6cafd07b05396a70650ecb34cebab0"
+}
