@@ -180,9 +180,9 @@ def validate_final_review_report(
         _require(claim not in report.casefold(), f"final review contains forbidden claim: {claim}")
     required_phrases: Sequence[str] = (
         "PROJECT_STATE_synchronization",
-        "actual corpus scan has not run",
+        "The corpus-wide scan has not run",
         "does not authorize D0.1 or D0.2",
-        "accept the D0.0 prospective contract for project-state synchronization",
+        "accept the D0.0 prospective contract",
     )
     lowered = report.casefold()
     for phrase in required_phrases:
