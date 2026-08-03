@@ -142,14 +142,19 @@ def _validate_step_registry(steps: Sequence[ValidationStep]) -> None:
     _require(len(set(names)) == len(names), "D0 ratification validator names must be unique")
     for step in steps:
         _require(bool(step.name.strip()), "D0 ratification validator name is blank")
-        _require(callable(step.validator), f"D0 ratification validator {step.name!r} is not callable")
+        _require(
+            callable(step.validator), f"D0 ratification validator {step.name!r} is not callable"
+        )
 
 
 def _validate_remaining_blockers(contract: Mapping[str, Any]) -> tuple[str, ...]:
     blockers = contract.get("ratification_blockers")
     if not isinstance(blockers, list):
         raise ContractValidationError("ratification_blockers must be a list")
-    _require(all(isinstance(blocker, str) for blocker in blockers), "ratification blockers must be strings")
+    _require(
+        all(isinstance(blocker, str) for blocker in blockers),
+        "ratification blockers must be strings",
+    )
     resolved = tuple(blockers)
     _require(
         resolved == _EXPECTED_REMAINING_BLOCKERS,
