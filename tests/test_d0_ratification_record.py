@@ -34,7 +34,10 @@ def test_committed_ratification_record_validates() -> None:
     report = validate_all()
 
     assert report["status"] == "valid_d0_ratification_record"
-    assert report["record_sha256"] == "d3cd5c43091d1b68bfb63ec8be896cfa663f735e74f273adbfc9765e4bab8124"
+    assert (
+        report["record_sha256"]
+        == "d3cd5c43091d1b68bfb63ec8be896cfa663f735e74f273adbfc9765e4bab8124"
+    )
     assert report["accepted_ci_run_number"] == 349
     assert report["d0_1_authorized"] is True
     assert report["d0_2_authorized"] is True
