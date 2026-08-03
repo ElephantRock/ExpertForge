@@ -10,6 +10,7 @@ __all__ = [
     "D0ArchitectureConfig",
     "D0BatchConfig",
     "D0Config",
+    "D0DataOrderSeedConfig",
     "D0EvaluationProtocolConfig",
     "D0InitializationConfig",
     "D0ModelContractConfig",
@@ -24,19 +25,10 @@ __all__ = [
 
 
 class _Section(BaseModel):
-    """Frozen, strict D0 configuration section."""
-
-    model_config = ConfigDict(
-        frozen=True,
-        extra="forbid",
-        validate_default=True,
-        strict=True,
-    )
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
 
 
 class D0SourceConfig(_Section):
-    """Immutable contract and source-manifest bindings."""
-
     contract_path: str = Field(..., min_length=1)
     dataset_repository: str = Field(..., min_length=1)
     dataset_revision: str = Field(..., pattern=r"^[0-9a-f]{40}$")
@@ -50,8 +42,6 @@ class D0SourceConfig(_Section):
 
 
 class D0ArchitectureConfig(_Section):
-    """Frozen dense-baseline architecture semantics."""
-
     family: Literal["decoder_only_transformer"]
     attention: Literal["exact_causal_multi_head_self_attention"]
     normalization: Literal["pre_norm_rmsnorm"]
@@ -68,8 +58,6 @@ class D0ArchitectureConfig(_Section):
 
 
 class D0SequenceConfig(_Section):
-    """Exact input/target packing and token-accounting semantics."""
-
     model_context_tokens: int = Field(..., gt=0)
     packed_source_window_tokens: int = Field(..., gt=0)
     input_tokens_per_sequence: int = Field(..., gt=0)
@@ -79,7 +67,9 @@ class D0SequenceConfig(_Section):
     cross_document_attention: bool
     padding_used: bool
     all_target_positions_in_loss: bool
-    processed_token_definition: Literal["non_padding_target_tokens_participating_in_training_loss"]
+    processed_token_definition: Literal[
+        "non_padding_target_tokens_participating_in_training_loss"
+    ]
 
     @model_validator(mode="after")
     def _packing_arithmetic(self) -> D0SequenceConfig:
@@ -101,8 +91,6 @@ class D0SequenceConfig(_Section):
 
 
 class D0ModelContractConfig(_Section):
-    """Model identity and independently declared parameter accounting."""
-
     model_id: str = Field(..., min_length=1)
     head_dimension: int = Field(..., gt=0)
     trainable_parameters: int = Field(..., gt=0)
@@ -114,8 +102,6 @@ class D0ModelContractConfig(_Section):
 
 
 class D0BatchConfig(_Section):
-    """Microbatch, accumulation, and global-token arithmetic."""
-
     devices: int = Field(..., gt=0)
     microbatch_sequences_per_device: int = Field(..., gt=0)
     gradient_accumulation_steps: int = Field(..., gt=0)
@@ -124,8 +110,6 @@ class D0BatchConfig(_Section):
 
 
 class D0OptimizerConfig(_Section):
-    """Optimizer and gradient semantics."""
-
     name: Literal["AdamW"]
     beta1: float = Field(..., ge=0.0, lt=1.0, allow_inf_nan=False)
     beta2: float = Field(..., ge=0.0, lt=1.0, allow_inf_nan=False)
@@ -138,8 +122,6 @@ class D0OptimizerConfig(_Section):
 
 
 class D0InitializationConfig(_Section):
-    """Initialization contract."""
-
     embedding_qkv_swiglu_gate_up_std: float = Field(..., gt=0.0, allow_inf_nan=False)
     attention_output_and_swiglu_down_std: Literal["0.02/sqrt(2*layers)"]
     rmsnorm_weight: float = Field(..., gt=0.0, allow_inf_nan=False)
@@ -147,12 +129,23 @@ class D0InitializationConfig(_Section):
 
 
 class D0ScheduleConfig(_Section):
-    """Exact learning-rate schedule, budget, and evidence cadences."""
-
+    semantic_update_indexing: Literal[
+        "optimizer_update_index_u_is_one_based_for_applied_updates; "
+        "u_in_1_through_optimizer_updates"
+    ]
+    learning_rate_at_update_zero: float = Field(..., ge=0.0, le=0.0, allow_inf_nan=False)
     peak_learning_rate: float = Field(..., gt=0.0, allow_inf_nan=False)
-    warmup_updates: int = Field(..., ge=0)
+    warmup_updates: int = Field(..., gt=0)
+    warmup_formula: Literal[
+        "lr(u)=peak_learning_rate*u/warmup_updates for 1<=u<=warmup_updates"
+    ]
     final_learning_rate: float = Field(..., gt=0.0, allow_inf_nan=False)
     decay: Literal["cosine"]
+    cosine_formula: Literal[
+        "lr(u)=final_learning_rate+0.5*(peak_learning_rate-final_learning_rate)*"
+        "(1+cos(pi*(u-warmup_updates)/(optimizer_updates-warmup_updates))) "
+        "for warmup_updates<u<=optimizer_updates"
+    ]
     training_target_tokens: int = Field(..., gt=0)
     optimizer_updates: int = Field(..., gt=0)
     validation_interval_updates: int = Field(..., gt=0)
@@ -170,8 +163,6 @@ class D0ScheduleConfig(_Section):
 
 
 class D0PrecisionConfig(_Section):
-    """Hardware, precision, and fallback policy."""
-
     primary_accelerator: Literal["single_CUDA_accelerator_with_native_BF16"]
     minimum_device_memory_bytes: int = Field(..., gt=0)
     minimum_host_memory_bytes: int = Field(..., gt=0)
@@ -186,11 +177,27 @@ class D0PrecisionConfig(_Section):
     fp16_authorized: Literal[False]
 
 
-class D0SeedConfig(_Section):
-    """Deterministic seed and recovery semantics."""
+class D0DataOrderSeedContext(_Section):
+    component: Literal["data.order"]
+    worker: Literal[0]
+    rank: Literal[0]
+    device: Literal[0]
+    stream: Literal[0]
 
+
+class D0DataOrderSeedConfig(_Section):
+    derivation_schema: Literal["expertforge.seed-derivation"]
+    derivation_version: Literal[1]
+    root_seed_field: Literal["seeds.master_seed"]
+    context: D0DataOrderSeedContext
+    projection: Literal["seed_u64_first_8_sha256_bytes_big_endian_unsigned"]
+    data_seed_u64: int = Field(..., ge=0, le=(2**64 - 1))
+
+
+class D0SeedConfig(_Section):
     master_seed: int
     substream_derivation: Literal["sha256_domain_separation"]
+    data_order_seed: D0DataOrderSeedConfig
     canonical_generation_seeds: tuple[int, ...] = Field(..., min_length=1, strict=False)
     qualification_requires_uninterrupted_and_interrupted_resumed_match: bool
     canonical_requires_genuine_interruption_into_distinct_attempt: bool
@@ -198,8 +205,6 @@ class D0SeedConfig(_Section):
 
 
 class D0EvaluationProtocolConfig(_Section):
-    """Fixed validation, generation, throughput, and inference protocol."""
-
     validation_target_tokens_per_boundary: int = Field(..., gt=0)
     validation_loss_units: Literal["natural_log_nats"]
     perplexity: Literal["exp(validation_loss)"]
@@ -220,37 +225,47 @@ class D0EvaluationProtocolConfig(_Section):
 
 
 class D0ThresholdConfig(_Section):
-    """Profile acceptance plus common failure and kill thresholds."""
-
-    minimum_final_validation_loss_improvement_nats: float = Field(..., gt=0.0, allow_inf_nan=False)
+    minimum_final_validation_loss_improvement_nats: float = Field(
+        ..., gt=0.0, allow_inf_nan=False
+    )
     maximum_final_loss_above_best_prior_nats: float | None = Field(
         default=None, ge=0.0, allow_inf_nan=False
     )
-    maximum_consecutive_regressing_validation_boundaries: int | None = Field(default=None, ge=0)
-    regression_boundary_delta_nats: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
+    maximum_consecutive_regressing_validation_boundaries: int | None = Field(
+        default=None, ge=0
+    )
+    regression_boundary_delta_nats: float | None = Field(
+        default=None, gt=0.0, allow_inf_nan=False
+    )
     minimum_final_to_initial_throughput_ratio: float | None = Field(
         default=None, gt=0.0, le=1.0, allow_inf_nan=False
     )
     maximum_skipped_updates: int = Field(..., ge=0)
-    maximum_peak_device_memory_fraction: float = Field(..., gt=0.0, le=1.0, allow_inf_nan=False)
+    maximum_peak_device_memory_fraction: float = Field(
+        ..., gt=0.0, le=1.0, allow_inf_nan=False
+    )
     requires_exact_checkpoint_round_trip: bool | None = None
     requires_locked_environment_resume_equality: bool | None = None
     maximum_checkpoint_write_seconds: int = Field(..., gt=0)
     maximum_checkpoint_read_seconds: int = Field(..., gt=0)
-    maximum_peak_host_memory_fraction: float = Field(..., gt=0.0, le=1.0, allow_inf_nan=False)
-    minimum_loss_improvement_at_quarter_budget_nats: float = Field(..., gt=0.0, allow_inf_nan=False)
+    maximum_peak_host_memory_fraction: float = Field(
+        ..., gt=0.0, le=1.0, allow_inf_nan=False
+    )
+    minimum_loss_improvement_at_quarter_budget_nats: float = Field(
+        ..., gt=0.0, allow_inf_nan=False
+    )
     maximum_rejected_recovery_attempts_before_kill: int = Field(..., ge=0)
     kill_on_any_non_finite_value: bool
     kill_on_any_skipped_optimizer_update: bool
     kill_on_any_checkpoint_or_resume_state_mismatch: bool
     maximum_out_of_memory_failures_after_remediation: int = Field(..., ge=0)
     maximum_failed_recovery_attempts: int = Field(..., ge=0)
-    minimum_loss_improvement_at_half_budget_nats: float = Field(..., gt=0.0, allow_inf_nan=False)
+    minimum_loss_improvement_at_half_budget_nats: float = Field(
+        ..., gt=0.0, allow_inf_nan=False
+    )
 
 
 class D0Config(_Section):
-    """Complete additive D0 execution-contract binding."""
-
     profile: Literal["qualification", "canonical"]
     sources: D0SourceConfig
     architecture: D0ArchitectureConfig
@@ -275,7 +290,8 @@ class D0Config(_Section):
         if self.batch.global_sequences_per_update != expected_sequences:
             raise ValueError("D0 global sequence batch arithmetic mismatch.")
         expected_tokens = (
-            self.batch.global_sequences_per_update * self.sequence.target_tokens_per_sequence
+            self.batch.global_sequences_per_update
+            * self.sequence.target_tokens_per_sequence
         )
         if self.batch.target_tokens_per_update != expected_tokens:
             raise ValueError("D0 target-token batch arithmetic mismatch.")
