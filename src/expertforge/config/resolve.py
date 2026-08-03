@@ -53,8 +53,7 @@ def _set_leaf_schema_validated(
         fields = current_model.model_fields
         if part not in fields:
             raise ConfigResolutionError(
-                f"Override {raw_token!r} targets unknown path "
-                f"{'.'.join(parts[: index + 1])!r}."
+                f"Override {raw_token!r} targets unknown path {'.'.join(parts[: index + 1])!r}."
             )
         nested_model = _nested_model_type(fields[part].annotation)
         if is_last:
