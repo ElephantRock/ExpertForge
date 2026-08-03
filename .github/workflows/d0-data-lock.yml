@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: d0-data-lock-${{ github.event.pull_request.number || github.ref }}
@@ -18,14 +18,15 @@ concurrency:
 
 jobs:
   lock:
-    name: Generate locked d0-data environment
+    name: Generate and commit locked d0-data environment
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Check out repository
+      - name: Check out pull-request head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          persist-credentials: false
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -35,16 +36,21 @@ jobs:
       - name: Install Python
         run: uv python install 3.11
 
-      - name: Resolve lockfile with pinned uv
+      - name: Resolve and verify lockfile with pinned uv
         run: |
           uv lock
           uv lock --check
 
-      - name: Upload generated lockfile
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: d0-data-uv-lock
-          path: uv.lock
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+      - name: Commit generated lockfile
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          if git diff --cached --quiet; then
+            echo "uv.lock is already synchronized"
+            exit 0
+          fi
+          git commit -m "D0.1: lock optional data dependency (#46)"
+          git push origin "HEAD:${HEAD_BRANCH}"
