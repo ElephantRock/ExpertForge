@@ -15,6 +15,7 @@ from scripts.validate_d0_config_binding import ROOT
 from scripts.validate_d0_config_binding import validate_all as validate_config_bindings
 from scripts.validate_d0_contract import validate_contract
 from scripts.validate_d0_experiment_definition import validate_all as validate_experiment_definition
+from scripts.validate_d0_final_review_report import validate_all as validate_final_review_report
 from scripts.validate_d0_generation_prompts import (
     PROMPT_MANIFEST_PATH,
     load_prompt_manifest,
@@ -38,6 +39,7 @@ _EXPECTED_VALIDATOR_ORDER = (
     "formal_experiment_definition",
     "parameter_inventory",
     "generation_prompts_and_contamination",
+    "final_review_report",
 )
 _EXPECTED_REMAINING_BLOCKERS = (
     "rendered_review_report",
@@ -105,6 +107,10 @@ def _validate_generation_prompt_contract() -> ValidationReport:
     return validate_generation_prompts(contract, manifest, raw)
 
 
+def _validate_final_review() -> ValidationReport:
+    return validate_final_review_report()
+
+
 VALIDATION_STEPS: tuple[ValidationStep, ...] = (
     ValidationStep("baseline_contract", _validate_baseline_contract),
     ValidationStep("source_manifests", _validate_source_manifests),
@@ -115,6 +121,7 @@ VALIDATION_STEPS: tuple[ValidationStep, ...] = (
         "generation_prompts_and_contamination",
         _validate_generation_prompt_contract,
     ),
+    ValidationStep("final_review_report", _validate_final_review),
 )
 
 
