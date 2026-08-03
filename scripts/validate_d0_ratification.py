@@ -41,10 +41,7 @@ _EXPECTED_VALIDATOR_ORDER = (
     "generation_prompts_and_contamination",
     "final_review_report",
 )
-_EXPECTED_REMAINING_BLOCKERS = (
-    "rendered_review_report",
-    "PROJECT_STATE_synchronization",
-)
+_EXPECTED_REMAINING_BLOCKERS = ("PROJECT_STATE_synchronization",)
 
 ValidationReport = Mapping[str, Any]
 Validator = Callable[[], ValidationReport]
