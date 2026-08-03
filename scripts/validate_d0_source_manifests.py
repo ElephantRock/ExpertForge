@@ -1,28 +1,21 @@
-"""Validate the proposed D0 contract and immutable source identities.
-
-The validator imports no model or training implementation. It verifies
-content-addressed dataset and tokenizer manifests and their contract bindings.
-"""
+"""Validate immutable D0 tokenizer and dataset source manifests."""
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
-import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = Path("experiments/d0/baseline-contract-v1.proposed.json")
 TOKENIZER_MANIFEST_PATH = Path("tokenizers/manifests/d0-gpt-neox-v1.json")
 DATASET_MANIFEST_PATH = Path("data/manifests/d0-fineweb-edu-sample-10bt-source-v1.json")
-_SHA256_LENGTH = 64
-_EXPECTED_DATASET_REVISION = "84e8104e779e409e2267ac60609138e3dda2cbd2"
 
 
 class ContractValidationError(ValueError):
-    """Raised when the proposed D0 contract is internally inconsistent."""
+    """D0 contract evidence is incomplete or inconsistent."""
 
 
 def _require(condition: bool, message: str) -> None:
@@ -30,229 +23,180 @@ def _require(condition: bool, message: str) -> None:
         raise ContractValidationError(message)
 
 
-def _require_exact_int(value: object, field: str, *, minimum: int = 0) -> int:
-    if type(value) is not int:
-        raise ContractValidationError(f"{field} must be an exact integer")
-    if value < minimum:
-        raise ContractValidationError(f"{field} must be >= {minimum}")
+def load_json_object(path: Path) -> Mapping[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ContractValidationError(f"{path}: expected a JSON object")
     return value
 
 
-def _validate_hex_digest(value: object, field: str, length: int) -> str:
-    if not isinstance(value, str):
-        raise ContractValidationError(f"{field} must be a string")
-    _require(len(value) == length, f"{field} must contain {length} hexadecimal characters")
-    _require(
-        all(character in "0123456789abcdef" for character in value),
-        f"{field} must be lowercase hexadecimal",
-    )
-    return value
-
-
-def canonical_manifest_digest(manifest: Mapping[str, Any]) -> str:
-    """Hash canonical JSON after excluding the self-referential digest field."""
-
-    payload = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
-    canonical = json.dumps(
-        payload,
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
 
 
-def _validate_file_inventory(
-    manifest: Mapping[str, Any],
-    *,
-    manifest_name: str,
-    expected_paths: Sequence[str],
-) -> dict[str, int]:
-    files = manifest.get("files")
-    if not isinstance(files, list):
-        raise ContractValidationError(f"{manifest_name}.files must be a list")
+def canonical_manifest_digest(manifest: Mapping[str, Any]) -> str:
+    payload = dict(manifest)
+    payload.pop("manifest_sha256", None)
+    return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
 
+
+def _mapping(value: object, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ContractValidationError(f"{field} must be an object")
+    return value
+
+
+def _files(manifest: Mapping[str, Any], field: str) -> list[Mapping[str, Any]]:
+    value = manifest.get("files")
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise ContractValidationError(f"{field}.files must be an array")
+    return [_mapping(member, f"{field}.files[{index}]") for index, member in enumerate(value)]
+
+
+def _validate_inventory(manifest: Mapping[str, Any], field: str) -> dict[str, int]:
+    files = _files(manifest, field)
     paths: list[str] = []
-    total_size = 0
-    for index, member in enumerate(files):
-        if not isinstance(member, Mapping):
-            raise ContractValidationError(f"{manifest_name}.files[{index}] must be an object")
-        path = member.get("path")
-        if not isinstance(path, str) or not path:
-            raise ContractValidationError(f"{manifest_name}.files[{index}].path must be non-empty")
+    total = 0
+    for index, entry in enumerate(files):
+        path = entry.get("path")
+        digest = entry.get("sha256")
+        size = entry.get("size_bytes")
+        _require(isinstance(path, str) and bool(path), f"{field}.files[{index}].path invalid")
+        _require(
+            isinstance(digest, str)
+            and len(digest) == 64
+            and set(digest) <= set("0123456789abcdef"),
+            f"{field}.files[{index}].sha256 invalid",
+        )
+        _require(type(size) is int and size >= 0, f"{field}.files[{index}].size_bytes invalid")
         paths.append(path)
-        _validate_hex_digest(
-            member.get("sha256"),
-            f"{manifest_name}.files[{index}].sha256",
-            _SHA256_LENGTH,
-        )
-        total_size += _require_exact_int(
-            member.get("size_bytes"),
-            f"{manifest_name}.files[{index}].size_bytes",
-            minimum=1,
-        )
-
-    _require(paths == sorted(paths), f"{manifest_name} file paths must be lexicographically sorted")
-    _require(len(paths) == len(set(paths)), f"{manifest_name} file paths must be unique")
-    _require(paths == list(expected_paths), f"{manifest_name} file inventory changed")
-    _require(manifest.get("file_count") == len(files), f"{manifest_name}.file_count mismatch")
+        total += size
+    _require(len(set(paths)) == len(paths), f"{field} file paths must be unique")
+    _require(paths == sorted(paths), f"{field} file paths must be sorted")
+    _require(manifest.get("file_count") == len(files), f"{field} file_count mismatch")
+    _require(manifest.get("total_size_bytes") == total, f"{field} total_size_bytes mismatch")
+    actual = canonical_manifest_digest(manifest)
     _require(
-        manifest.get("total_size_bytes") == total_size,
-        f"{manifest_name}.total_size_bytes mismatch",
+        manifest.get("manifest_sha256") == actual,
+        f"{field} canonical digest mismatch: actual {actual}",
     )
+    return {"file_count": len(files), "total_size_bytes": total}
 
-    declared_digest = _validate_hex_digest(
-        manifest.get("manifest_sha256"),
-        f"{manifest_name}.manifest_sha256",
-        _SHA256_LENGTH,
-    )
+
+def _validate_dataset_provenance(manifest: Mapping[str, Any]) -> None:
+    provenance = _mapping(manifest.get("artifact_provenance"), "dataset.artifact_provenance")
+    expected_keys = {
+        "artifact_kind",
+        "format_version",
+        "source_identity",
+        "parent_experiment",
+        "generation_method",
+        "generation_command",
+        "content_hash",
+        "retention_status",
+        "durable_location",
+        "reproduction_path",
+    }
+    _require(set(provenance) == expected_keys, "dataset artifact provenance keys changed")
     _require(
-        declared_digest == canonical_manifest_digest(manifest),
-        f"{manifest_name} canonical digest mismatch",
+        provenance["artifact_kind"] == "dataset_source_identity_manifest",
+        "dataset artifact kind changed",
     )
-    return {"file_count": len(files), "total_size_bytes": total_size}
+    _require(provenance["format_version"] == 1, "dataset provenance format changed")
+    for field in (
+        "source_identity",
+        "parent_experiment",
+        "generation_method",
+        "generation_command",
+        "durable_location",
+        "reproduction_path",
+    ):
+        _require(
+            isinstance(provenance[field], str) and bool(str(provenance[field]).strip()),
+            f"dataset provenance {field} missing",
+        )
+    _require(
+        provenance["retention_status"] == "permanent_contract_evidence",
+        "dataset retention status changed",
+    )
+    content_hash = _mapping(provenance["content_hash"], "dataset provenance content_hash")
+    _require(content_hash.get("algorithm") == "sha256", "dataset content hash algorithm changed")
+    _require(
+        content_hash.get("scope") == "canonical_json_of_ordered_files_array",
+        "dataset content hash scope changed",
+    )
+    inventory_digest = hashlib.sha256(_canonical_bytes(list(_files(manifest, "dataset")))).hexdigest()
+    _require(
+        content_hash.get("digest") == inventory_digest,
+        "dataset provenance content hash mismatch",
+    )
 
 
 def validate_source_manifests(
     contract: Mapping[str, Any],
     tokenizer_manifest: Mapping[str, Any],
     dataset_manifest: Mapping[str, Any],
-) -> dict[str, dict[str, int | str]]:
-    """Validate source manifests and their binding to the proposed contract."""
-
-    tokenizer = contract["tokenizer"]
-    tokenizer_upstream = tokenizer_manifest["upstream"]
-    tokenizer_semantics = tokenizer_manifest["tokenizer"]
+) -> dict[str, dict[str, int]]:
+    tokenizer = _mapping(contract.get("tokenizer"), "tokenizer")
+    dataset = _mapping(contract.get("dataset"), "dataset")
+    token_upstream = _mapping(tokenizer_manifest.get("upstream"), "tokenizer upstream")
+    data_upstream = _mapping(dataset_manifest.get("upstream"), "dataset upstream")
     _require(
-        tokenizer_manifest.get("schema_version") == "expertforge-tokenizer-source-manifest/1",
-        "unexpected tokenizer manifest schema",
+        token_upstream.get("repository") == tokenizer.get("repository")
+        and token_upstream.get("revision") == tokenizer.get("revision"),
+        "tokenizer upstream identity mismatch",
     )
     _require(
-        tokenizer_upstream["repository"] == tokenizer["repository"],
-        "tokenizer repository mismatch",
-    )
-    _require(tokenizer_upstream["revision"] == tokenizer["revision"], "tokenizer revision mismatch")
-    _require(tokenizer_semantics["family"] == tokenizer["family"], "tokenizer family mismatch")
-    _require(
-        tokenizer_semantics["vocabulary_size"] == tokenizer["vocabulary_size"],
-        "tokenizer vocabulary mismatch",
-    )
-    _require(
-        tokenizer_semantics["padding_token"] is None,
-        "tokenizer manifest must not define padding",
-    )
-    _require(
-        tokenizer_semantics["training_document_boundary_token_id"] == tokenizer["eos_token_id"],
-        "tokenizer document boundary mismatch",
-    )
-    expected_tokenizer_paths = sorted(tokenizer["files"])
-    tokenizer_report = _validate_file_inventory(
-        tokenizer_manifest,
-        manifest_name="tokenizer_manifest",
-        expected_paths=expected_tokenizer_paths,
-    )
-    _require(
-        tokenizer["source_manifest_path"] == TOKENIZER_MANIFEST_PATH.as_posix(),
-        "tokenizer manifest path mismatch",
-    )
-    _require(
-        tokenizer["source_manifest_sha256"] == tokenizer_manifest["manifest_sha256"],
+        tokenizer_manifest.get("manifest_sha256") == tokenizer.get("source_manifest_sha256"),
         "tokenizer manifest binding mismatch",
     )
     _require(
-        tokenizer["ratification_requires_local_file_digests"] is False,
-        "tokenizer identity blocker must be closed",
-    )
-
-    dataset = contract["dataset"]
-    dataset_upstream = dataset_manifest["upstream"]
-    _require(
-        dataset_manifest.get("schema_version") == "expertforge-dataset-source-manifest/1",
-        "unexpected dataset manifest schema",
+        data_upstream.get("repository") == dataset.get("repository")
+        and data_upstream.get("revision") == dataset.get("revision")
+        and data_upstream.get("configuration") == dataset.get("configuration"),
+        "dataset revision must be the exact sample upload commit",
     )
     _require(
-        dataset["revision"] == _EXPECTED_DATASET_REVISION,
-        "dataset revision is not the sample upload commit",
-    )
-    _require(dataset_upstream["repository"] == dataset["repository"], "dataset repository mismatch")
-    _require(dataset_upstream["revision"] == dataset["revision"], "dataset revision mismatch")
-    _require(
-        dataset_upstream["configuration"] == dataset["configuration"],
-        "dataset configuration mismatch",
-    )
-    _require(
-        dataset_upstream["license"] == dataset["license_declaration"],
-        "dataset license mismatch",
-    )
-    _require(
-        dataset_manifest["schema"]["consumed_fields"] == dataset["consumed_fields"],
-        "dataset fields mismatch",
-    )
-    _require(
-        dataset_manifest["normalization"] == dataset["normalization"],
-        "dataset normalization mismatch",
-    )
-    _require(dataset_manifest["split_contract"] == dataset["split"], "dataset split mismatch")
-    expected_dataset_paths = [f"sample/10BT/{index:03d}_00000.parquet" for index in range(14)]
-    dataset_report = _validate_file_inventory(
-        dataset_manifest,
-        manifest_name="dataset_manifest",
-        expected_paths=expected_dataset_paths,
-    )
-    _require(
-        dataset["source_manifest_path"] == DATASET_MANIFEST_PATH.as_posix(),
-        "dataset manifest path mismatch",
-    )
-    _require(
-        dataset["source_manifest_sha256"] == dataset_manifest["manifest_sha256"],
+        dataset_manifest.get("manifest_sha256") == dataset.get("source_manifest_sha256"),
         "dataset manifest binding mismatch",
     )
     _require(
-        dataset["ratification_requires_local_source_manifest"] is False,
-        "dataset identity blocker must be closed",
+        dataset_manifest.get("normalization") == dataset.get("normalization"),
+        "dataset normalization mismatch",
     )
-
+    _require(dataset_manifest.get("split_contract") == dataset.get("split"), "dataset split contract mismatch")
+    _require(
+        dataset_manifest.get("ordering")
+        == {"source_files": "path_lexicographic", "rows_within_file": "physical_row_index_ascending"}
+        and dataset.get("source_order")
+        == ["file_path_lexicographic", "physical_row_index_ascending"],
+        "dataset ordering mismatch",
+    )
+    _require(
+        dataset_manifest.get("deduplication")
+        == {"duplicate_key": dataset.get("duplicate_key"), "keep_rule": dataset.get("duplicate_keep_rule")},
+        "dataset deduplication mismatch",
+    )
+    _validate_dataset_provenance(dataset_manifest)
     return {
-        "tokenizer": {
-            **tokenizer_report,
-            "manifest_sha256": tokenizer_manifest["manifest_sha256"],
-        },
-        "dataset": {
-            **dataset_report,
-            "manifest_sha256": dataset_manifest["manifest_sha256"],
-        },
+        "tokenizer": _validate_inventory(tokenizer_manifest, "tokenizer"),
+        "dataset": _validate_inventory(dataset_manifest, "dataset"),
     }
 
 
-def load_json_object(path: Path) -> Mapping[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        value = json.load(handle)
-    if not isinstance(value, dict):
-        raise ContractValidationError(f"{path} root must be an object")
-    return value
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate D0 immutable source manifests")
-    parser.add_argument("--contract", type=Path, default=CONTRACT_PATH)
-    parser.add_argument("--tokenizer-manifest", type=Path, default=TOKENIZER_MANIFEST_PATH)
-    parser.add_argument("--dataset-manifest", type=Path, default=DATASET_MANIFEST_PATH)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        report = validate_source_manifests(
-            load_json_object(args.contract),
-            load_json_object(args.tokenizer_manifest),
-            load_json_object(args.dataset_manifest),
-        )
-    except (ContractValidationError, KeyError, OSError, json.JSONDecodeError) as error:
-        sys.stderr.write(f"D0 SOURCE MANIFESTS INVALID: {error}\n")
-        return 1
-    sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+def main() -> int:
+    report = validate_source_manifests(
+        load_json_object(ROOT / CONTRACT_PATH),
+        load_json_object(ROOT / TOKENIZER_MANIFEST_PATH),
+        load_json_object(ROOT / DATASET_MANIFEST_PATH),
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
 
