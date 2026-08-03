@@ -67,9 +67,7 @@ class D0SequenceConfig(_Section):
     cross_document_attention: bool
     padding_used: bool
     all_target_positions_in_loss: bool
-    processed_token_definition: Literal[
-        "non_padding_target_tokens_participating_in_training_loss"
-    ]
+    processed_token_definition: Literal["non_padding_target_tokens_participating_in_training_loss"]
 
     @model_validator(mode="after")
     def _packing_arithmetic(self) -> D0SequenceConfig:
@@ -136,9 +134,7 @@ class D0ScheduleConfig(_Section):
     learning_rate_at_update_zero: float = Field(..., ge=0.0, le=0.0, allow_inf_nan=False)
     peak_learning_rate: float = Field(..., gt=0.0, allow_inf_nan=False)
     warmup_updates: int = Field(..., gt=0)
-    warmup_formula: Literal[
-        "lr(u)=peak_learning_rate*u/warmup_updates for 1<=u<=warmup_updates"
-    ]
+    warmup_formula: Literal["lr(u)=peak_learning_rate*u/warmup_updates for 1<=u<=warmup_updates"]
     final_learning_rate: float = Field(..., gt=0.0, allow_inf_nan=False)
     decay: Literal["cosine"]
     cosine_formula: Literal[
@@ -225,44 +221,30 @@ class D0EvaluationProtocolConfig(_Section):
 
 
 class D0ThresholdConfig(_Section):
-    minimum_final_validation_loss_improvement_nats: float = Field(
-        ..., gt=0.0, allow_inf_nan=False
-    )
+    minimum_final_validation_loss_improvement_nats: float = Field(..., gt=0.0, allow_inf_nan=False)
     maximum_final_loss_above_best_prior_nats: float | None = Field(
         default=None, ge=0.0, allow_inf_nan=False
     )
-    maximum_consecutive_regressing_validation_boundaries: int | None = Field(
-        default=None, ge=0
-    )
-    regression_boundary_delta_nats: float | None = Field(
-        default=None, gt=0.0, allow_inf_nan=False
-    )
+    maximum_consecutive_regressing_validation_boundaries: int | None = Field(default=None, ge=0)
+    regression_boundary_delta_nats: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
     minimum_final_to_initial_throughput_ratio: float | None = Field(
         default=None, gt=0.0, le=1.0, allow_inf_nan=False
     )
     maximum_skipped_updates: int = Field(..., ge=0)
-    maximum_peak_device_memory_fraction: float = Field(
-        ..., gt=0.0, le=1.0, allow_inf_nan=False
-    )
+    maximum_peak_device_memory_fraction: float = Field(..., gt=0.0, le=1.0, allow_inf_nan=False)
     requires_exact_checkpoint_round_trip: bool | None = None
     requires_locked_environment_resume_equality: bool | None = None
     maximum_checkpoint_write_seconds: int = Field(..., gt=0)
     maximum_checkpoint_read_seconds: int = Field(..., gt=0)
-    maximum_peak_host_memory_fraction: float = Field(
-        ..., gt=0.0, le=1.0, allow_inf_nan=False
-    )
-    minimum_loss_improvement_at_quarter_budget_nats: float = Field(
-        ..., gt=0.0, allow_inf_nan=False
-    )
+    maximum_peak_host_memory_fraction: float = Field(..., gt=0.0, le=1.0, allow_inf_nan=False)
+    minimum_loss_improvement_at_quarter_budget_nats: float = Field(..., gt=0.0, allow_inf_nan=False)
     maximum_rejected_recovery_attempts_before_kill: int = Field(..., ge=0)
     kill_on_any_non_finite_value: bool
     kill_on_any_skipped_optimizer_update: bool
     kill_on_any_checkpoint_or_resume_state_mismatch: bool
     maximum_out_of_memory_failures_after_remediation: int = Field(..., ge=0)
     maximum_failed_recovery_attempts: int = Field(..., ge=0)
-    minimum_loss_improvement_at_half_budget_nats: float = Field(
-        ..., gt=0.0, allow_inf_nan=False
-    )
+    minimum_loss_improvement_at_half_budget_nats: float = Field(..., gt=0.0, allow_inf_nan=False)
 
 
 class D0Config(_Section):
@@ -290,8 +272,7 @@ class D0Config(_Section):
         if self.batch.global_sequences_per_update != expected_sequences:
             raise ValueError("D0 global sequence batch arithmetic mismatch.")
         expected_tokens = (
-            self.batch.global_sequences_per_update
-            * self.sequence.target_tokens_per_sequence
+            self.batch.global_sequences_per_update * self.sequence.target_tokens_per_sequence
         )
         if self.batch.target_tokens_per_update != expected_tokens:
             raise ValueError("D0 target-token batch arithmetic mismatch.")
