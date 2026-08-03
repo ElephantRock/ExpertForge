@@ -25,9 +25,7 @@ class D0RoPESemanticsConfig(_Section):
     head_dimension_requirement: Literal["positive_even_integer"]
     position_indexing: Literal["zero_based"]
     inverse_frequency_formula: Literal["inv_freq[i]=rope_base**(-2*i/head_dimension)"]
-    inverse_frequency_index_range: Literal[
-        "i_in_0_through_head_dimension_over_2_minus_1"
-    ]
+    inverse_frequency_index_range: Literal["i_in_0_through_head_dimension_over_2_minus_1"]
     angle_formula: Literal["theta=position*inv_freq[i]"]
     rotation_formula: tuple[
         Literal["rotated_even=x_even*cos(theta)-x_odd*sin(theta)"],
