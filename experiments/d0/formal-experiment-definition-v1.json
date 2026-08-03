@@ -17,7 +17,7 @@
     "qualification": {
       "config_path": "configs/d0/qualification.yaml",
       "fingerprint_path": "experiments/d0/qualification-fingerprint.json",
-      "specification_fingerprint": "spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe",
+      "specification_fingerprint": "spec-v1-sha256-02093a3c05c8b5079e2c4fbb8bafaada6365c0776a3a94ca3a8143873167f6d3",
       "hypothesis": "Training the frozen qualification model for 262144000 target tokens will improve fixed-validation loss by at least 0.50 natural-log nats relative to update zero while satisfying every declared stability, recovery, systems, checkpoint, and generation gate.",
       "control": "The same frozen model at update zero under the identical specification fingerprint and fixed validation protocol.",
       "fixed_constraints": [
@@ -25,8 +25,8 @@
         "attention=exact_causal_multi_head_self_attention",
         "batch.global_sequences_per_update=64",
         "batch.target_tokens_per_update=65536",
-        "configuration.specification_fingerprint=spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe",
-        "dataset.manifest.sha256=d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df",
+        "configuration.specification_fingerprint=spec-v1-sha256-02093a3c05c8b5079e2c4fbb8bafaada6365c0776a3a94ca3a8143873167f6d3",
+        "dataset.manifest.sha256=85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7",
         "evaluation.validation_target_tokens_per_boundary=8388608",
         "model.model_id=d0-qualification-19m-v1",
         "model.trainable_parameters=19685888",
@@ -67,7 +67,7 @@
     "canonical": {
       "config_path": "configs/d0/canonical.yaml",
       "fingerprint_path": "experiments/d0/canonical-fingerprint.json",
-      "specification_fingerprint": "spec-v1-sha256-2167b1f07873c3aed6112c38c7de5cdcece6ac3b94d91acde2d605ec2decfb0b",
+      "specification_fingerprint": "spec-v1-sha256-2faaa0f0beed2d1c674c7d29eb969944f9e208825a527e9f7a0024ba538815ea",
       "hypothesis": "Training the frozen canonical model for 2097152000 target tokens will improve fixed-validation loss by at least 1.00 natural-log nats relative to update zero while satisfying every declared stability, recovery, systems, checkpoint, and generation gate.",
       "control": "The same frozen model at update zero under the identical specification fingerprint and fixed validation protocol.",
       "fixed_constraints": [
@@ -75,8 +75,8 @@
         "attention=exact_causal_multi_head_self_attention",
         "batch.global_sequences_per_update=64",
         "batch.target_tokens_per_update=65536",
-        "configuration.specification_fingerprint=spec-v1-sha256-2167b1f07873c3aed6112c38c7de5cdcece6ac3b94d91acde2d605ec2decfb0b",
-        "dataset.manifest.sha256=d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df",
+        "configuration.specification_fingerprint=spec-v1-sha256-2faaa0f0beed2d1c674c7d29eb969944f9e208825a527e9f7a0024ba538815ea",
+        "dataset.manifest.sha256=85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7",
         "evaluation.validation_target_tokens_per_boundary=8388608",
         "model.model_id=d0-canonical-76m-v1",
         "model.trainable_parameters=76738176",
