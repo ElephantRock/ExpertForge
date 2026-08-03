@@ -23,35 +23,19 @@ def _contract() -> dict[str, object]:
 def test_parameter_accounting_known_answers() -> None:
     assert swiglu_width(256) == 768
     assert swiglu_width(576) == 1536
-    assert (
-        parameter_count(
-            vocabulary_size=50_257,
-            layers=8,
-            width=256,
-            ffn_width=768,
-        )
-        == 19_685_888
-    )
-    assert (
-        parameter_count(
-            vocabulary_size=50_257,
-            layers=12,
-            width=576,
-            ffn_width=1_536,
-        )
-        == 76_738_176
-    )
+    assert parameter_count(vocabulary_size=50_257, layers=8, width=256, ffn_width=768) == 19_685_888
+    assert parameter_count(vocabulary_size=50_257, layers=12, width=576, ffn_width=1_536) == 76_738_176
 
 
 def test_proposed_contract_validates() -> None:
     report = validate_contract(load_contract(ROOT / CONTRACT_PATH))
-
     assert report["status"] == "valid_proposal"
     assert report["target_tokens_per_update"] == 65_536
     assert report["models"]["qualification"]["derived_parameters"] == 19_685_888
     assert report["models"]["canonical"]["derived_parameters"] == 76_738_176
     assert report["schedules"]["qualification"]["derived_updates"] == 4_000
     assert report["schedules"]["canonical"]["derived_updates"] == 32_000
+    assert report["data_seed_u64"] == 4_657_843_784_274_978_659
     assert report["source_manifests"]["tokenizer"]["file_count"] == 5
     assert report["source_manifests"]["dataset"]["file_count"] == 14
     assert report["ratification_blocker_count"] == 0
@@ -64,7 +48,6 @@ def test_parameter_drift_is_rejected() -> None:
     qualification = models["qualification"]
     assert isinstance(qualification, dict)
     qualification["trainable_parameters"] = 19_685_889
-
     with pytest.raises(ContractValidationError, match="qualification parameter count mismatch"):
         validate_contract(contract)
 
@@ -74,14 +57,34 @@ def test_batch_drift_is_rejected() -> None:
     batch = contract["batch"]
     assert isinstance(batch, dict)
     batch["target_tokens_per_update"] = 65_535
-
     with pytest.raises(ContractValidationError, match="global target-token batch mismatch"):
+        validate_contract(contract)
+
+
+def test_schedule_indexing_drift_is_rejected() -> None:
+    contract = copy.deepcopy(_contract())
+    schedules = contract["schedules"]
+    assert isinstance(schedules, dict)
+    qualification = schedules["qualification"]
+    assert isinstance(qualification, dict)
+    qualification["semantic_update_indexing"] = "zero_based"
+    with pytest.raises(ContractValidationError, match="update indexing changed"):
+        validate_contract(contract)
+
+
+def test_data_seed_derivation_drift_is_rejected() -> None:
+    contract = copy.deepcopy(_contract())
+    seeds = contract["seeds"]
+    assert isinstance(seeds, dict)
+    data_order_seed = seeds["data_order_seed"]
+    assert isinstance(data_order_seed, dict)
+    data_order_seed["data_seed_u64"] = 0
+    with pytest.raises(ContractValidationError, match="data seed derivation mismatch"):
         validate_contract(contract)
 
 
 def test_approximate_placeholder_is_rejected() -> None:
     contract = copy.deepcopy(_contract())
     contract["status"] = "approximately ready"
-
     with pytest.raises(ContractValidationError):
         validate_contract(contract)
