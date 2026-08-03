@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from expertforge.rng.derivation import SeedContext, derive_seed
 from scripts.validate_d0_source_manifests import (
     CONTRACT_PATH,
     ContractValidationError,
@@ -18,11 +19,20 @@ from scripts.validate_d0_source_manifests import (
 )
 
 _FORBIDDEN_PLACEHOLDERS = ("tbd", "approximately", "approximate", "default", "todo")
+_INDEXING = "optimizer_update_index_u_is_one_based_for_applied_updates; u_in_1_through_optimizer_updates"
+_WARMUP = "lr(u)=peak_learning_rate*u/warmup_updates for 1<=u<=warmup_updates"
+_COSINE = "lr(u)=final_learning_rate+0.5*(peak_learning_rate-final_learning_rate)*(1+cos(pi*(u-warmup_updates)/(optimizer_updates-warmup_updates))) for warmup_updates<u<=optimizer_updates"
 
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ContractValidationError(message)
+
+
+def _mapping(value: object, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ContractValidationError(f"{field} must be an object")
+    return value
 
 
 def _require_exact_int(value: object, field: str, *, minimum: int = 0) -> int:
@@ -48,24 +58,19 @@ def _walk_strings(value: object) -> Sequence[str]:
 
 
 def swiglu_width(model_width: int) -> int:
-    """Return ceil((8/3)*d) rounded upward to a multiple of 256."""
-
     numerator = 8 * model_width
     unrounded = (numerator + 2) // 3
     return ((unrounded + 255) // 256) * 256
 
 
 def parameter_count(*, vocabulary_size: int, layers: int, width: int, ffn_width: int) -> int:
-    """Count tied-embedding, bias-free pre-norm RoPE/SwiGLU parameters."""
-
-    embedding = vocabulary_size * width
-    one_block = 4 * width * width + 3 * width * ffn_width + 2 * width
-    final_norm = width
-    return embedding + layers * one_block + final_norm
+    return vocabulary_size * width + layers * (
+        4 * width * width + 3 * width * ffn_width + 2 * width
+    ) + width
 
 
 def _validate_architecture(contract: Mapping[str, Any]) -> None:
-    architecture = contract["architecture"]
+    architecture = _mapping(contract["architecture"], "architecture")
     expected = {
         "family": "decoder_only_transformer",
         "attention": "exact_causal_multi_head_self_attention",
@@ -81,198 +86,111 @@ def _validate_architecture(contract: Mapping[str, Any]) -> None:
         _require(architecture.get(field) == value, f"architecture.{field} changed")
 
 
-def _validate_batch(contract: Mapping[str, Any]) -> tuple[int, int]:
-    sequence = contract["sequence_semantics"]
-    target_tokens_per_sequence = _require_exact_int(
-        sequence["target_tokens_per_sequence"],
-        "sequence.target_tokens_per_sequence",
-        minimum=1,
+def _validate_batch(contract: Mapping[str, Any]) -> int:
+    sequence = _mapping(contract["sequence_semantics"], "sequence_semantics")
+    target = _require_exact_int(sequence["target_tokens_per_sequence"], "sequence.target_tokens_per_sequence", minimum=1)
+    _require(sequence["packed_source_window_tokens"] == target + 1, "packed source window must contain one lookback token")
+    _require(sequence["cursor_advance_tokens_per_sequence"] == target, "cursor advancement must equal target-token contribution")
+    batch = _mapping(contract["batch"], "batch")
+    sequences = (
+        _require_exact_int(batch["devices"], "batch.devices", minimum=1)
+        * _require_exact_int(batch["microbatch_sequences_per_device"], "batch.microbatch_sequences_per_device", minimum=1)
+        * _require_exact_int(batch["gradient_accumulation_steps"], "batch.gradient_accumulation_steps", minimum=1)
     )
-    _require(
-        sequence["packed_source_window_tokens"] == target_tokens_per_sequence + 1,
-        "packed source window must contain one lookback token",
-    )
-    _require(
-        sequence["cursor_advance_tokens_per_sequence"] == target_tokens_per_sequence,
-        "cursor advancement must equal target-token contribution",
-    )
-
-    batch = contract["batch"]
-    devices = _require_exact_int(batch["devices"], "batch.devices", minimum=1)
-    microbatch = _require_exact_int(
-        batch["microbatch_sequences_per_device"],
-        "batch.microbatch_sequences_per_device",
-        minimum=1,
-    )
-    accumulation = _require_exact_int(
-        batch["gradient_accumulation_steps"],
-        "batch.gradient_accumulation_steps",
-        minimum=1,
-    )
-    derived_sequences = devices * microbatch * accumulation
-    derived_tokens = derived_sequences * target_tokens_per_sequence
-    _require(
-        batch["global_sequences_per_update"] == derived_sequences,
-        "global sequence batch mismatch",
-    )
-    _require(
-        batch["target_tokens_per_update"] == derived_tokens,
-        "global target-token batch mismatch",
-    )
-    return derived_sequences, derived_tokens
+    tokens = sequences * target
+    _require(batch["global_sequences_per_update"] == sequences, "global sequence batch mismatch")
+    _require(batch["target_tokens_per_update"] == tokens, "global target-token batch mismatch")
+    return tokens
 
 
 def _validate_models(contract: Mapping[str, Any]) -> dict[str, dict[str, int]]:
-    tokenizer = contract["tokenizer"]
-    vocabulary_size = _require_exact_int(
-        tokenizer["vocabulary_size"], "tokenizer.vocabulary_size", minimum=1
-    )
-    _require(tokenizer["padding_token"] is None, "training tokenizer must not define padding")
-    _require(tokenizer["eos_token_id"] == 0, "document terminator must remain token 0")
-
+    vocabulary = _require_exact_int(_mapping(contract["tokenizer"], "tokenizer")["vocabulary_size"], "tokenizer.vocabulary_size", minimum=1)
     reports: dict[str, dict[str, int]] = {}
-    specifications = (
-        ("qualification", (15_000_000, 30_000_000)),
-        ("canonical", (50_000_000, 100_000_000)),
-    )
-    for model_name, size_bounds in specifications:
-        model = contract["models"][model_name]
-        layers = _require_exact_int(model["layers"], f"models.{model_name}.layers", minimum=1)
-        width = _require_exact_int(
-            model["model_width"], f"models.{model_name}.model_width", minimum=1
-        )
-        heads = _require_exact_int(
-            model["attention_heads"], f"models.{model_name}.attention_heads", minimum=1
-        )
-        head_dimension = _require_exact_int(
-            model["head_dimension"], f"models.{model_name}.head_dimension", minimum=1
-        )
-        ffn_width = _require_exact_int(
-            model["swiglu_intermediate_width"],
-            f"models.{model_name}.swiglu_intermediate_width",
-            minimum=1,
-        )
-        _require(width == heads * head_dimension, f"{model_name} width/head product mismatch")
-        _require(
-            ffn_width == swiglu_width(width),
-            f"{model_name} SwiGLU width violates rounding rule",
-        )
-        derived_parameters = parameter_count(
-            vocabulary_size=vocabulary_size,
-            layers=layers,
-            width=width,
-            ffn_width=ffn_width,
-        )
-        declared_parameters = _require_exact_int(
-            model["trainable_parameters"],
-            f"models.{model_name}.trainable_parameters",
-            minimum=1,
-        )
-        _require(
-            derived_parameters == declared_parameters,
-            f"{model_name} parameter count mismatch",
-        )
-        _require(
-            size_bounds[0] <= declared_parameters <= size_bounds[1],
-            f"{model_name} outside size gate",
-        )
-        _require(
-            model["non_trainable_parameters"] == 0,
-            f"{model_name} non-trainable parameters changed",
-        )
-        reports[model_name] = {
-            "declared_parameters": declared_parameters,
-            "derived_parameters": derived_parameters,
-        }
+    for name, bounds in (("qualification", (15_000_000, 30_000_000)), ("canonical", (50_000_000, 100_000_000))):
+        model = _mapping(_mapping(contract["models"], "models")[name], f"models.{name}")
+        layers = _require_exact_int(model["layers"], f"models.{name}.layers", minimum=1)
+        width = _require_exact_int(model["model_width"], f"models.{name}.model_width", minimum=1)
+        heads = _require_exact_int(model["attention_heads"], f"models.{name}.attention_heads", minimum=1)
+        head_dim = _require_exact_int(model["head_dimension"], f"models.{name}.head_dimension", minimum=1)
+        ffn = _require_exact_int(model["swiglu_intermediate_width"], f"models.{name}.swiglu_intermediate_width", minimum=1)
+        _require(width == heads * head_dim, f"{name} width/head product mismatch")
+        _require(ffn == swiglu_width(width), f"{name} SwiGLU width violates rounding rule")
+        derived = parameter_count(vocabulary_size=vocabulary, layers=layers, width=width, ffn_width=ffn)
+        declared = _require_exact_int(model["trainable_parameters"], f"models.{name}.trainable_parameters", minimum=1)
+        _require(derived == declared, f"{name} parameter count mismatch")
+        _require(bounds[0] <= declared <= bounds[1], f"{name} outside size gate")
+        _require(model["non_trainable_parameters"] == 0, f"{name} non-trainable parameters changed")
+        reports[name] = {"declared_parameters": declared, "derived_parameters": derived}
     return reports
 
 
-def _validate_schedules(
-    contract: Mapping[str, Any], target_tokens_per_update: int
-) -> dict[str, dict[str, int]]:
-    reports: dict[str, dict[str, int]] = {}
-    for schedule_name in ("qualification", "canonical"):
-        schedule = contract["schedules"][schedule_name]
-        budget = _require_exact_int(
-            schedule["training_target_tokens"],
-            f"schedules.{schedule_name}.training_target_tokens",
-            minimum=1,
-        )
-        updates = _require_exact_int(
-            schedule["optimizer_updates"],
-            f"schedules.{schedule_name}.optimizer_updates",
-            minimum=1,
-        )
-        _require(
-            budget % target_tokens_per_update == 0,
-            f"{schedule_name} token budget is not update aligned",
-        )
-        _require(
-            budget // target_tokens_per_update == updates,
-            f"{schedule_name} optimizer-update count mismatch",
-        )
-        _require(
-            schedule["warmup_updates"] < updates,
-            f"{schedule_name} warmup must end before training",
-        )
-        _require(
-            math.isfinite(schedule["peak_learning_rate"]),
-            f"{schedule_name} peak LR must be finite",
-        )
-        _require(
-            math.isfinite(schedule["final_learning_rate"]),
-            f"{schedule_name} final LR must be finite",
-        )
-        _require(
-            0 < schedule["final_learning_rate"] < schedule["peak_learning_rate"],
-            f"{schedule_name} final LR must be positive and below peak",
-        )
-        reports[schedule_name] = {
-            "declared_updates": updates,
-            "derived_updates": budget // target_tokens_per_update,
-            "training_target_tokens": budget,
-        }
+def _validate_schedules(contract: Mapping[str, Any], target_tokens_per_update: int) -> dict[str, dict[str, int | float]]:
+    reports: dict[str, dict[str, int | float]] = {}
+    schedules = _mapping(contract["schedules"], "schedules")
+    for name in ("qualification", "canonical"):
+        schedule = _mapping(schedules[name], f"schedules.{name}")
+        _require(schedule.get("semantic_update_indexing") == _INDEXING, f"{name} update indexing changed")
+        _require(schedule.get("learning_rate_at_update_zero") == 0.0, f"{name} update-zero LR changed")
+        _require(schedule.get("warmup_formula") == _WARMUP, f"{name} warmup formula changed")
+        _require(schedule.get("decay") == "cosine", f"{name} decay changed")
+        _require(schedule.get("cosine_formula") == _COSINE, f"{name} cosine formula changed")
+        budget = _require_exact_int(schedule["training_target_tokens"], f"schedules.{name}.training_target_tokens", minimum=1)
+        updates = _require_exact_int(schedule["optimizer_updates"], f"schedules.{name}.optimizer_updates", minimum=1)
+        warmup = _require_exact_int(schedule["warmup_updates"], f"schedules.{name}.warmup_updates", minimum=1)
+        peak = float(schedule["peak_learning_rate"])
+        final = float(schedule["final_learning_rate"])
+        _require(budget == updates * target_tokens_per_update, f"{name} optimizer-update count mismatch")
+        _require(warmup < updates, f"{name} warmup must end before training")
+        _require(math.isfinite(peak) and math.isfinite(final), f"{name} LR must be finite")
+        _require(0 < final < peak, f"{name} final LR must be positive and below peak")
+        first_lr = peak / warmup
+        final_lr = final + 0.5 * (peak - final) * (1 + math.cos(math.pi))
+        _require(first_lr > 0 and final_lr == final, f"{name} LR boundary mismatch")
+        reports[name] = {"declared_updates": updates, "derived_updates": budget // target_tokens_per_update, "training_target_tokens": budget, "first_applied_learning_rate": first_lr}
     return reports
+
+
+def _validate_data_order_seed(contract: Mapping[str, Any]) -> int:
+    seeds = _mapping(contract["seeds"], "seeds")
+    record = _mapping(seeds.get("data_order_seed"), "seeds.data_order_seed")
+    _require(record.get("derivation_schema") == "expertforge.seed-derivation", "data seed schema changed")
+    _require(record.get("derivation_version") == 1, "data seed version changed")
+    _require(record.get("root_seed_field") == "seeds.master_seed", "data seed root binding changed")
+    _require(record.get("projection") == "seed_u64_first_8_sha256_bytes_big_endian_unsigned", "data seed projection changed")
+    context = _mapping(record.get("context"), "seeds.data_order_seed.context")
+    _require(context == {"component": "data.order", "worker": 0, "rank": 0, "device": 0, "stream": 0}, "data seed context changed")
+    derived = derive_seed(
+        _require_exact_int(seeds["master_seed"], "seeds.master_seed"),
+        SeedContext(component="data.order", worker=0, rank=0, device=0, stream=0),
+    ).seed_u64
+    _require(record.get("data_seed_u64") == derived, "data seed derivation mismatch")
+    dataset = _mapping(contract["dataset"], "dataset")
+    _require("seeds.data_order_seed.data_seed_u64" in str(dataset.get("training_order")), "training order is not bound to the derived data seed")
+    return derived
 
 
 def validate_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate ``contract`` and return a deterministic summary report."""
-
     _require(contract.get("status") == "proposed_not_ratified", "unexpected proposal status")
     _require(contract.get("issue") == 42, "contract must bind Issue #42")
     _require(contract.get("parent_issue") == 41, "contract must bind parent Issue #41")
     _validate_architecture(contract)
     source_reports = validate_source_manifests(
         contract,
-        load_json_object(Path(contract["tokenizer"]["source_manifest_path"])),
-        load_json_object(Path(contract["dataset"]["source_manifest_path"])),
+        load_json_object(Path(_mapping(contract["tokenizer"], "tokenizer")["source_manifest_path"])),
+        load_json_object(Path(_mapping(contract["dataset"], "dataset")["source_manifest_path"])),
     )
-    _, target_tokens_per_update = _validate_batch(contract)
-    model_reports = _validate_models(contract)
-    schedule_reports = _validate_schedules(contract, target_tokens_per_update)
-
+    target_tokens_per_update = _validate_batch(contract)
+    models = _validate_models(contract)
+    schedules = _validate_schedules(contract, target_tokens_per_update)
+    data_seed_u64 = _validate_data_order_seed(contract)
     for text in _walk_strings(contract):
         lowered = text.casefold()
         for placeholder in _FORBIDDEN_PLACEHOLDERS:
-            _require(
-                placeholder not in lowered,
-                f"forbidden placeholder language found: {placeholder!r}",
-            )
-
+            _require(placeholder not in lowered, f"forbidden placeholder language found: {placeholder!r}")
     blockers = contract.get("ratification_blockers")
-    if not isinstance(blockers, list):
-        raise ContractValidationError("ratification_blockers must be a list")
-    _require(len(blockers) == 0, "proposal must have zero remaining blockers")
-
-    return {
-        "status": "valid_proposal",
-        "schema_version": contract["schema_version"],
-        "target_tokens_per_update": target_tokens_per_update,
-        "models": model_reports,
-        "schedules": schedule_reports,
-        "source_manifests": source_reports,
-        "ratification_blocker_count": len(blockers),
-    }
+    _require(isinstance(blockers, list), "ratification_blockers must be a list")
+    _require(blockers == [], "proposal must have zero preparation blockers")
+    return {"status": "valid_proposal", "schema_version": contract["schema_version"], "target_tokens_per_update": target_tokens_per_update, "models": models, "schedules": schedules, "data_seed_u64": data_seed_u64, "source_manifests": source_reports, "ratification_blocker_count": 0}
 
 
 def load_contract(path: Path) -> Mapping[str, Any]:
