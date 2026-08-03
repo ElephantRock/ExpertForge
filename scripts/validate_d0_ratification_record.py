@@ -128,17 +128,27 @@ def validate_ratification_record(
     payload = dict(record)
     recorded_digest = payload.pop("record_sha256")
     actual_digest = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
-    _require(recorded_digest == actual_digest, f"ratification record SHA-256 mismatch: actual {actual_digest}")
+    _require(
+        recorded_digest == actual_digest,
+        f"ratification record SHA-256 mismatch: actual {actual_digest}",
+    )
 
     dataset = _mapping(contract["dataset"], "dataset")
     tokenizer = _mapping(contract["tokenizer"], "tokenizer")
     prompts = _mapping(contract["generation_prompt_contract"], "generation_prompt_contract")
     _require(contract["status"] == "proposed_not_ratified", "historical proposal status changed")
     _require(contract["ratification_blockers"] == [], "historical blocker state changed")
-    _require(record["dataset_manifest_sha256"] == dataset["source_manifest_sha256"], "dataset identity drift")
-    _require(record["tokenizer_manifest_sha256"] == tokenizer["source_manifest_sha256"], "tokenizer identity drift")
     _require(
-        record["qualification_specification_fingerprint"] == _fingerprint_digest("qualification"),
+        record["dataset_manifest_sha256"] == dataset["source_manifest_sha256"],
+        "dataset identity drift",
+    )
+    _require(
+        record["tokenizer_manifest_sha256"] == tokenizer["source_manifest_sha256"],
+        "tokenizer identity drift",
+    )
+    _require(
+        record["qualification_specification_fingerprint"]
+        == _fingerprint_digest("qualification"),
         "qualification fingerprint drift",
     )
     _require(
@@ -194,7 +204,14 @@ def main(argv: list[str] | None = None) -> int:
     build_parser().parse_args(argv)
     try:
         report = validate_all()
-    except (ContractValidationError, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+    except (
+        ContractValidationError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as error:
         sys.stderr.write(f"D0 RATIFICATION RECORD INVALID: {error}\n")
         return 1
     sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
