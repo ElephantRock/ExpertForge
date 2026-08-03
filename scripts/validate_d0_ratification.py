@@ -217,9 +217,7 @@ def validate_all(
         "remaining_ratification_blockers": list(blockers),
         "remaining_ratification_blocker_count": len(blockers),
         "primitive_semantics_amendment_status": "preparation_complete_pending_acceptance",
-        "remaining_amendment_acceptance_blockers": list(
-            _EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS
-        ),
+        "remaining_amendment_acceptance_blockers": list(_EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS),
         "remaining_amendment_acceptance_blocker_count": len(
             _EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS
         ),
