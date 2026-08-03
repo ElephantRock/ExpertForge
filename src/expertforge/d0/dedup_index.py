@@ -156,11 +156,7 @@ class DedupIndex:
                 """,
                 (digest,),
             ).fetchone()
-            if (
-                first is None
-                or not isinstance(first[0], str)
-                or type(first[1]) is not int
-            ):
+            if first is None or not isinstance(first[0], str) or type(first[1]) is not int:
                 raise SourceOrderError("dedup index lost an existing digest record")
             first_source_file_path = first[0]
             first_physical_row_index = first[1]
