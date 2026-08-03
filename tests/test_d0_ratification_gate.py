@@ -118,9 +118,7 @@ def test_aggregate_report_digest_is_deterministic() -> None:
 
 def test_remaining_blocker_drift_is_rejected() -> None:
     with pytest.raises(ContractValidationError, match="permanent gate state"):
-        _validate_remaining_blockers(
-            {"ratification_blockers": ["PROJECT_STATE_synchronization"]}
-        )
+        _validate_remaining_blockers({"ratification_blockers": ["PROJECT_STATE_synchronization"]})
 
 
 def test_permanent_command_succeeds(capsys: pytest.CaptureFixture[str]) -> None:
