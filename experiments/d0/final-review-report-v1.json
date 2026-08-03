@@ -5,7 +5,7 @@
   "parent_issue": 41,
   "pull_request": 43,
   "report_path": "reports/d0-baseline-contract-final-review.md",
-  "report_sha256": "pending",
+  "report_sha256": "c41573a01f7f0568221b7e12edf87a50dd2ab54f39e9d53de37af68a088060b9",
   "review_disposition": "accept_for_PROJECT_STATE_synchronization",
   "remaining_ratification_blockers": [
     "PROJECT_STATE_synchronization"
