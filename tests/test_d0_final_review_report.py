@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -10,7 +12,11 @@ from scripts.validate_d0_final_review_report import (
     validate_all,
     validate_final_review_report,
 )
-from scripts.validate_d0_source_manifests import CONTRACT_PATH, ContractValidationError, load_json_object
+from scripts.validate_d0_source_manifests import (
+    CONTRACT_PATH,
+    ContractValidationError,
+    load_json_object,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = ROOT / "reports/d0-baseline-contract-final-review.md"
@@ -44,9 +50,8 @@ def test_report_digest_drift_is_rejected() -> None:
 def test_report_content_drift_is_rejected() -> None:
     manifest = copy.deepcopy(_manifest())
     report_bytes = REPORT_PATH.read_bytes() + b"\nmaterial execution authorized: true\n"
-    import hashlib
-
     manifest["report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
+
     with pytest.raises(ContractValidationError, match="forbidden claim"):
         validate_final_review_report(manifest, report_bytes, _contract())
 
@@ -65,7 +70,5 @@ def test_stale_contract_blocker_state_is_rejected() -> None:
 def test_review_manifest_is_deterministic_json() -> None:
     raw = MANIFEST_PATH.read_bytes()
     parsed = load_json_object(MANIFEST_PATH)
-
-    import json
 
     assert raw == (json.dumps(parsed, indent=2, sort_keys=False) + "\n").encode("utf-8")
