@@ -130,5 +130,8 @@ def bind_scan_identity(path: Path, identity: ScanIdentity) -> str:
         if descriptor >= 0:
             os.close(descriptor)
         if not published:
-            temporary_path.unlink(missing_ok=True)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
     return expected_digest
