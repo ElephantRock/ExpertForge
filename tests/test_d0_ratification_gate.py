@@ -27,6 +27,8 @@ EXPECTED_ORDER = (
     "final_review_report",
     "ratification_record",
     "project_state",
+    "primitive_semantics_amendment",
+    "primitive_semantics_evidence",
 )
 
 
@@ -47,14 +49,25 @@ def test_committed_ratification_bundle_validates() -> None:
     report = validate_all()
 
     assert report["status"] == "valid_d0_ratification_bundle"
-    assert report["validator_count"] == 9
+    assert report["schema_version"] == "expertforge-d0-ratification-validation/3"
+    assert report["validator_count"] == 11
     assert report["validator_order"] == list(EXPECTED_ORDER)
     assert report["remaining_ratification_blockers"] == []
     assert report["remaining_ratification_blocker_count"] == 0
+    assert report["primitive_semantics_amendment_status"] == (
+        "preparation_complete_pending_acceptance"
+    )
+    assert report["remaining_amendment_acceptance_blockers"] == [
+        "amendment_review_not_yet_accepted",
+        "exact_head_ci_not_yet_accepted",
+    ]
+    assert report["remaining_amendment_acceptance_blocker_count"] == 2
     assert report["actual_corpus_scan_completed"] is False
     assert report["actual_corpus_scan_stage"] == "D0.1_preflight_before_packing_or_training"
     assert report["d0_1_authorized"] is True
     assert report["d0_2_authorized"] is True
+    assert report["d0_2_implementation_authorized"] is True
+    assert report["d0_2_acceptance_authorized"] is False
     assert report["d0_3_authorized"] is False
     assert report["material_execution_authorized"] is False
 
