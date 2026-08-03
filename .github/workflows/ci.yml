@@ -39,8 +39,8 @@ jobs:
       - name: Install Python
         run: uv python install 3.11
 
-      - name: Sync locked environment
-        run: uv sync --locked
+      - name: Sync locked environment with D0 data extra
+        run: uv sync --locked --extra d0-data
 
       - name: Check formatting
         run: uv run --locked ruff format --check .
