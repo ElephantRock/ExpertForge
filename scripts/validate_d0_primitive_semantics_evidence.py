@@ -131,8 +131,7 @@ def _validate_profile(
     semantics = envelope.effective.d0_primitive_semantics
     _require(semantics is not None, f"{profile} primitive semantics are missing")
     _require(
-        semantics.amendment_path
-        == "experiments/d0/primitive-semantics-amendment-v1.proposed.json",
+        semantics.amendment_path == "experiments/d0/primitive-semantics-amendment-v1.proposed.json",
         f"{profile} amendment path changed",
     )
     _require(
@@ -223,9 +222,7 @@ def _validate_review(
         policy="sha256(canonical_json_without_review_sha256)",
         expected=_REVIEW_SHA256,
     )
-    proposal_blockers = _string_list(
-        proposal.get("ratification_blockers"), "ratification_blockers"
-    )
+    proposal_blockers = _string_list(proposal.get("ratification_blockers"), "ratification_blockers")
     _require(
         "affected_profile_fingerprints_not_yet_regenerated" in proposal_blockers,
         "historical proposal preparation blocker was rewritten",
@@ -343,8 +340,7 @@ def validate_all() -> dict[str, object]:
         "review formal-definition path changed",
     )
     _require(
-        identities.get("project_state_path")
-        == "experiments/d0/project-state-v3.proposed.json",
+        identities.get("project_state_path") == "experiments/d0/project-state-v3.proposed.json",
         "review project-state path changed",
     )
     _require(
