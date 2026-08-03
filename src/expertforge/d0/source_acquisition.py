@@ -73,7 +73,9 @@ def _fsync_directory(path: Path) -> None:
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise SourceAcquisitionError(f"cannot open cache directory for fsync: {path}: {exc}") from exc
+        raise SourceAcquisitionError(
+            f"cannot open cache directory for fsync: {path}: {exc}"
+        ) from exc
     try:
         os.fsync(descriptor)
     except OSError as exc:
