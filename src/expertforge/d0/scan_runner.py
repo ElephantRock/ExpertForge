@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -23,7 +24,10 @@ from expertforge.d0.scan_report import (
     canonical_report_bytes,
 )
 from expertforge.d0.source_manifest import SourceManifest
-from expertforge.d0.source_verification import verify_source_inventory
+from expertforge.d0.source_verification import (
+    resolve_inventory_path,
+    verify_source_inventory,
+)
 
 SCANNER_ALGORITHM_VERSION = "d0-contamination-aho-corasick-v1"
 
@@ -45,14 +49,17 @@ def runtime_versions() -> dict[str, str]:
     }
 
 
-def load_prompt_manifest(path: Path, *, expected_sha256: str) -> tuple[Mapping[str, Any], str]:
+def load_prompt_manifest(
+    path: Path,
+    *,
+    expected_sha256: str,
+) -> tuple[Mapping[str, Any], str]:
     """Load the frozen prompt manifest after strict raw-byte identity verification."""
 
     try:
         raw = path.read_bytes()
     except OSError as exc:
         raise ContaminationError(f"cannot read prompt manifest {path}: {exc}") from exc
-    import hashlib
 
     actual_sha256 = hashlib.sha256(raw).hexdigest()
     if actual_sha256 != expected_sha256:
@@ -203,7 +210,7 @@ def execute_contamination_scan(
                 normalized_utf8_bytes_scanned = 0
                 normalized_codepoints_scanned = 0
                 try:
-                    local_path = dataset_root.resolve() / identity.path
+                    local_path = resolve_inventory_path(dataset_root, identity.path)
                     for document in iter_parquet_documents(
                         local_path,
                         source_file_path=identity.path,
