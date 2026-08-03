@@ -39,9 +39,7 @@ def test_first_in_source_order_is_retained_across_shards(tmp_path: Path) -> None
         index.begin_shard("sample/000.parquet")
         first = index.register("alpha", 0)
         duplicate = index.register("alpha", 1)
-        index.commit_shard(
-            _stats("sample/000.parquet", rows=2, accepted=2, duplicates=1, unique=1)
-        )
+        index.commit_shard(_stats("sample/000.parquet", rows=2, accepted=2, duplicates=1, unique=1))
         assert first.accepted is True
         assert duplicate.accepted is False
         assert duplicate.first_source_file_path == "sample/000.parquet"
@@ -52,9 +50,7 @@ def test_first_in_source_order_is_retained_across_shards(tmp_path: Path) -> None
         index.begin_shard("sample/001.parquet")
         cross_shard_duplicate = index.register("alpha", 0)
         new_document = index.register("beta", 1)
-        index.commit_shard(
-            _stats("sample/001.parquet", rows=2, accepted=2, duplicates=1, unique=1)
-        )
+        index.commit_shard(_stats("sample/001.parquet", rows=2, accepted=2, duplicates=1, unique=1))
         assert cross_shard_duplicate.accepted is False
         assert new_document.accepted is True
         assert index.unique_document_count == 2
@@ -69,9 +65,7 @@ def test_incomplete_shard_rolls_back_dedup_and_evidence_for_replay(tmp_path: Pat
     with DedupIndex(index_path) as index:
         index.begin_shard("sample/000.parquet")
         index.register("alpha", 0)
-        index.commit_shard(
-            _stats("sample/000.parquet", rows=1, accepted=1, duplicates=0, unique=1)
-        )
+        index.commit_shard(_stats("sample/000.parquet", rows=1, accepted=1, duplicates=0, unique=1))
         index.begin_shard("sample/001.parquet")
         index.register("beta", 0)
         index.rollback_shard()
@@ -80,9 +74,7 @@ def test_incomplete_shard_rolls_back_dedup_and_evidence_for_replay(tmp_path: Pat
         assert len(index.completed_shard_stats()) == 1
         index.begin_shard("sample/001.parquet")
         replayed = index.register("beta", 0)
-        index.commit_shard(
-            _stats("sample/001.parquet", rows=1, accepted=1, duplicates=0, unique=1)
-        )
+        index.commit_shard(_stats("sample/001.parquet", rows=1, accepted=1, duplicates=0, unique=1))
         assert replayed.accepted is True
 
 
@@ -112,9 +104,7 @@ def test_shard_and_row_order_are_fail_closed(tmp_path: Path) -> None:
         index.register("alpha", 1)
         with pytest.raises(SourceOrderError, match="row order"):
             index.register("beta", 1)
-        index.commit_shard(
-            _stats("sample/001.parquet", rows=2, accepted=1, duplicates=0, unique=1)
-        )
+        index.commit_shard(_stats("sample/001.parquet", rows=2, accepted=1, duplicates=0, unique=1))
         with pytest.raises(SourceOrderError, match="shard order"):
             index.begin_shard("sample/000.parquet")
 
@@ -123,9 +113,7 @@ def test_incomplete_or_mismatched_evidence_is_rejected(tmp_path: Path) -> None:
     with DedupIndex(tmp_path / "dedup.sqlite3") as index:
         index.begin_shard("sample/000.parquet")
         index.register("alpha", 0)
-        incomplete = _stats(
-            "sample/000.parquet", rows=1, accepted=1, duplicates=0, unique=1
-        )
+        incomplete = _stats("sample/000.parquet", rows=1, accepted=1, duplicates=0, unique=1)
         incomplete = ShardScanStats(
             path=incomplete.path,
             sha256=incomplete.sha256,
