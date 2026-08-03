@@ -1,0 +1,67 @@
+name: D0 amendment materialization
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/d0-amendment-materialize.yml
+      - scripts/materialize_d0_primitive_semantics_amendment.py
+      - src/expertforge/config/d0_primitive_semantics.py
+      - src/expertforge/config/models.py
+      - experiments/d0/primitive-semantics-amendment-v1.proposed.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: d0-amendment-materialize-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    name: Materialize and commit amended identities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out pull-request head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Sync locked environment
+        run: uv sync --locked
+
+      - name: Materialize and verify amended identities
+        run: |
+          uv run --locked python -m scripts.materialize_d0_primitive_semantics_amendment
+          uv run --locked python -m scripts.materialize_d0_primitive_semantics_amendment --check
+
+      - name: Commit generated evidence
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            configs/d0/qualification-primitive-v2.yaml \
+            configs/d0/canonical-primitive-v2.yaml \
+            experiments/d0/qualification-fingerprint-v2.json \
+            experiments/d0/canonical-fingerprint-v2.json \
+            experiments/d0/formal-experiment-definition-v2.json
+          if git diff --cached --quiet; then
+            echo "amendment evidence is already synchronized"
+            exit 0
+          fi
+          git commit -m "D0.0: materialize amended specification identities (#48)"
+          git push origin "HEAD:${HEAD_BRANCH}"
