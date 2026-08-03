@@ -3,19 +3,11 @@
   "version": 1,
   "canonical_config": {
     "algorithm": "sha256",
-    "digest": "4e1bdd0ad30bf8b2e1b61f83ff9e387acdab1c0e0d1cb975e7627db95273a960"
+    "digest": "c02acbf24ce620d2281030bff7cf5719caa56b07b1d3632d11d0c4559ea6f76d"
   },
   "immutable_inputs": [
-    {
-      "name": "dataset.manifest",
-      "algorithm": "sha256",
-      "digest": "d4e7108f2455a95c725fd61fcdb4423be24d1a9a5d3c6e2e322e9df6054bf0df"
-    },
-    {
-      "name": "tokenizer.manifest",
-      "algorithm": "sha256",
-      "digest": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
-    }
+    {"name": "dataset.manifest", "algorithm": "sha256", "digest": "85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7"},
+    {"name": "tokenizer.manifest", "algorithm": "sha256", "digest": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"}
   ],
-  "digest_str": "spec-v1-sha256-4f67b477c9d36c3aa06a4e99f0509380fdc91c672f6cc8aac3dd344880ce5cbe"
+  "digest_str": "spec-v1-sha256-02093a3c05c8b5079e2c4fbb8bafaada6365c0776a3a94ca3a8143873167f6d3"
 }
