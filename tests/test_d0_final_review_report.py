@@ -35,7 +35,11 @@ def test_committed_final_review_report_validates() -> None:
 
     assert report["status"] == "valid_d0_final_review_report"
     assert report["required_heading_count"] == 16
-    assert report["remaining_ratification_blockers"] == ["PROJECT_STATE_synchronization"]
+    assert report["review_time_remaining_ratification_blockers"] == [
+        "PROJECT_STATE_synchronization"
+    ]
+    assert report["remaining_ratification_blockers"] == []
+    assert report["remaining_ratification_blocker_count"] == 0
     assert report["material_execution_authorized"] is False
 
 
@@ -56,14 +60,11 @@ def test_report_content_drift_is_rejected() -> None:
         validate_final_review_report(manifest, report_bytes, _contract())
 
 
-def test_stale_contract_blocker_state_is_rejected() -> None:
+def test_nonterminal_contract_blocker_state_is_rejected() -> None:
     contract = copy.deepcopy(_contract())
-    contract["ratification_blockers"] = [
-        "rendered_review_report",
-        "PROJECT_STATE_synchronization",
-    ]
+    contract["ratification_blockers"] = ["PROJECT_STATE_synchronization"]
 
-    with pytest.raises(ContractValidationError, match="blocker state"):
+    with pytest.raises(ContractValidationError, match="must be terminal"):
         validate_final_review_report(_manifest(), REPORT_PATH.read_bytes(), contract)
 
 
