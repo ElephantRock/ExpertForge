@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 from expertforge.config.resolve import canonical_bytes, resolve_config
@@ -88,28 +89,31 @@ def _config_bytes(source: Path) -> bytes:
     return original + _SEMANTICS_YAML.encode("utf-8")
 
 
-def _fingerprint_bytes(config_path: Path) -> tuple[bytes, str]:
-    envelope = resolve_config(config_path)
-    fingerprint = specification_fingerprint(
-        canonical_bytes(envelope),
-        (
-            ImmutableInput(
-                name="dataset.manifest",
-                algorithm="sha256",
-                digest=DATASET_SHA256,
+def _fingerprint_bytes(config_payload: bytes) -> tuple[bytes, str]:
+    with tempfile.TemporaryDirectory(prefix="expertforge-d0-amendment-") as directory:
+        config_path = Path(directory) / "config.yaml"
+        config_path.write_bytes(config_payload)
+        envelope = resolve_config(config_path)
+        fingerprint = specification_fingerprint(
+            canonical_bytes(envelope),
+            (
+                ImmutableInput(
+                    name="dataset.manifest",
+                    algorithm="sha256",
+                    digest=DATASET_SHA256,
+                ),
+                ImmutableInput(
+                    name="primitive.semantics.amendment",
+                    algorithm="sha256",
+                    digest=AMENDMENT_SHA256,
+                ),
+                ImmutableInput(
+                    name="tokenizer.manifest",
+                    algorithm="sha256",
+                    digest=TOKENIZER_SHA256,
+                ),
             ),
-            ImmutableInput(
-                name="primitive.semantics.amendment",
-                algorithm="sha256",
-                digest=AMENDMENT_SHA256,
-            ),
-            ImmutableInput(
-                name="tokenizer.manifest",
-                algorithm="sha256",
-                digest=TOKENIZER_SHA256,
-            ),
-        ),
-    )
+        )
     value = fingerprint.model_dump(mode="json", by_alias=True)
     return _json_bytes(value), fingerprint.digest_str
 
@@ -168,10 +172,9 @@ def _expected_outputs() -> dict[Path, bytes]:
     outputs: dict[Path, bytes] = {}
     fingerprints: dict[str, str] = {}
     for profile, (source, amended, fingerprint_path) in _PROFILE_PATHS.items():
-        outputs[amended] = _config_bytes(source)
-        amended.parent.mkdir(parents=True, exist_ok=True)
-        amended.write_bytes(outputs[amended])
-        fingerprint_bytes, fingerprint = _fingerprint_bytes(amended)
+        config_payload = _config_bytes(source)
+        outputs[amended] = config_payload
+        fingerprint_bytes, fingerprint = _fingerprint_bytes(config_payload)
         outputs[fingerprint_path] = fingerprint_bytes
         fingerprints[profile] = fingerprint
     outputs[_FORMAL_V2] = _formal_definition_bytes(fingerprints)
