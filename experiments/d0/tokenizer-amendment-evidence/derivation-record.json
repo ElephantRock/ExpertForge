@@ -1,0 +1,57 @@
+{
+  "schema_version": "expertforge-d0-tokenizer-derivation-record/1",
+  "decision": "doctrine/decisions/0012-d0-tokenizer-vocabulary-divergence.md",
+  "resolution": 1,
+  "transformation_rule": "remove every added_tokens entry whose id > 50256; preserve all other fields unchanged (BPE model, normalizer, ByteLevel pre-tokenizer with add_prefix_space=false, post_processor, decoder); padding remains null",
+  "source": {
+    "artifact": "EleutherAI/gpt-neox-20b tokenizer.json (rejected for D0)",
+    "tokenizer_json_sha256": "c24618a1b3e6a38167beff1c72cffd126c3a66254347304b50547d12c5f25624",
+    "manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
+  },
+  "output": {
+    "tokenizer_json_path": "tokenizers/gpt-neox-corrected-v1/tokenizer.json",
+    "tokenizer_json_sha256": "c1e2f38b28b816e3af5a7047982b694c657222e4eb4bed647540801385770362",
+    "tokenizer_json_size_bytes": 2109961,
+    "vocabulary_size": 50257,
+    "max_reachable_id": 50256
+  },
+  "added_tokens_before": 25,
+  "added_tokens_after": 5,
+  "dropped_ids": [
+    50257,
+    50258,
+    50259,
+    50260,
+    50261,
+    50262,
+    50263,
+    50264,
+    50265,
+    50266,
+    50267,
+    50268,
+    50269,
+    50270,
+    50271,
+    50272,
+    50273,
+    50274,
+    50275,
+    50276
+  ],
+  "kept_ids": [
+    0,
+    1,
+    50254,
+    50255,
+    50256
+  ],
+  "postconditions_verified": [
+    "get_vocab_size(with_added_tokens=True) == 50257",
+    "padding is None",
+    "truncation is None",
+    "token_to_id('<|endoftext|>') == 0",
+    "every probed encoding id in [0, 50256]"
+  ],
+  "generated_at_utc": "2026-08-04T21:00:32+00:00"
+}
