@@ -1,0 +1,16 @@
+{
+  "command": "uv run --locked python -m scripts.run_d0_contamination_scan --dataset-root D:/expertforge-d0.1/dataset --tokenizer-root D:/expertforge-d0.1/tokenizer --work-dir D:/expertforge-d0.1/work --report D:/expertforge-d0.1/work/contamination-report.json --source-commit 75f45d7fbe94dbaa3fcd67e0a60c28d66dcd8894 --parquet-batch-size 4096 --acquire",
+  "evidence_branch": "local/46-d0.1-corpus-evidence",
+  "hit_count": 0,
+  "issue": 46,
+  "physical_rows_visited": 9672101,
+  "report_sha256": "d3763075fe3a26600895bdb50ce3e106de76e2859310f622cb4ca53ee69d72f1",
+  "scan_exit_code": 0,
+  "scan_identity_sha256": "a53b030047baa97acf9d0727151acee19bd8ecf9efc534ef73860625919380a2",
+  "scanner_source_commit": "75f45d7fbe94dbaa3fcd67e0a60c28d66dcd8894",
+  "schema_version": "expertforge-d0-execution-record/1",
+  "status": "complete_zero_hit",
+  "unique_documents_scanned": 9268156,
+  "verified_bytes": 28518193415,
+  "verified_shards": 14
+}
