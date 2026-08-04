@@ -29,6 +29,7 @@ EXPECTED_ORDER = (
     "project_state",
     "primitive_semantics_amendment",
     "primitive_semantics_evidence",
+    "tokenizer_amendment",
 )
 
 
@@ -49,8 +50,8 @@ def test_committed_ratification_bundle_validates() -> None:
     report = validate_all()
 
     assert report["status"] == "valid_d0_ratification_bundle"
-    assert report["schema_version"] == "expertforge-d0-ratification-validation/3"
-    assert report["validator_count"] == 11
+    assert report["schema_version"] == "expertforge-d0-ratification-validation/4"
+    assert report["validator_count"] == 12
     assert report["validator_order"] == list(EXPECTED_ORDER)
     assert report["remaining_ratification_blockers"] == []
     assert report["remaining_ratification_blocker_count"] == 0
