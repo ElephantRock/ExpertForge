@@ -35,6 +35,10 @@ class ScanReportError(D0DataError, ValueError):
     """A contamination scan report is incomplete or internally inconsistent."""
 
 
+class TokenizerBindingError(D0DataError, ValueError):
+    """The frozen D0 tokenizer contract was violated or the tokenizer could not be bound."""
+
+
 class MissingOptionalDependencyError(D0DataError, ImportError):
     """An explicitly requested D0 surface is missing its optional dependency."""
 

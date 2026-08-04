@@ -24,6 +24,20 @@ class VerifiedSourceFile:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedSourceBytes:
+    """A verified regular file plus its collected payload bytes.
+
+    The payload is read through the same descriptor used for inspection and
+    hashing (no path-based reopen after verification), so callers that need the
+    bytes at runtime — e.g. a tokenizer loaded via ``from_buffer`` — inherit the
+    descriptor-bound guarantee instead of re-reading the path.
+    """
+
+    identity: VerifiedSourceFile
+    payload: bytes
+
+
 def resolve_inventory_path(root: Path, manifest_path: str) -> Path:
     """Resolve a manifest path beneath ``root`` without permitting traversal."""
 
@@ -34,13 +48,20 @@ def resolve_inventory_path(root: Path, manifest_path: str) -> Path:
     return candidate
 
 
-def verify_source_file(
+def _verify_source_payload(
     path: Path,
     identity: SourceFileIdentity,
     *,
-    chunk_size: int = _DEFAULT_CHUNK_SIZE,
-) -> VerifiedSourceFile:
-    """Verify one source object using the same descriptor for inspection and hashing."""
+    chunk_size: int,
+    collect_payload: bool,
+) -> tuple[VerifiedSourceFile, bytes | None]:
+    """Verify one source object using the same descriptor for inspection and hashing.
+
+    When ``collect_payload`` is True the full byte payload is accumulated and
+    returned alongside the verified identity, read through the protected
+    descriptor. Otherwise the payload slot of the returned tuple is None and the
+    file is only streamed through the hash.
+    """
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -59,6 +80,7 @@ def verify_source_file(
 
     digest = hashlib.sha256()
     size_bytes = 0
+    payload_chunks: list[bytes] | None = [] if collect_payload else None
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -71,6 +93,8 @@ def verify_source_file(
                     break
                 digest.update(chunk)
                 size_bytes += len(chunk)
+                if payload_chunks is not None:
+                    payload_chunks.append(chunk)
     except OSError as exc:
         raise SourceVerificationError(f"cannot read source object {path}: {exc}") from exc
     finally:
@@ -88,12 +112,50 @@ def verify_source_file(
             f"source SHA-256 mismatch for {identity.path}: expected {identity.sha256}, "
             f"actual {actual_digest}"
         )
-    return VerifiedSourceFile(
+    verified = VerifiedSourceFile(
         manifest_path=identity.path,
         local_path=path.resolve(),
         size_bytes=size_bytes,
         sha256=actual_digest,
     )
+    payload = b"".join(payload_chunks) if payload_chunks is not None else None
+    return verified, payload
+
+
+def verify_source_file(
+    path: Path,
+    identity: SourceFileIdentity,
+    *,
+    chunk_size: int = _DEFAULT_CHUNK_SIZE,
+) -> VerifiedSourceFile:
+    """Verify one source object using the same descriptor for inspection and hashing."""
+
+    verified, _payload = _verify_source_payload(
+        path, identity, chunk_size=chunk_size, collect_payload=False
+    )
+    return verified
+
+
+def verify_source_file_bytes(
+    path: Path,
+    identity: SourceFileIdentity,
+    *,
+    chunk_size: int = _DEFAULT_CHUNK_SIZE,
+) -> VerifiedSourceBytes:
+    """Verify one source object and return its collected bytes.
+
+    The bytes are read through the same protected descriptor used for the size
+    and SHA-256 checks, so a caller that consumes the payload (e.g. a tokenizer
+    constructed via ``from_buffer``) cannot be fooled by a path change between
+    verification and use.
+    """
+
+    verified, payload = _verify_source_payload(
+        path, identity, chunk_size=chunk_size, collect_payload=True
+    )
+    if payload is None:  # pragma: no cover - collect_payload=True always yields bytes
+        raise SourceVerificationError(f"internal error: payload not collected for {identity.path}")
+    return VerifiedSourceBytes(identity=verified, payload=payload)
 
 
 def verify_source_inventory(
