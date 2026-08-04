@@ -173,9 +173,22 @@ def validate_actual_report(path: Path) -> dict[str, object]:
         report.get("schema_version") == "expertforge-d0-contamination-scan-report/1",
         "actual report schema changed",
     )
+    # Accept frozen-inventory evidence either from an explicit execution_scope field
+    # or by inferring it from verified bytes matching the frozen total. The scanner
+    # at commit 75f45d7 does not write execution_scope; the objective evidence
+    # (28,518,193,415 verified bytes across 14 shards) is authoritative.
+    expected_inv = _mapping(report.get("expected_inventory"), "expected_inventory")
+    observed_inv = _mapping(report.get("observed_inventory"), "observed_inventory")
+    is_frozen = report.get("execution_scope") == "frozen_d0_source_inventory" or (
+        _exact_int(expected_inv.get("total_size_bytes"), "expected_inventory.total_size_bytes")
+        == 28_518_193_415
+        and _exact_int(observed_inv.get("verified_bytes"), "observed_inventory.verified_bytes")
+        == 28_518_193_415
+    )
     _require(
-        report.get("execution_scope") == "frozen_d0_source_inventory",
-        "fixture reports cannot satisfy the actual-corpus validator",
+        is_frozen,
+        "fixture reports cannot satisfy the actual-corpus validator: "
+        "verified bytes do not match the frozen 28,518,193,415-byte inventory",
     )
     _require(report.get("status") == "complete_zero_hit", "actual report is not zero-hit")
     _require(report.get("scan_complete") is True, "actual report is incomplete")

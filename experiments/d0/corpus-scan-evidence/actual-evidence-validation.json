@@ -1,0 +1,16 @@
+{
+  "actual_corpus_scan_accepted": true,
+  "actual_corpus_scan_completed": true,
+  "d0_1_accepted": true,
+  "dataset_manifest_sha256": "85fab524b13c49da78264eb03124ce113395657d6403627e53008aade7eea7d7",
+  "packing_performed": false,
+  "report_path": "experiments/d0/corpus-scan-evidence/contamination-report.json",
+  "report_sha256": "d3763075fe3a26600895bdb50ce3e106de76e2859310f622cb4ca53ee69d72f1",
+  "scanner_source_commit": "75f45d7fbe94dbaa3fcd67e0a60c28d66dcd8894",
+  "splitting_performed": false,
+  "status": "accepted_d0_source_contamination_evidence",
+  "tokenization_performed": false,
+  "tokenizer_manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c",
+  "training_performed": false,
+  "zero_hit": true
+}
