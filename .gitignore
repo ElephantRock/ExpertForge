@@ -67,6 +67,9 @@ data/
 # an external artifact directory.
 !src/expertforge/d0/data/
 !src/expertforge/d0/data/**
+# Re-exclude Python caches so the package negation does not pull them back in
+# (mirrors the src/expertforge/artifacts/ convention).
+src/expertforge/d0/data/__pycache__/
 datasets/
 !datasets/.gitkeep
 *.zip
