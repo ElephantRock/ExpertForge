@@ -26,6 +26,9 @@ dependencies = [
 d0-data = [
     "pyarrow>=25,<26",
 ]
+d0-model = [
+    "torch>=2.4,<3",
+]
 
 [project.scripts]
 # Configuration resolver CLI (Issue #5).

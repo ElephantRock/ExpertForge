@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -491,8 +492,17 @@ def _validate_profile(
 def validate_parameter_inventory(
     inventory: Mapping[str, Any],
     contract: Mapping[str, Any],
+    *,
+    inventory_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Validate the declarative inventory and compare two independent counters."""
+    """Validate the declarative inventory and compare two independent counters.
+
+    When ``inventory_sha256`` is provided, it is the SHA-256 of the raw inventory
+    file bytes and is checked against the digest recorded in the contract's
+    ``parameter_accounting.parameter_inventory_sha256`` field. Passing ``None``
+    (the default) skips the byte-digest binding — used by callers that only have
+    the parsed mapping.
+    """
 
     formula_report = validate_contract(contract)
     _validate_header(inventory, contract)
@@ -513,10 +523,31 @@ def validate_parameter_inventory(
         for profile in _PROFILES
     }
 
+    parameter_accounting = _require_mapping(
+        contract.get("parameter_accounting"),
+        "parameter_accounting",
+    )
+    _require(
+        "parameter_inventory_sha256" in parameter_accounting,
+        "parameter_accounting.parameter_inventory_sha256 is missing",
+    )
+    recorded_sha = parameter_accounting["parameter_inventory_sha256"]
+    _require(
+        isinstance(recorded_sha, str) and len(recorded_sha) == 64,
+        "parameter_accounting.parameter_inventory_sha256 must be a 64-hex digest",
+    )
+    if inventory_sha256 is not None:
+        _require(
+            inventory_sha256 == recorded_sha,
+            "parameter inventory SHA-256 mismatch: bytes on disk disagree with "
+            "the digest recorded in parameter_accounting.parameter_inventory_sha256",
+        )
+
     return {
         "status": "valid_parameter_inventory",
         "schema_version": inventory["schema_version"],
         "comparison": "declarative_tensor_inventory_equals_independent_closed_form",
+        "parameter_inventory_sha256": recorded_sha,
         "profiles": profile_reports,
     }
 
@@ -527,6 +558,7 @@ def validate_all() -> dict[str, Any]:
     return validate_parameter_inventory(
         load_json_object(INVENTORY_PATH),
         load_json_object(ROOT / CONTRACT_PATH),
+        inventory_sha256=hashlib.sha256(INVENTORY_PATH.read_bytes()).hexdigest(),
     )
 
 
