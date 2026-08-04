@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from expertforge.d0.model.config import (
+torch = pytest.importorskip("torch")
+
+from expertforge.d0.model.config import (  # noqa: E402
     D0ModelConfig,
     canonical_config,
     qualification_config,

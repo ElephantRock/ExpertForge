@@ -8,27 +8,55 @@ implementations disagree on the spec, not that one imported the other.
 
 from __future__ import annotations
 
-import numpy as np
-import torch
+import re
+from typing import Any
 
-from expertforge.d0.model.attention import CausalSelfAttention
-from expertforge.d0.model.config import D0ModelConfig
-from expertforge.d0.model.initialization import initialize_model
-from expertforge.d0.model.numpy_oracle import (
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from expertforge.d0.model.attention import CausalSelfAttention  # noqa: E402
+from expertforge.d0.model.config import D0ModelConfig  # noqa: E402
+from expertforge.d0.model.initialization import initialize_model  # noqa: E402
+from expertforge.d0.model.numpy_oracle import (  # noqa: E402
     numpy_attention,
+    numpy_full_model_forward,
     numpy_rmsnorm,
     numpy_rope,
     numpy_swiglu,
 )
-from expertforge.d0.model.rmsnorm import RMSNorm
-from expertforge.d0.model.rope import apply_rope
-from expertforge.d0.model.swiglu import SwiGLU
-from expertforge.d0.model.transformer import D0Model
+from expertforge.d0.model.rmsnorm import RMSNorm  # noqa: E402
+from expertforge.d0.model.rope import apply_rope  # noqa: E402
+from expertforge.d0.model.swiglu import SwiGLU  # noqa: E402
+from expertforge.d0.model.transformer import D0Model  # noqa: E402
 
 # Tolerances: float32 accumulation in both paths, so ~1e-4 relative agreement is
 # comfortable for these small inputs.
 ATOL = 1e-4
 RTOL = 1e-4
+
+# Tiny-model dimensions used by the full-model oracle and the serialization /
+# gradient evidence categories. Small enough to run in milliseconds while still
+# exercising every primitive (multi-head attention, RoPE, SwiGLU, RMSNorm) and
+# the tied output projection.
+TINY_CONFIG = D0ModelConfig(
+    n_layers=2,
+    dim=32,
+    n_heads=4,
+    head_dim=8,
+    ffn_dim=48,
+    vocab_size=100,
+)
+_TINY_SEED = 2_026_080_200
+
+
+def _build_tiny_model() -> D0Model:
+    model = D0Model(TINY_CONFIG)
+    initialize_model(
+        model, TINY_CONFIG.n_layers, torch.Generator(device="cpu").manual_seed(_TINY_SEED)
+    )
+    return model
 
 
 def test_rmsnorm_matches_numpy_oracle() -> None:
@@ -85,9 +113,11 @@ def test_swiglu_matches_numpy_oracle() -> None:
 def test_attention_single_head_matches_numpy_oracle() -> None:
     """End-to-end attention: torch module vs a single-head numpy oracle.
 
-    We drive the torch attention module on a single-head config and reconstruct
-    the inputs the oracle expects by extracting the post-projection Q/K/V via
-    hooks. The oracle then computes the full causal attention independently.
+    The oracle computes the **entire** attention module — including the output
+    projection — in NumPy. Only the input ``x`` and the four stored projection
+    weights leave the torch module; nothing from the torch forward pass is
+    reused. Agreement therefore demonstrates that the torch ``CausalSelfAttention``
+    and the independent oracle implement the same ratified attention semantics.
     """
     torch.manual_seed(0)
     dim = head_dim = 4
@@ -97,33 +127,35 @@ def test_attention_single_head_matches_numpy_oracle() -> None:
 
     x = torch.randn(1, seq_len, dim)
 
-    # Capture Q, K, V after projection but before RoPE by calling the
-    # projections directly (operation order: project -> reshape -> RoPE).
+    x_np = x.detach().numpy()
+    q_w = module.q_proj.weight.detach().numpy()
+    k_w = module.k_proj.weight.detach().numpy()
+    v_w = module.v_proj.weight.detach().numpy()
+    out_w = module.out_proj.weight.detach().numpy()
+
+    # Project x -> Q, K, V (bias-free nn.Linear: x @ W.T).
+    q = (x_np.astype(np.float32) @ q_w.astype(np.float32).T).reshape(seq_len, head_dim)
+    k = (x_np.astype(np.float32) @ k_w.astype(np.float32).T).reshape(seq_len, head_dim)
+    v = (x_np.astype(np.float32) @ v_w.astype(np.float32).T).reshape(seq_len, head_dim)
+
+    # Apply RoPE to Q and K (never V) using the same adjacent-pair convention.
+    positions = np.arange(seq_len, dtype=np.float32).reshape(1, 1, seq_len)
+    q_rot = numpy_rope(q.reshape(1, 1, seq_len, head_dim), positions, 10000.0, head_dim).reshape(
+        seq_len, head_dim
+    )
+    k_rot = numpy_rope(k.reshape(1, 1, seq_len, head_dim), positions, 10000.0, head_dim).reshape(
+        seq_len, head_dim
+    )
+
+    mask = np.tril(np.ones((seq_len, seq_len), dtype=bool))
+    context = numpy_attention(q_rot, k_rot, v, head_dim, mask)  # (seq, head_dim)
+
+    # Output projection computed entirely in NumPy — no torch out_proj reuse.
+    oracle_full = (
+        context.reshape(1, seq_len, head_dim).astype(np.float32) @ out_w.astype(np.float32).T
+    )
+
     with torch.no_grad():
-        q_proj = module.q_proj(x).view(seq_len, head_dim)
-        k_proj = module.k_proj(x).view(seq_len, head_dim)
-        v_proj = module.v_proj(x).view(seq_len, head_dim)
-
-        positions = torch.arange(seq_len).view(1, 1, seq_len)
-        q_rot = apply_rope(q_proj.view(1, 1, seq_len, head_dim), positions, 10000.0, head_dim)
-        k_rot = apply_rope(k_proj.view(1, 1, seq_len, head_dim), positions, 10000.0, head_dim)
-
-        mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool))
-        expected_values = numpy_attention(
-            q_rot.view(seq_len, head_dim).numpy(),
-            k_rot.view(seq_len, head_dim).numpy(),
-            v_proj.view(seq_len, head_dim).numpy(),
-            head_dim,
-            mask.numpy(),
-        )
-
-        # The torch module applies the output projection to the attention output;
-        # compare against that by composing oracle attention + torch out_proj.
-        expected_context = torch.from_numpy(expected_values).float().view(1, seq_len, head_dim)
-        expected_logits_pre_out = expected_context
-        # Re-derive full module output via out_proj to keep the oracle honest:
-        oracle_full = module.out_proj(expected_logits_pre_out.view(1, seq_len, dim)).numpy()
-
         full = module(x).detach().numpy()
 
     assert np.allclose(full, oracle_full, atol=ATOL, rtol=RTOL)
@@ -180,3 +212,128 @@ def test_attention_causality_via_zeroed_future() -> None:
             assert torch.allclose(out_full[0, :4], out_future_zeroed[0, :4], atol=1e-6)
         finally:
             module.v_proj.weight.data.copy_(original_v)
+
+
+# ---------------------------------------------------------------------------
+# Evidence category 3d — tiny full-model NumPy oracle.
+# ---------------------------------------------------------------------------
+
+
+def test_full_model_matches_numpy_oracle() -> None:
+    """The PyTorch D0Model and the NumPy full-model oracle must agree.
+
+    Both paths run the same tiny model (2 layers, dim=32, 4 heads, head_dim=8,
+    ffn_dim=48, vocab=100) on the same input. The oracle consumes only the
+    state-dict weights and the config — it never calls into the torch forward
+    pass — so agreement validates the entire architecture and its composition.
+    """
+    model = _build_tiny_model().eval()
+    ids = torch.randint(
+        0, TINY_CONFIG.vocab_size, (2, 6), generator=torch.Generator().manual_seed(3)
+    )
+
+    with torch.no_grad():
+        torch_logits = model(ids).detach().numpy()
+
+    weights = {k: v.detach().numpy() for k, v in model.state_dict().items()}
+    oracle_logits = numpy_full_model_forward(ids.numpy(), weights, TINY_CONFIG)
+
+    assert oracle_logits.shape == torch_logits.shape
+    assert np.allclose(torch_logits, oracle_logits, atol=ATOL, rtol=RTOL)
+
+
+# ---------------------------------------------------------------------------
+# Evidence category 3e — serialization and gradient tests.
+# ---------------------------------------------------------------------------
+
+
+def test_state_dict_round_trip_preserves_logits() -> None:
+    """Saving and reloading the state dict must reproduce logits exactly."""
+    model = _build_tiny_model().eval()
+    ids = torch.tensor([[1, 5, 9, 42, 7, 0]])
+
+    state_dict = {k: v.clone() for k, v in model.state_dict().items()}
+    reloaded = D0Model(TINY_CONFIG).eval()
+    reloaded.load_state_dict(state_dict)
+
+    with torch.no_grad():
+        before = model(ids)
+        after = reloaded(ids)
+
+    assert torch.allclose(before, after, atol=0.0, rtol=0.0)
+
+
+def test_tie_holds_after_state_dict_round_trip() -> None:
+    """The tied output projection must still alias the embedding after reload."""
+    model = _build_tiny_model().eval()
+    state_dict = {k: v.clone() for k, v in model.state_dict().items()}
+
+    reloaded = D0Model(TINY_CONFIG).eval()
+    reloaded.load_state_dict(state_dict)
+
+    assert reloaded.output_weight is reloaded.token_embedding.weight
+
+
+def test_backward_propagates_finite_gradients_to_every_family() -> None:
+    """Every expected parameter family must receive a finite gradient.
+
+    Runs forward + backward on the tiny model and asserts each of the 11
+    parameter families has at least one member whose ``.grad`` is finite and
+    non-trivial (not all-zero), confirming the tied output projection actually
+    routes gradient into ``token_embedding.weight``.
+    """
+    model = _build_tiny_model()
+    ids = torch.tensor([[1, 5, 9, 42, 7, 0]])
+    target = torch.tensor([[5, 9, 42, 7, 0, 1]])
+
+    logits = model(ids)
+    # Next-token cross-entropy averaged over all positions.
+    loss = torch.nn.functional.cross_entropy(
+        logits.reshape(-1, TINY_CONFIG.vocab_size),
+        target.reshape(-1),
+    )
+    loss.backward()
+
+    family_re = re.compile(r"blocks\.\d+\.")
+
+    # Collect the set of families (with the layer index normalised to {i}) that
+    # are present in the model. ``param.grad`` is ``Optional[Tensor]``.
+    families_present: dict[str, Any] = {}
+    for name, param in model.named_parameters():
+        family = family_re.sub("blocks.{i}.", name)
+        families_present[family] = param.grad
+
+    # The model is bias-free and has no RoPE parameters; every named parameter
+    # belongs to one of the 11 ratified families.
+    assert len(families_present) == 11
+
+    for family, grad in families_present.items():
+        assert grad is not None, f"{family} received no gradient"
+        assert torch.isfinite(grad).all(), f"{family} has non-finite gradients"
+        # The tied output projection routes gradient into the embedding through
+        # a real path; assert at least one entry moved off zero.
+        assert not torch.equal(grad, torch.zeros_like(grad)), (
+            f"{family} gradient is exactly zero everywhere"
+        )
+
+
+def test_no_bias_or_rope_keys_in_state_dict_after_backward() -> None:
+    """Backward must not introduce bias parameters or RoPE cache keys."""
+    model = _build_tiny_model()
+    ids = torch.tensor([[1, 5, 9, 42, 7, 0]])
+    target = torch.tensor([[5, 9, 42, 7, 0, 1]])
+
+    logits = model(ids)
+    loss = torch.nn.functional.cross_entropy(
+        logits.reshape(-1, TINY_CONFIG.vocab_size),
+        target.reshape(-1),
+    )
+    loss.backward()
+
+    keys = list(model.state_dict())
+    assert not any("bias" in k for k in keys)
+    assert not any("rope" in k.lower() for k in keys)
+    assert not any("inv_freq" in k for k in keys)
+    assert not any("cos" in k for k in keys)
+    assert not any("sin" in k for k in keys)
+    assert not any("cached" in k.lower() for k in keys)

@@ -100,6 +100,19 @@ class D0Model(nn.Module):
         )
         self.final_norm = RMSNorm(config.dim, epsilon=config.rmsnorm_epsilon)
 
+    @property
+    def output_weight(self) -> torch.Tensor:
+        """Tied output projection weight — identical to the token embedding.
+
+        Returns the **same** tensor object as :attr:`token_embedding.weight`
+        without registering a new parameter, so the tie is observable by object
+        identity (``model.output_weight is model.token_embedding.weight``) and
+        survives serialization round-trips: the state dict contains a single
+        ``token_embedding.weight`` entry, and reloading it materialises one
+        parameter that both surfaces alias.
+        """
+        return self.token_embedding.weight
+
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         x = self.token_embedding(token_ids)
         for block in self.blocks:

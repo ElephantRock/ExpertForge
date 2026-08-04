@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import math
 
-import torch
+import pytest
 
-from expertforge.d0.model.config import D0ModelConfig, qualification_config
-from expertforge.d0.model.initialization import initialize_model
-from expertforge.d0.model.transformer import D0Model
+torch = pytest.importorskip("torch")
+
+from expertforge.d0.model.config import (  # noqa: E402
+    D0ModelConfig,
+    qualification_config,
+)
+from expertforge.d0.model.initialization import initialize_model  # noqa: E402
+from expertforge.d0.model.transformer import D0Model  # noqa: E402
 
 _SEED = 2_026_080_200
 
