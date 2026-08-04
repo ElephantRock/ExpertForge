@@ -62,6 +62,7 @@ tensorboard/
 
 # --- Data and datasets (large; tracked only as provenance records, never blobs) ---
 data/
+!src/expertforge/d0/data/
 datasets/
 !datasets/.gitkeep
 *.zip
