@@ -71,9 +71,7 @@ class ScanIdentity:
             "prompt_manifest_sha256": _digest(
                 self.prompt_manifest_sha256, "prompt_manifest_sha256"
             ),
-            "prompt_payload_sha256": _digest(
-                self.prompt_payload_sha256, "prompt_payload_sha256"
-            ),
+            "prompt_payload_sha256": _digest(self.prompt_payload_sha256, "prompt_payload_sha256"),
             "scanner_algorithm_version": self.scanner_algorithm_version,
             "scanner_source_commit": _commit(self.scanner_source_commit),
             "digest_policy": "sha256(canonical_json_without_scan_identity_sha256)",

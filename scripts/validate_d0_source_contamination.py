@@ -13,6 +13,7 @@ from typing import Any
 from expertforge.d0.contamination import ContaminationMatcher
 from expertforge.d0.errors import D0PreflightError, ScanReportError
 from expertforge.d0.scan_report import canonical_report_bytes
+from expertforge.d0.scan_runner import SCANNER_ALGORITHM_VERSION, load_prompt_manifest
 from expertforge.d0.source_manifest import SourceManifest, load_source_manifest
 from scripts.run_d0_contamination_scan import (
     DATASET_MANIFEST_PATH,
@@ -23,7 +24,6 @@ from scripts.run_d0_contamination_scan import (
     TOKENIZER_MANIFEST_PATH,
     TOKENIZER_MANIFEST_SHA256,
 )
-from expertforge.d0.scan_runner import SCANNER_ALGORITHM_VERSION, load_prompt_manifest
 
 _CHECKS = (
     "exact_normalized_prompt_substring",
@@ -180,7 +180,9 @@ def validate_actual_report(path: Path) -> dict[str, object]:
     _require(report.get("status") == "complete_zero_hit", "actual report is not zero-hit")
     _require(report.get("scan_complete") is True, "actual report is incomplete")
     _require(report.get("accepted") is True, "actual report is not accepted")
-    _require(report.get("issue") == 46 and report.get("parent_issue") == 41, "issue binding changed")
+    _require(
+        report.get("issue") == 46 and report.get("parent_issue") == 41, "issue binding changed"
+    )
 
     bindings = _mapping(report.get("bindings"), "bindings")
     _require(
@@ -218,8 +220,15 @@ def validate_actual_report(path: Path) -> dict[str, object]:
     _require(observed.get("verified_bytes") == 28_518_193_415, "verified bytes changed")
 
     counts = _mapping(report.get("counts"), "counts")
-    _require(_exact_int(counts.get("physical_rows_visited"), "physical_rows_visited", minimum=1) > 0, "no rows visited")
-    _require(_exact_int(counts.get("unique_documents_scanned"), "unique_documents_scanned", minimum=1) > 0, "no documents scanned")
+    _require(
+        _exact_int(counts.get("physical_rows_visited"), "physical_rows_visited", minimum=1) > 0,
+        "no rows visited",
+    )
+    _require(
+        _exact_int(counts.get("unique_documents_scanned"), "unique_documents_scanned", minimum=1)
+        > 0,
+        "no documents scanned",
+    )
     _require(counts.get("hit_count") == 0, "actual report contains hits")
     tier_counts = _mapping(counts.get("per_tier_match_counts"), "per_tier_match_counts")
     _require(
@@ -231,7 +240,10 @@ def validate_actual_report(path: Path) -> dict[str, object]:
 
     runtime = _mapping(report.get("runtime_versions"), "runtime_versions")
     for name in ("expertforge", "pyarrow", "python"):
-        _require(isinstance(runtime.get(name), str) and bool(runtime.get(name)), f"runtime {name} is missing")
+        _require(
+            isinstance(runtime.get(name), str) and bool(runtime.get(name)),
+            f"runtime {name} is missing",
+        )
 
     return {
         "status": "accepted_d0_source_contamination_evidence",

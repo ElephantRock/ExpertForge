@@ -33,12 +33,8 @@ def test_fixture_report_cannot_satisfy_actual_validator(tmp_path: Path) -> None:
         tokenizer_manifest_sha256=(
             "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c"
         ),
-        prompt_manifest_sha256=(
-            "c748706d9706e42bc0147d62c80f8f486ebb6aaa72fb53140b491ce7706e18c1"
-        ),
-        prompt_payload_sha256=(
-            "c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51"
-        ),
+        prompt_manifest_sha256=("c748706d9706e42bc0147d62c80f8f486ebb6aaa72fb53140b491ce7706e18c1"),
+        prompt_payload_sha256=("c52ef9f4420ff8160fd5f212370f46cefde71033ac38431bdad2878640070e51"),
         scanner_source_commit="1" * 40,
         scanner_algorithm_version="d0-contamination-aho-corasick-v1",
         runtime_versions={"expertforge": "fixture", "pyarrow": "25.0.0", "python": "3.11"},

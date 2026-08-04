@@ -96,9 +96,7 @@ class ShardScanStats:
             if count == 0:
                 raise ScanReportError(f"{self.path}: rejection reason counts must be positive")
             if previous_reason is not None and reason <= previous_reason:
-                raise ScanReportError(
-                    f"{self.path}: rejection reasons must be unique and sorted"
-                )
+                raise ScanReportError(f"{self.path}: rejection reasons must be unique and sorted")
             rejection_reasons[reason] = count
             previous_reason = reason
         if rejection_reasons and sum(rejection_reasons.values()) != self.rejected_documents:
@@ -191,7 +189,9 @@ def build_scan_report(
     rejected_documents_by_reason: dict[str, int] = {}
     for shard in shards:
         for reason, count in shard.rejected_documents_by_reason:
-            rejected_documents_by_reason[reason] = rejected_documents_by_reason.get(reason, 0) + count
+            rejected_documents_by_reason[reason] = (
+                rejected_documents_by_reason.get(reason, 0) + count
+            )
 
     ordered_hits = sort_hit_records(hits)
     per_tier_match_counts: dict[str, int] = {check: 0 for check in _CHECKS}

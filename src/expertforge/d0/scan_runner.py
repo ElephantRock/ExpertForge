@@ -80,8 +80,7 @@ def load_prompt_manifest(
     actual_sha256 = hashlib.sha256(raw).hexdigest()
     if actual_sha256 != expected_sha256:
         raise ContaminationError(
-            f"prompt manifest SHA-256 mismatch: expected {expected_sha256}, "
-            f"actual {actual_sha256}"
+            f"prompt manifest SHA-256 mismatch: expected {expected_sha256}, actual {actual_sha256}"
         )
     try:
         value = json.loads(raw.decode("utf-8", errors="strict"))
