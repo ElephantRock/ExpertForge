@@ -1,0 +1,19 @@
+# GitWire configuration — see https://gitwire.erlab.uk/docs/
+version: 1
+
+pillars:
+  issue_fix:
+    enabled: true
+    max_file_changes: 3
+    max_line_changes: 200
+    min_confidence_to_submit: medium
+    allowed_labels:
+      - bug
+      - good first issue
+      - help wanted
+      - enhancement
+      - documentation
+    blocked_paths:
+      - migrations/**
+      - .github/**
+      - db/**
