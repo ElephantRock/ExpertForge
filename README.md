@@ -105,3 +105,4 @@ entry and exit criteria. Full definitions:
 
 Milestone 0 (experimental substrate) is the next milestone. See
 [PROJECT_STATE.md](PROJECT_STATE.md).
+<!-- check-lifecycle-proof -->
