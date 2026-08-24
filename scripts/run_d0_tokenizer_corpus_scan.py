@@ -195,6 +195,7 @@ def _scan_one_document(
         ids = handle.impl.encode(normalized_text, add_special_tokens=False).ids
     except Exception as exc:  # noqa: BLE001 - surface any tokenizer failure
         raise CorpusScanError(f"tokenizer {handle.manifest_id} failed on {document_id}") from exc
+    acc.documents_tokenized += 1
     oor_in_doc = False
     for token_id in ids:
         if token_id > acc.max_emitted_id:
