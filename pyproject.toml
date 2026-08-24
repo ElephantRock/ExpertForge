@@ -25,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 d0-data = [
     "pyarrow>=25,<26",
+    "tokenizers>=0.21,<0.23",
 ]
 d0-model = [
     "torch>=2.4,<3",

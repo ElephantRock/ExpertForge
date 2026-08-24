@@ -62,6 +62,14 @@ tensorboard/
 
 # --- Data and datasets (large; tracked only as provenance records, never blobs) ---
 data/
+# Negate the above for the in-tree source package ``src/expertforge/d0/data/``
+# (identity + tokenizer binding modules); only the top-level ``data/`` cache is
+# an external artifact directory.
+!src/expertforge/d0/data/
+!src/expertforge/d0/data/**
+# Re-exclude Python caches so the package negation does not pull them back in
+# (mirrors the src/expertforge/artifacts/ convention).
+src/expertforge/d0/data/__pycache__/
 datasets/
 !datasets/.gitkeep
 *.zip
@@ -72,11 +80,21 @@ datasets/
 *.npy
 *.npz
 
+# --- Tokenizer artifacts (large; tracked only as manifests + derivation
+#     provenance, never blobs). The corrected tokenizer.json is reproducible
+#     from the rejected source via scripts/derive_d0_tokenizer.py; its sha256
+#     is bound by tokenizers/manifests/d0-gpt-neox-corrected-v1.json. ---
+tokenizers/gpt-neox-corrected-v1/tokenizer.json
+
 # --- Environment / provenance capture that is machine-specific ---
 # These are captured per-run into experiments/ or reports/; stray captures:
 .env
 .env.*
 !.env.example
+
+# --- Local acquisition caches (external artifacts per doctrine §9;
+#     verified by sha256 against committed manifests before use) ---
+.cache/
 
 # --- Secrets (never commit) ---
 *.pem

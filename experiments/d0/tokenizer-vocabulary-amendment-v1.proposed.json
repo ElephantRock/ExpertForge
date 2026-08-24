@@ -1,0 +1,61 @@
+{
+  "schema_version": "expertforge-d0-tokenizer-vocabulary-amendment/1",
+  "status": "proposed_not_ratified",
+  "issue": 55,
+  "parent_issue": 41,
+  "ratified_issue": 42,
+  "decision": "doctrine/decisions/0012-d0-tokenizer-vocabulary-divergence.md",
+  "resolution": 1,
+  "historical_contract_path": "experiments/d0/baseline-contract-v1.proposed.json",
+  "scope": "tokenizer_artifact_only",
+  "unchanged_contract_domains": [
+    "dataset",
+    "model_dimensions",
+    "parameter_counts",
+    "batch",
+    "optimizer",
+    "initialization_distributions",
+    "schedules",
+    "precision_environment",
+    "seeds",
+    "evaluation",
+    "thresholds",
+    "authorization_boundary",
+    "primitive_semantics"
+  ],
+  "changed_contract_domains": [
+    "tokenizer"
+  ],
+  "model_vocabulary_rows": 50257,
+  "qualification_parameters": 19685888,
+  "canonical_parameters": 76738176,
+  "corrected_tokenizer_reachable_ids": "0..50256",
+  "old_tokenizer": {
+    "manifest_path": "tokenizers/manifests/d0-gpt-neox-v1.json",
+    "manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c",
+    "status": "rejected_for_d0_execution",
+    "preserved_as": "superseded_source_evidence"
+  },
+  "new_tokenizer": {
+    "manifest_path": "tokenizers/manifests/d0-gpt-neox-corrected-v1.json",
+    "manifest_sha256": "1142baf61c330a318be6e1b153f6769892a7f5af3b7241363a1d0a1f2ca453e1",
+    "derivation_record": "experiments/d0/tokenizer-amendment-evidence/derivation-record.json",
+    "status": "active_for_d0_execution"
+  },
+  "derivation_rule": "remove every added_tokens entry whose id > 50256; preserve all other fields unchanged (BPE model, normalizer, ByteLevel pre-tokenizer with add_prefix_space=false, post_processor, decoder); padding remains null",
+  "ratification_blockers": [
+    "full_dual_tokenizer_corpus_scan_not_executed",
+    "amendment_review_not_yet_accepted"
+  ],
+  "affected_evidence_regenerated": {
+    "profile_specification_fingerprints": true,
+    "formal_experiment_definition": true
+  },
+  "unaffected_prior_evidence": {
+    "d0_2_model_tensors_and_parameter_identity": true,
+    "d0_1_contamination_scan_normalized_source_text": true,
+    "primitive_semantics_amendment": true,
+    "rejected_original_tokenizer_manifest": true
+  },
+  "manifest_sha256": "0e85766d32f31ef0098ebdb492cb696880713d6475b00810dd2c69d4a14b2980"
+}

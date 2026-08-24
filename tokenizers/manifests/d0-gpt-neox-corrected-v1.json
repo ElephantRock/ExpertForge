@@ -1,0 +1,51 @@
+{
+  "schema_version": "expertforge-tokenizer-source-manifest/1",
+  "manifest_id": "d0-gpt-neox-corrected-v1",
+  "digest_policy": "sha256(canonical_json_without_manifest_sha256)",
+  "upstream": {
+    "repository": "EleutherAI/gpt-neox-20b",
+    "revision": "364ae95407723fadd1d47b023c1efb92a4d891c3",
+    "license": "Apache-2.0"
+  },
+  "tokenizer": {
+    "family": "byte_level_bpe",
+    "vocabulary_size": 50257,
+    "normalizer": "none",
+    "pre_tokenizer": {
+      "type": "ByteLevel",
+      "add_prefix_space": false
+    },
+    "special_tokens": [
+      {
+        "token": "<|endoftext|>",
+        "token_id": 0,
+        "roles": [
+          "bos",
+          "document_boundary",
+          "eos",
+          "unk"
+        ]
+      }
+    ],
+    "padding_token": null,
+    "training_document_boundary_token_id": 0
+  },
+  "derivation": {
+    "decision": "doctrine/decisions/0012-d0-tokenizer-vocabulary-divergence.md",
+    "resolution": 1,
+    "rule": "remove every added_tokens entry whose id > 50256; preserve all other fields unchanged",
+    "source_tokenizer_json_sha256": "c24618a1b3e6a38167beff1c72cffd126c3a66254347304b50547d12c5f25624",
+    "source_manifest_sha256": "eedbff0dbc0af3dc89ebff34155c0c00e73b53a7c82b1611507bd7a5390bd58c",
+    "derivation_record": "experiments/d0/tokenizer-amendment-evidence/derivation-record.json"
+  },
+  "files": [
+    {
+      "path": "tokenizer.json",
+      "sha256": "c1e2f38b28b816e3af5a7047982b694c657222e4eb4bed647540801385770362",
+      "size_bytes": 2109961
+    }
+  ],
+  "file_count": 1,
+  "total_size_bytes": 2109961,
+  "manifest_sha256": "1142baf61c330a318be6e1b153f6769892a7f5af3b7241363a1d0a1f2ca453e1"
+}

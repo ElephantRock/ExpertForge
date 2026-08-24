@@ -38,8 +38,9 @@ from scripts.validate_d0_source_manifests import (
     load_json_object,
     validate_source_manifests,
 )
+from scripts.validate_d0_tokenizer_amendment import validate_all as validate_tokenizer_amendment
 
-_SCHEMA_VERSION = "expertforge-d0-ratification-validation/3"
+_SCHEMA_VERSION = "expertforge-d0-ratification-validation/4"
 _EXPECTED_VALIDATOR_ORDER = (
     "baseline_contract",
     "source_manifests",
@@ -52,6 +53,7 @@ _EXPECTED_VALIDATOR_ORDER = (
     "project_state",
     "primitive_semantics_amendment",
     "primitive_semantics_evidence",
+    "tokenizer_amendment",
 )
 _EXPECTED_REMAINING_BLOCKERS: tuple[str, ...] = ()
 _EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS = (
@@ -140,6 +142,10 @@ def _validate_primitive_evidence() -> ValidationReport:
     return validate_primitive_semantics_evidence()
 
 
+def _validate_tokenizer_amendment_step() -> ValidationReport:
+    return validate_tokenizer_amendment()
+
+
 VALIDATION_STEPS: tuple[ValidationStep, ...] = (
     ValidationStep("baseline_contract", _validate_baseline_contract),
     ValidationStep("source_manifests", _validate_source_manifests),
@@ -155,6 +161,7 @@ VALIDATION_STEPS: tuple[ValidationStep, ...] = (
     ValidationStep("project_state", _validate_current_project_state),
     ValidationStep("primitive_semantics_amendment", _validate_primitive_amendment),
     ValidationStep("primitive_semantics_evidence", _validate_primitive_evidence),
+    ValidationStep("tokenizer_amendment", _validate_tokenizer_amendment_step),
 )
 
 
@@ -221,6 +228,11 @@ def validate_all(
         "remaining_amendment_acceptance_blocker_count": len(
             _EXPECTED_AMENDMENT_ACCEPTANCE_BLOCKERS
         ),
+        "tokenizer_amendment_status": "proposed_not_ratified_awaiting_corpus_scan",
+        "tokenizer_amendment_blockers": [
+            "full_dual_tokenizer_corpus_scan_not_executed",
+            "amendment_review_not_yet_accepted",
+        ],
         "actual_corpus_scan_completed": False,
         "actual_corpus_scan_stage": "D0.1_preflight_before_packing_or_training",
         "d0_1_authorized": True,
