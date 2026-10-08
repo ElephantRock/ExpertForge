@@ -41,3 +41,23 @@ class MissingOptionalDependencyError(D0DataError, ImportError):
 
 class D0PreflightError(D0DataError):
     """Raised when the D0 preflight (source verification + contamination scan) fails."""
+
+
+class D0TrainingError(Exception):
+    """Base class for D0 production training-path failures."""
+
+
+class ScheduleError(D0TrainingError, ValueError):
+    """The frozen D0 learning-rate schedule contract was violated."""
+
+
+class OptimizerStateError(D0TrainingError, ValueError):
+    """D0 optimizer parameter grouping or state capture/restore failed."""
+
+
+class NonFiniteGradientError(D0TrainingError, ArithmeticError):
+    """A non-finite gradient was observed during the D0 training path."""
+
+
+class PrecisionPreflightError(D0TrainingError):
+    """The runtime environment fails the frozen D0 precision preflight."""
