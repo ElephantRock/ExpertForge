@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from expertforge.d0.training.thresholds import ThresholdDecision
+
 
 class D0DataError(Exception):
     """Base class for D0 data-preflight failures."""
@@ -61,3 +66,28 @@ class NonFiniteGradientError(D0TrainingError, ArithmeticError):
 
 class PrecisionPreflightError(D0TrainingError):
     """The runtime environment fails the frozen D0 precision preflight."""
+
+
+class TrainingKilledError(D0TrainingError):
+    """A kill-condition threshold fired; the training attempt must terminate.
+
+    Carries the :class:`~expertforge.d0.training.thresholds.ThresholdDecision`
+    (typed only — this module must not import the training package at runtime).
+    """
+
+    def __init__(self, decision: ThresholdDecision, *, diagnostic_code: str) -> None:
+        super().__init__(f"training killed: {decision.reason} [{diagnostic_code}]")
+        self.decision = decision
+        self.diagnostic_code = diagnostic_code
+
+
+class RunFailedError(D0TrainingError):
+    """A run-failure threshold fired; the attempt stops but is recorded.
+
+    Carries the :class:`~expertforge.d0.training.thresholds.ThresholdDecision`.
+    """
+
+    def __init__(self, decision: ThresholdDecision, *, diagnostic_code: str) -> None:
+        super().__init__(f"run failed: {decision.reason} [{diagnostic_code}]")
+        self.decision = decision
+        self.diagnostic_code = diagnostic_code

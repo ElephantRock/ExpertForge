@@ -180,3 +180,25 @@ class UpdateAccumulator:
         self._loss_sum = _FLOAT32(0.0)
         self._token_count = 0
         return float(mean)
+
+    def advance_to(self, global_update: int) -> None:
+        """Fast-forward the counters to a resumed position (restore path).
+
+        Only valid on a fresh accumulator at an update boundary: sets the
+        counter state as if ``global_update`` updates had completed. This is
+        the resume counterpart of the update-boundary invariants, never a
+        mid-update skip.
+        """
+
+        if self._update_open or self._accumulation_position != 0:
+            raise D0TrainingError("advance_to requires a closed update boundary")
+        if self._global_update != 0:
+            raise D0TrainingError(
+                f"advance_to requires a fresh accumulator; global_update = {self._global_update}"
+            )
+        if type(global_update) is not int or global_update < 0:
+            raise D0TrainingError(
+                f"global_update must be a non-negative exact integer; got {global_update!r}"
+            )
+        self._global_update = global_update
+        self._completed_microsteps = global_update * self._microsteps_per_update
